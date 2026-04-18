@@ -1,0 +1,61 @@
+{
+    "name": "ddiscord",
+    "description": "Another Discord library",
+    "authors": [
+        "solever"
+    ],
+    "license": "MIT",
+    "targetType": "library",
+    "dependencies": {
+        "aurora-websocket": "~>1.0.1",
+        "requests": "~>2.2.0"
+    },
+    "sourcePaths": [
+        "source"
+    ],
+    "importPaths": [
+        "source"
+    ],
+    "libs": [
+        "lua5.4"
+    ],
+    "configurations": [
+        {
+            "name": "library",
+            "targetType": "library"
+        },
+        {
+            "name": "example-basic-bot",
+            "targetType": "executable",
+            "targetName": "example-basic-bot",
+            "targetPath": "examples",
+            "sourcePaths": [
+                "source",
+                "examples"
+            ],
+            "mainSourceFile": "examples/basic_bot.d"
+        },
+        {
+            "name": "example-plugin-bot",
+            "targetType": "executable",
+            "targetName": "example-plugin-bot",
+            "targetPath": "examples",
+            "sourcePaths": [
+                "source",
+                "examples"
+            ],
+            "mainSourceFile": "examples/plugin_bot.d"
+        },
+        {
+            "name": "example-full-bot",
+            "targetType": "executable",
+            "targetName": "example-full-bot",
+            "targetPath": "examples",
+            "sourcePaths": [
+                "source",
+                "examples"
+            ],
+            "mainSourceFile": "examples/full_bot.d"
+        }
+    ]
+}
