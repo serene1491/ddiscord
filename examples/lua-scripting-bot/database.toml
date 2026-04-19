@@ -1,0 +1,3 @@
+[Database]
+Driver = "SQLite"
+Filename = "scripts.sqlite3"

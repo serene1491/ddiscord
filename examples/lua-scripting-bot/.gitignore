@@ -1,0 +1,4 @@
+migrations/
+
+lua-scripting-bot
+*.sqlite3

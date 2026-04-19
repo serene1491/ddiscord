@@ -1,0 +1,17 @@
+{
+    "name": "ddiscord-lua-scripting-bot",
+    "description": "Dorm-backed Lua scripting ddiscord example bot",
+    "targetType": "executable",
+    "targetName": "lua-scripting-bot",
+    "dependencies": {
+        "ddiscord": {
+            "path": "../.."
+        },
+        "dorm": "~>0.4.0",
+        "dorm:build-models": "~>0.4.0"
+    },
+    "sourcePaths": [
+        "source"
+    ],
+    "mainSourceFile": "source/app.d"
+}

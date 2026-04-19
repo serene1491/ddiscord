@@ -1,0 +1,20 @@
+{
+	"fileVersion": 1,
+	"versions": {
+		"aurora-websocket": "1.0.1",
+		"automem": "0.6.11",
+		"cachetools": "0.4.2",
+		"ddiscord": {"path":"../../"},
+		"dorm": "0.4.0",
+		"mir-algorithm": "3.22.4",
+		"mir-core": "1.7.4",
+		"mir-cpuid": "1.2.11",
+		"mir-ion": "2.3.5",
+		"mir-toml": "0.1.1",
+		"requests": "2.2.0",
+		"silly": "1.1.1",
+		"test_allocator": "0.3.4",
+		"toml": "2.0.1",
+		"unit-threaded": "2.1.9"
+	}
+}
