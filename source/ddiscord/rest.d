@@ -6,12 +6,18 @@
  */
 module ddiscord.rest;
 
+import core.sync.mutex : Mutex;
+import core.time : MonoTime;
 import ddiscord.core.http.client : HttpClient, HttpClientConfig, HttpError, HttpErrorKind,
     HttpMethod, HttpRequest, HttpResponse, HttpTransport;
 import ddiscord.core.rest.rate_limiter : RestRateLimiter;
-import ddiscord.models.application_command : ApplicationCommandDefinition;
+import ddiscord.models.application_command : ApplicationCommandDefinition, AutocompleteChoice;
+import ddiscord.models.channel : Channel;
+import ddiscord.models.guild : Guild;
 import ddiscord.models.interaction : Interaction;
+import ddiscord.models.member : GuildMember;
 import ddiscord.models.message : Message, MessageCreate, MessageFlags;
+import ddiscord.models.role : Role;
 import ddiscord.models.user : User;
 import ddiscord.tasks : Task;
 import ddiscord.util.errors : formatError;
@@ -47,6 +53,7 @@ struct RestClientConfig
     string userAgent = "DiscordBot (https://github.com/yourorg/ddiscord, 0.1.0)";
     Duration timeout = dur!"seconds"(15);
     Nullable!HttpTransport transport;
+    LatencySample* latencyTarget;
 }
 
 /// Session start limits returned by `GET /gateway/bot`.
@@ -76,28 +83,41 @@ enum InteractionCallbackType : int
 
 private final class MessageHistory
 {
+    private Mutex _mutex;
     private Message[] _messages;
     private ulong _nextId = 1;
 
+    this()
+    {
+        _mutex = new Mutex;
+    }
+
     void store(Message message)
     {
-        if (message.id.value == 0)
-            message.id = Snowflake(_nextId++);
-        _messages ~= message;
+        synchronized (_mutex)
+        {
+            if (message.id.value == 0)
+                message.id = Snowflake(_nextId++);
+            _messages ~= message;
+        }
     }
 
     Message[] items()
     {
-        return _messages.dup;
+        synchronized (_mutex)
+            return _messages.dup;
     }
 
     Message[] inChannel(Snowflake channelId)
     {
         Message[] items;
-        foreach (message; _messages)
+        synchronized (_mutex)
         {
-            if (message.channelId == channelId)
-                items ~= message;
+            foreach (message; _messages)
+            {
+                if (message.channelId == channelId)
+                    items ~= message;
+            }
         }
         return items;
     }
@@ -105,17 +125,27 @@ private final class MessageHistory
 
 private final class ApplicationCommandStore
 {
+    private Mutex _mutex;
     private ApplicationCommandDefinition[] _commands;
+
+    this()
+    {
+        _mutex = new Mutex;
+    }
 
     ApplicationCommandDefinition[] overwrite(ApplicationCommandDefinition[] definitions)
     {
-        _commands = definitions.dup;
-        return _commands.dup;
+        synchronized (_mutex)
+        {
+            _commands = definitions.dup;
+            return _commands.dup;
+        }
     }
 
     ApplicationCommandDefinition[] items()
     {
-        return _commands.dup;
+        synchronized (_mutex)
+            return _commands.dup;
     }
 }
 
@@ -125,10 +155,12 @@ private final class RealDiscordRest
     private HttpClient _http;
     private RestRateLimiter _limiter;
     private Nullable!Snowflake _resolvedApplicationId;
+    private LatencySample* _latencyTarget;
 
     this(RestClientConfig config)
     {
         _config = config;
+        _latencyTarget = config.latencyTarget;
 
         HttpClientConfig httpConfig;
         httpConfig.baseUrl = config.apiBase;
@@ -277,6 +309,69 @@ private final class RealDiscordRest
         return Result!(GatewayBotInfo, string).ok(info);
     }
 
+    Result!(Guild, string) getGuild(Snowflake guildId)
+    {
+        auto request = perform(HttpMethod.Get, "GET:/guilds/{guild_id}", "/guilds/" ~ guildId.toString);
+        if (request.isErr)
+            return Result!(Guild, string).err(request.error);
+
+        auto json = request.value.json();
+        if (json.isErr)
+            return Result!(Guild, string).err(formatError("rest", "Discord returned an invalid guild payload.", json.error));
+
+        return Result!(Guild, string).ok(Guild.fromJSON(json.value));
+    }
+
+    Result!(GuildMember, string) getGuildMember(Snowflake guildId, Snowflake userId)
+    {
+        auto request = perform(
+            HttpMethod.Get,
+            "GET:/guilds/{guild_id}/members/{user_id}",
+            "/guilds/" ~ guildId.toString ~ "/members/" ~ userId.toString
+        );
+        if (request.isErr)
+            return Result!(GuildMember, string).err(request.error);
+
+        auto json = request.value.json();
+        if (json.isErr)
+            return Result!(GuildMember, string).err(formatError("rest", "Discord returned an invalid guild-member payload.", json.error));
+
+        return Result!(GuildMember, string).ok(GuildMember.fromJSON(json.value));
+    }
+
+    Result!(Role[], string) listGuildRoles(Snowflake guildId)
+    {
+        auto request = perform(
+            HttpMethod.Get,
+            "GET:/guilds/{guild_id}/roles",
+            "/guilds/" ~ guildId.toString ~ "/roles"
+        );
+        if (request.isErr)
+            return Result!(Role[], string).err(request.error);
+
+        auto json = request.value.json();
+        if (json.isErr)
+            return Result!(Role[], string).err(formatError("rest", "Discord returned an invalid guild-role list.", json.error));
+
+        Role[] roles;
+        foreach (item; json.value.array)
+            roles ~= Role.fromJSON(item);
+        return Result!(Role[], string).ok(roles);
+    }
+
+    Result!(Channel, string) getChannel(Snowflake channelId)
+    {
+        auto request = perform(HttpMethod.Get, "GET:/channels/{channel_id}", "/channels/" ~ channelId.toString);
+        if (request.isErr)
+            return Result!(Channel, string).err(request.error);
+
+        auto json = request.value.json();
+        if (json.isErr)
+            return Result!(Channel, string).err(formatError("rest", "Discord returned an invalid channel payload.", json.error));
+
+        return Result!(Channel, string).ok(Channel.fromJSON(json.value));
+    }
+
     Result!(bool, string) respondToInteraction(
         Snowflake interactionId,
         string interactionToken,
@@ -322,6 +417,94 @@ private final class RealDiscordRest
         return Result!(bool, string).ok(true);
     }
 
+    Result!(bool, string) respondAutocomplete(
+        Snowflake interactionId,
+        string interactionToken,
+        AutocompleteChoice[] choices
+    )
+    {
+        JSONValue body;
+        body["type"] = cast(int) InteractionCallbackType.ApplicationCommandAutocompleteResult;
+
+        JSONValue data;
+        JSONValue[] choiceValues;
+        foreach (choice; choices)
+        {
+            JSONValue jsonChoice;
+            jsonChoice["name"] = choice.name;
+            jsonChoice["value"] = choice.value;
+            choiceValues ~= jsonChoice;
+        }
+        data["choices"] = choiceValues;
+        body["data"] = data;
+
+        auto request = jsonRequest(
+            HttpMethod.Post,
+            "POST:/interactions/{interaction_id}/{interaction_token}/callback",
+            "/interactions/" ~ interactionId.toString ~ "/" ~ interactionToken ~ "/callback",
+            body,
+            false
+        );
+        if (request.isErr)
+            return Result!(bool, string).err(request.error);
+
+        return Result!(bool, string).ok(true);
+    }
+
+    Result!(Message, string) createFollowupMessage(string interactionToken, MessageCreate payload)
+    {
+        auto validation = payload.validate();
+        if (validation.isErr)
+            return Result!(Message, string).err(formatError("rest", "Cannot create an interaction follow-up message.", validation.error));
+
+        auto applicationId = resolveApplicationId();
+        if (applicationId.isErr)
+            return Result!(Message, string).err(applicationId.error);
+
+        auto request = jsonRequest(
+            HttpMethod.Post,
+            "POST:/webhooks/{application_id}/{interaction_token}",
+            "/webhooks/" ~ applicationId.value.toString ~ "/" ~ interactionToken,
+            payload.toJSON(),
+            false
+        );
+        if (request.isErr)
+            return Result!(Message, string).err(request.error);
+
+        auto json = request.value.json();
+        if (json.isErr)
+            return Result!(Message, string).err(formatError("rest", "Discord returned an invalid interaction follow-up payload.", json.error));
+
+        return Result!(Message, string).ok(Message.fromJSON(json.value));
+    }
+
+    Result!(Message, string) editOriginalInteractionResponse(string interactionToken, MessageCreate payload)
+    {
+        auto validation = payload.validate();
+        if (validation.isErr)
+            return Result!(Message, string).err(formatError("rest", "Cannot edit the original interaction response.", validation.error));
+
+        auto applicationId = resolveApplicationId();
+        if (applicationId.isErr)
+            return Result!(Message, string).err(applicationId.error);
+
+        auto request = jsonRequest(
+            HttpMethod.Patch,
+            "PATCH:/webhooks/{application_id}/{interaction_token}/messages/@original",
+            "/webhooks/" ~ applicationId.value.toString ~ "/" ~ interactionToken ~ "/messages/@original",
+            payload.toJSON(),
+            false
+        );
+        if (request.isErr)
+            return Result!(Message, string).err(request.error);
+
+        auto json = request.value.json();
+        if (json.isErr)
+            return Result!(Message, string).err(formatError("rest", "Discord returned an invalid original-response edit payload.", json.error));
+
+        return Result!(Message, string).ok(Message.fromJSON(json.value));
+    }
+
     private Result!(HttpResponse, string) jsonRequest(
         HttpMethod method,
         string routeKey,
@@ -357,8 +540,10 @@ private final class RealDiscordRest
 
         while (true)
         {
+            auto startedAt = MonoTime.currTime;
             _limiter.acquire(routeKey);
             auto response = _http.send(request);
+            recordLatency(startedAt);
 
             if (response.isOk)
             {
@@ -381,6 +566,13 @@ private final class RealDiscordRest
 
             return Result!(HttpResponse, string).err(response.error.message);
         }
+    }
+
+    private void recordLatency(MonoTime startedAt)
+    {
+        if (_latencyTarget is null)
+            return;
+        (*_latencyTarget).milliseconds = (MonoTime.currTime - startedAt).total!"msecs";
     }
 
     private Result!(Snowflake, string) resolveApplicationId()
@@ -409,21 +601,7 @@ private final class RealDiscordRest
 
 private ApplicationCommandDefinition commandDefinitionFromJSON(JSONValue json)
 {
-    ApplicationCommandDefinition definition;
-
-    auto nameValue = json.object.get("name", JSONValue.init);
-    if (nameValue.type != JSONType.null_)
-        definition.name = nameValue.str;
-
-    auto descriptionValue = json.object.get("description", JSONValue.init);
-    if (descriptionValue.type != JSONType.null_)
-        definition.description = descriptionValue.str;
-
-    auto typeValue = json.object.get("type", JSONValue.init);
-    if (typeValue.type != JSONType.null_)
-        definition.type = cast(typeof(definition.type)) cast(int) typeValue.integer;
-
-    return definition;
+    return ApplicationCommandDefinition.fromJSON(json);
 }
 
 /// Message endpoints surface.
@@ -567,6 +745,80 @@ final class GatewayEndpoints
     }
 }
 
+/// Guild-related REST surface.
+final class GuildsEndpoints
+{
+    private Nullable!RealDiscordRest _real;
+
+    this(Nullable!RealDiscordRest realTransport)
+    {
+        _real = realTransport;
+    }
+
+    /// Returns a guild descriptor by id.
+    Task!Guild get(Snowflake guildId)
+    {
+        if (_real.isNull)
+            return Task!Guild.failure(formatError("rest", "Cannot fetch a guild because the REST transport is not configured.", "", "Provide a bot token or a transport before reading guild metadata."));
+
+        auto guild = _real.get.getGuild(guildId);
+        if (guild.isErr)
+            return Task!Guild.failure(guild.error);
+
+        return Task!Guild.success(guild.value);
+    }
+
+    /// Returns a guild member descriptor by guild and user id.
+    Task!GuildMember member(Snowflake guildId, Snowflake userId)
+    {
+        if (_real.isNull)
+            return Task!GuildMember.failure(formatError("rest", "Cannot fetch a guild member because the REST transport is not configured.", "", "Provide a bot token or a transport before reading guild members."));
+
+        auto member = _real.get.getGuildMember(guildId, userId);
+        if (member.isErr)
+            return Task!GuildMember.failure(member.error);
+
+        return Task!GuildMember.success(member.value);
+    }
+
+    /// Lists the roles for a guild.
+    Task!(Role[]) roles(Snowflake guildId)
+    {
+        if (_real.isNull)
+            return Task!(Role[]).failure(formatError("rest", "Cannot list guild roles because the REST transport is not configured.", "", "Provide a bot token or a transport before reading guild roles."));
+
+        auto roles = _real.get.listGuildRoles(guildId);
+        if (roles.isErr)
+            return Task!(Role[]).failure(roles.error);
+
+        return Task!(Role[]).success(roles.value);
+    }
+}
+
+/// Channel-related REST surface.
+final class ChannelsEndpoints
+{
+    private Nullable!RealDiscordRest _real;
+
+    this(Nullable!RealDiscordRest realTransport)
+    {
+        _real = realTransport;
+    }
+
+    /// Returns a channel descriptor by id.
+    Task!Channel get(Snowflake channelId)
+    {
+        if (_real.isNull)
+            return Task!Channel.failure(formatError("rest", "Cannot fetch a channel because the REST transport is not configured.", "", "Provide a bot token or a transport before reading channel metadata."));
+
+        auto channel = _real.get.getChannel(channelId);
+        if (channel.isErr)
+            return Task!Channel.failure(channel.error);
+
+        return Task!Channel.success(channel.value);
+    }
+}
+
 /// Interaction callback REST surface.
 final class InteractionsEndpoints
 {
@@ -597,6 +849,23 @@ final class InteractionsEndpoints
         return Task!void.success();
     }
 
+    /// Sends autocomplete choices for an interaction.
+    Task!void respondAutocomplete(
+        Snowflake interactionId,
+        string interactionToken,
+        AutocompleteChoice[] choices
+    )
+    {
+        if (_real.isNull)
+            return Task!void.failure(formatError("rest", "Cannot respond to autocomplete because the REST transport is not configured.", "", "Configure a bot token or inject a transport before sending autocomplete results."));
+
+        auto sent = _real.get.respondAutocomplete(interactionId, interactionToken, choices);
+        if (sent.isErr)
+            return Task!void.failure(sent.error);
+
+        return Task!void.success();
+    }
+
     /// Sends a deferred interaction acknowledgement.
     Task!void deferMessage(Snowflake interactionId, string interactionToken, bool ephemeral = false)
     {
@@ -618,6 +887,34 @@ final class InteractionsEndpoints
 
         return Task!void.success();
     }
+
+    /// Sends a follow-up message after the initial interaction acknowledgement.
+    Task!Message followupMessage(string interactionToken, MessageCreate payload)
+    {
+        if (_real.isNull)
+            return Task!Message.failure(formatError("rest", "Cannot send an interaction follow-up because the REST transport is not configured.", "", "Configure a bot token or inject a transport before sending follow-up messages."));
+
+        auto created = _real.get.createFollowupMessage(interactionToken, payload);
+        if (created.isErr)
+            return Task!Message.failure(created.error);
+
+        _history.store(created.value);
+        return Task!Message.success(created.value);
+    }
+
+    /// Edits the original interaction response.
+    Task!Message editOriginalMessage(string interactionToken, MessageCreate payload)
+    {
+        if (_real.isNull)
+            return Task!Message.failure(formatError("rest", "Cannot edit the original interaction response because the REST transport is not configured.", "", "Configure a bot token or inject a transport before editing interaction responses."));
+
+        auto edited = _real.get.editOriginalInteractionResponse(interactionToken, payload);
+        if (edited.isErr)
+            return Task!Message.failure(edited.error);
+
+        _history.store(edited.value);
+        return Task!Message.success(edited.value);
+    }
 }
 
 /// REST client surface.
@@ -631,6 +928,8 @@ final class RestClient
     ApplicationCommandsEndpoints applicationCommands;
     UsersEndpoints users;
     GatewayEndpoints gateway;
+    GuildsEndpoints guilds;
+    ChannelsEndpoints channels;
     InteractionsEndpoints interactions;
     LatencySample latency;
 
@@ -640,6 +939,7 @@ final class RestClient
         _history = new MessageHistory;
         _commands = new ApplicationCommandStore;
 
+        config.latencyTarget = &latency;
         if (config.token.length != 0 || !config.transport.isNull)
             _real = Nullable!RealDiscordRest.of(new RealDiscordRest(config));
 
@@ -647,6 +947,8 @@ final class RestClient
         applicationCommands = new ApplicationCommandsEndpoints(_commands, _real);
         users = new UsersEndpoints(_real);
         gateway = new GatewayEndpoints(_real);
+        guilds = new GuildsEndpoints(_real);
+        channels = new ChannelsEndpoints(_real);
         interactions = new InteractionsEndpoints(_history, _real);
     }
 

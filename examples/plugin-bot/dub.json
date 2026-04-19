@@ -1,0 +1,16 @@
+{
+    "name": "ddiscord-plugin-bot",
+    "description": "Plugin and Lua ddiscord example bot",
+    "targetType": "executable",
+    "targetName": "plugin-bot",
+    "targetPath": ".",
+    "dependencies": {
+        "ddiscord": {
+            "path": "../.."
+        }
+    },
+    "sourcePaths": [
+        "source"
+    ],
+    "mainSourceFile": "source/app.d"
+}

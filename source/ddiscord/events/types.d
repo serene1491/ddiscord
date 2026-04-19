@@ -20,6 +20,11 @@ struct ReadyEvent
     string sessionId;
 }
 
+/// Gateway resumed event.
+struct ResumedEvent
+{
+}
+
 /// Guild member add event.
 struct GuildMemberAddEvent
 {

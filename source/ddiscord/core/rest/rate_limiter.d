@@ -6,6 +6,7 @@
  */
 module ddiscord.core.rest.rate_limiter;
 
+import core.sync.mutex : Mutex;
 import ddiscord.util.errors : formatError;
 import ddiscord.util.limits : DiscordGlobalRestRequestsPerSecond;
 import ddiscord.util.optional : Nullable;
@@ -38,26 +39,42 @@ struct RateLimitBucketState
 /// Blocking REST rate limiter for sequential client usage.
 final class RestRateLimiter
 {
+    private Mutex _stateMutex;
     private RateLimitBucketState[string] _bucketStates;
     private string[string] _routeToBucket;
     private SysTime _globalResetAt;
 
+    this()
+    {
+        _stateMutex = new Mutex;
+    }
+
     /// Waits until a route is safe to call again.
     void acquire(string routeKey)
     {
-        waitUntilGlobalReady();
+        Duration waitTime = Duration.zero;
 
-        auto bucketId = routeKeyToBucket(routeKey);
-        if (bucketId.isNull)
-            return;
+        synchronized (_stateMutex)
+        {
+            auto now = Clock.currTime;
+            if (_globalResetAt > now)
+                waitTime = _globalResetAt - now;
 
-        auto statePtr = bucketId.get in _bucketStates;
-        if (statePtr is null)
-            return;
+            auto bucketId = routeKeyToBucket(routeKey);
+            if (!bucketId.isNull)
+            {
+                auto statePtr = bucketId.get in _bucketStates;
+                if (statePtr !is null && (*statePtr).remaining <= 0 && (*statePtr).resetAt > now)
+                {
+                    auto bucketWait = (*statePtr).resetAt - now;
+                    if (bucketWait > waitTime)
+                        waitTime = bucketWait;
+                }
+            }
+        }
 
-        auto now = Clock.currTime;
-        if ((*statePtr).remaining <= 0 && (*statePtr).resetAt > now)
-            sleepFor((*statePtr).resetAt - now);
+        if (waitTime > Duration.zero)
+            sleepFor(waitTime);
     }
 
     /// Updates bucket and global state from a response.
@@ -70,56 +87,59 @@ final class RestRateLimiter
     {
         RateLimitOutcome outcome;
 
-        auto bucketId = getHeader(headers, "x-ratelimit-bucket");
-        if (!bucketId.isNull)
-            _routeToBucket[routeKey] = bucketId.get;
-
-        auto effectiveBucket = routeKeyToBucket(routeKey).getOr("");
-        if (effectiveBucket.length != 0)
+        synchronized (_stateMutex)
         {
-            auto state = _bucketStates.get(effectiveBucket, RateLimitBucketState.init);
-            state.bucketId = effectiveBucket;
+            auto bucketId = getHeader(headers, "x-ratelimit-bucket");
+            if (!bucketId.isNull)
+                _routeToBucket[routeKey] = bucketId.get;
 
-            auto limit = parseUIntHeader(headers, "x-ratelimit-limit");
-            if (!limit.isNull)
-                state.limit = limit.get;
-
-            auto remaining = parseIntHeader(headers, "x-ratelimit-remaining");
-            if (!remaining.isNull)
-                state.remaining = remaining.get;
-
-            auto resetAfter = parseDurationHeader(headers, "x-ratelimit-reset-after");
-            if (!resetAfter.isNull)
-                state.resetAt = Clock.currTime + resetAfter.get;
-
-            _bucketStates[effectiveBucket] = state;
-        }
-
-        if (statusCode != 429)
-            return outcome;
-
-        auto retryAfter = parseRetryAfter(headers, body);
-        auto scopeName = getHeader(headers, "x-ratelimit-scope").getOr("");
-        auto isGlobal = getHeader(headers, "x-ratelimit-global").getOr("") == "true" || scopeName == "global";
-
-        if (retryAfter.isNull && isGlobal)
-            retryAfter = Nullable!Duration.of(dur!"seconds"(60));
-
-        if (!retryAfter.isNull)
-        {
-            outcome.shouldRetry = true;
-            outcome.waitTime = retryAfter.get;
-            outcome.global = isGlobal;
-
-            if (isGlobal)
-                _globalResetAt = Clock.currTime + retryAfter.get;
-            else if (effectiveBucket.length != 0)
+            auto effectiveBucket = routeKeyToBucket(routeKey).getOr("");
+            if (effectiveBucket.length != 0)
             {
                 auto state = _bucketStates.get(effectiveBucket, RateLimitBucketState.init);
                 state.bucketId = effectiveBucket;
-                state.remaining = 0;
-                state.resetAt = Clock.currTime + retryAfter.get;
+
+                auto limit = parseUIntHeader(headers, "x-ratelimit-limit");
+                if (!limit.isNull)
+                    state.limit = limit.get;
+
+                auto remaining = parseIntHeader(headers, "x-ratelimit-remaining");
+                if (!remaining.isNull)
+                    state.remaining = remaining.get;
+
+                auto resetAfter = parseDurationHeader(headers, "x-ratelimit-reset-after");
+                if (!resetAfter.isNull)
+                    state.resetAt = Clock.currTime + resetAfter.get;
+
                 _bucketStates[effectiveBucket] = state;
+            }
+
+            if (statusCode != 429)
+                return outcome;
+
+            auto retryAfter = parseRetryAfter(headers, body);
+            auto scopeName = getHeader(headers, "x-ratelimit-scope").getOr("");
+            auto isGlobal = getHeader(headers, "x-ratelimit-global").getOr("") == "true" || scopeName == "global";
+
+            if (retryAfter.isNull && isGlobal)
+                retryAfter = Nullable!Duration.of(dur!"seconds"(60));
+
+            if (!retryAfter.isNull)
+            {
+                outcome.shouldRetry = true;
+                outcome.waitTime = retryAfter.get;
+                outcome.global = isGlobal;
+
+                if (isGlobal)
+                    _globalResetAt = Clock.currTime + retryAfter.get;
+                else if (effectiveBucket.length != 0)
+                {
+                    auto state = _bucketStates.get(effectiveBucket, RateLimitBucketState.init);
+                    state.bucketId = effectiveBucket;
+                    state.remaining = 0;
+                    state.resetAt = Clock.currTime + retryAfter.get;
+                    _bucketStates[effectiveBucket] = state;
+                }
             }
         }
 
@@ -130,14 +150,6 @@ final class RestRateLimiter
     uint globalRequestsPerSecond() const @property
     {
         return DiscordGlobalRestRequestsPerSecond;
-    }
-
-    private void waitUntilGlobalReady()
-    {
-        if (_globalResetAt <= Clock.currTime)
-            return;
-
-        sleepFor(_globalResetAt - Clock.currTime);
     }
 
     private Nullable!string routeKeyToBucket(string routeKey)

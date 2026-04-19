@@ -11,6 +11,7 @@ import aurora_websocket.connection : ConnectionMode, WebSocketClosedException, W
     WebSocketConnection;
 import aurora_websocket.message : MessageType;
 import aurora_websocket.stream : IWebSocketStream, WebSocketStreamException;
+import core.sync.mutex : Mutex;
 import core.thread : Thread;
 import core.time : Duration, MonoTime, dur;
 import ddiscord.models.interaction : Interaction;
@@ -24,6 +25,7 @@ import requests.streams : ConnectError, NetworkStream, SSLSocketStream,
 import std.algorithm : canFind;
 import std.conv : to;
 import std.json : JSONType, JSONValue, parseJSON;
+import std.random : uniform;
 import std.string : endsWith, startsWith;
 
 /// Gateway opcode values used by Discord.
@@ -47,7 +49,7 @@ struct GatewayClientConfig
     uint intents;
     string url;
     Duration connectTimeout = dur!"seconds"(15);
-    Duration pollTimeout = dur!"msecs"(500);
+    Duration pollTimeout = dur!"msecs"(250);
     Duration reconnectDelay = dur!"seconds"(2);
     Duration maxReconnectDelay = dur!"seconds"(30);
     bool autoReconnect = true;
@@ -69,26 +71,51 @@ private struct GatewayEnvelope
     JSONValue data;
 }
 
+private enum GatewaySessionMode
+{
+    Identify,
+    Resume,
+}
+
+private enum GatewayCloseCode : int
+{
+    NormalClosure = 1000,
+    GoingAway = 1001,
+    AuthenticationFailed = 4004,
+    InvalidSeq = 4007,
+    SessionTimedOut = 4009,
+    InvalidShard = 4010,
+    ShardingRequired = 4011,
+    InvalidApiVersion = 4012,
+    InvalidIntents = 4013,
+    DisallowedIntents = 4014,
+}
+
 private final class RequestsWebSocketStreamAdapter : IWebSocketStream
 {
     private NetworkStream _stream;
+    private bool _closed;
 
     this(NetworkStream stream)
     {
         _stream = stream;
+        _closed = stream is null;
     }
 
     override ubyte[] read(ubyte[] buffer) @trusted
     {
         enforceOpen();
 
-        try
-        {
-            auto received = _stream.receive(buffer);
-            if (received <= 0)
-                return [];
-            return buffer[0 .. received];
-        }
+            try
+            {
+                auto received = _stream.receive(buffer);
+                if (received <= 0)
+                {
+                    _closed = true;
+                    return [];
+                }
+                return buffer[0 .. received];
+            }
         catch (TimeoutException)
         {
             return [];
@@ -114,7 +141,10 @@ private final class RequestsWebSocketStreamAdapter : IWebSocketStream
             {
                 auto received = _stream.receive(buffer[offset .. $]);
                 if (received <= 0)
+                {
+                    _closed = true;
                     throw streamError("read from the Discord gateway", "The socket closed before the requested payload was fully received.");
+                }
                 offset += cast(size_t) received;
             }
             catch (TimeoutException)
@@ -145,7 +175,10 @@ private final class RequestsWebSocketStreamAdapter : IWebSocketStream
             {
                 auto sent = _stream.send(data[offset .. $]);
                 if (sent <= 0)
+                {
+                    _closed = true;
                     throw streamError("write to the Discord gateway", "The socket closed before the frame was sent.");
+                }
                 offset += cast(size_t) sent;
             }
             catch (Exception e)
@@ -161,18 +194,12 @@ private final class RequestsWebSocketStreamAdapter : IWebSocketStream
 
     override @property bool connected() @trusted nothrow
     {
-        try
-        {
-            return _stream !is null && _stream.isConnected;
-        }
-        catch (Throwable)
-        {
-            return false;
-        }
+        return _stream !is null && !_closed;
     }
 
     override void close() @trusted
     {
+        _closed = true;
         if (_stream !is null)
             _stream.close();
     }
@@ -200,6 +227,7 @@ final class GatewayClient
     GatewayClientConfig config;
     void delegate(GatewayReadyInfo) onReady;
     void delegate() onResumed;
+    void delegate(string) onStatus;
     void delegate(Message) onMessageCreate;
     void delegate(Interaction) onInteractionCreate;
     void delegate(string) onError;
@@ -211,28 +239,38 @@ final class GatewayClient
     private string _sessionId;
     private string _resumeGatewayUrl;
     private string _lastError;
+    private GatewaySessionMode _nextSessionMode = GatewaySessionMode.Identify;
+    private bool _fatalShutdownRequested;
+    private Mutex _sendMutex;
+    private Mutex _heartbeatMutex;
+    private Thread _heartbeatThread;
+    private bool _heartbeatLoopRunning;
+    private bool _awaitingHeartbeatAck;
     private RequestsWebSocketStreamAdapter _stream;
     private WebSocketConnection _socket;
 
     this(GatewayClientConfig config)
     {
         this.config = config;
+        _sendMutex = new Mutex;
+        _heartbeatMutex = new Mutex;
     }
 
     /// Runs the gateway loop until stopped or a fatal error occurs.
     void run()
     {
         _running = true;
+        _fatalShutdownRequested = false;
         auto reconnectDelay = config.reconnectDelay;
 
-        while (!_stopRequested)
+        while (!_stopRequested && !_fatalShutdownRequested)
         {
             try
             {
                 connectAndRun();
                 reconnectDelay = config.reconnectDelay;
 
-                if (_stopRequested || !config.autoReconnect)
+                if (_stopRequested || _fatalShutdownRequested || !config.autoReconnect)
                     break;
             }
             catch (Throwable error)
@@ -247,7 +285,7 @@ final class GatewayClient
                 if (onError !is null)
                     onError(_lastError);
 
-                if (_stopRequested || !config.autoReconnect)
+                if (_stopRequested || _fatalShutdownRequested || !config.autoReconnect)
                     break;
             }
 
@@ -258,7 +296,7 @@ final class GatewayClient
             }
         }
 
-        close();
+        close(_stopRequested);
         _running = false;
     }
 
@@ -266,7 +304,8 @@ final class GatewayClient
     void stop()
     {
         _stopRequested = true;
-        close();
+        stopHeartbeatLoop();
+        abortCurrentConnection();
     }
 
     /// Returns whether the gateway loop is active.
@@ -314,7 +353,11 @@ final class GatewayClient
     private void connectAndRun()
     {
         _ready = false;
-        scope(exit) close();
+        scope(exit)
+        {
+            stopHeartbeatLoop();
+            close(_stopRequested || _fatalShutdownRequested);
+        }
 
         auto url = normalizedGatewayUrl(activeGatewayUrl());
         auto parsed = parseWebSocketUrl(url);
@@ -329,7 +372,9 @@ final class GatewayClient
         }
 
         auto networkStream = openNetworkStream(parsed.host, parsed.port, parsed.isSecure);
-        networkStream.readTimeout = config.pollTimeout;
+        networkStream.readTimeout = config.connectTimeout;
+        if (onStatus !is null)
+            onStatus("Opened the Discord gateway TCP/TLS connection to `" ~ parsed.host ~ "`.");
 
         _stream = new RequestsWebSocketStreamAdapter(networkStream);
 
@@ -338,6 +383,7 @@ final class GatewayClient
         wsConfig.maxFrameSize = 8 * 1024 * 1024;
         wsConfig.maxMessageSize = 8 * 1024 * 1024;
         _socket = WebSocketClient.connect(_stream, url, wsConfig);
+        networkStream.readTimeout = Duration.init;
 
         auto hello = receiveEnvelope();
         if (hello.opcode != GatewayOpcode.Hello)
@@ -351,35 +397,16 @@ final class GatewayClient
         }
 
         auto heartbeatInterval = parseHeartbeatInterval(hello.data);
-        if (_sessionId.length != 0 && !_sequence.isNull)
+        if (onStatus !is null)
+            onStatus("Received HELLO from Discord with heartbeat interval `" ~ heartbeatInterval.total!"msecs".to!string ~ "ms`.");
+        startHeartbeatLoop(firstHeartbeatDelay(heartbeatInterval), heartbeatInterval);
+        if (_nextSessionMode == GatewaySessionMode.Resume && canResumeSession())
             sendResume();
         else
             sendIdentify();
 
-        auto nextHeartbeat = MonoTime.currTime;
-        auto lastAck = MonoTime.currTime;
-        bool awaitingAck;
-
-        while (!_stopRequested && _socket !is null && _socket.connected)
+        while (!_stopRequested && _socket !is null)
         {
-            auto now = MonoTime.currTime;
-            if (now >= nextHeartbeat)
-            {
-                if (awaitingAck && now - lastAck >= heartbeatInterval + heartbeatInterval)
-                {
-                    throw new DdiscordException(formatError(
-                        "gateway",
-                        "Discord stopped acknowledging heartbeats.",
-                        "No HEARTBEAT_ACK arrived within two heartbeat windows.",
-                        "The client will reconnect and resume the session if possible."
-                    ));
-                }
-
-                sendHeartbeat();
-                awaitingAck = true;
-                nextHeartbeat = now + heartbeatInterval;
-            }
-
             try
             {
                 auto envelope = receiveEnvelope();
@@ -397,14 +424,15 @@ final class GatewayClient
                         break;
 
                     case GatewayOpcode.HeartbeatAck:
-                        awaitingAck = false;
-                        lastAck = MonoTime.currTime;
+                        synchronized (_heartbeatMutex)
+                            _awaitingHeartbeatAck = false;
                         break;
 
                     case GatewayOpcode.PresenceUpdate:
                         break;
 
                     case GatewayOpcode.Reconnect:
+                        _nextSessionMode = GatewaySessionMode.Resume;
                         throw new DdiscordException(formatError(
                             "gateway",
                             "Discord requested a gateway reconnect.",
@@ -413,18 +441,21 @@ final class GatewayClient
                         ));
 
                     case GatewayOpcode.InvalidSession:
-                        auto resumable = envelope.data.type == JSONType.true_;
-                        if (!resumable)
+                        auto resumable = parseInvalidSessionFlag(envelope.data);
+                        if (resumable && canResumeSession())
+                            _nextSessionMode = GatewaySessionMode.Resume;
+                        else
                         {
-                            _sessionId = "";
-                            _resumeGatewayUrl = "";
-                            _sequence = Nullable!long.init;
+                            clearSession();
+                            _nextSessionMode = GatewaySessionMode.Identify;
                         }
-                        Thread.sleep(dur!"seconds"(2));
+                        Thread.sleep(invalidSessionReconnectDelay());
                         throw new DdiscordException(formatError(
                             "gateway",
                             "Discord invalidated the current gateway session.",
-                            resumable ? "Discord indicated that the session may still be resumable." : "Discord indicated that a fresh IDENTIFY is required.",
+                            resumable
+                                ? "Discord indicated that the session may still be resumable."
+                                : "Discord indicated that a fresh IDENTIFY is required.",
                             "The client will reconnect automatically."
                         ));
 
@@ -436,17 +467,39 @@ final class GatewayClient
             }
             catch (WebSocketClosedException error)
             {
+                auto closeCode = cast(int) error.code;
+                if (isFatalCloseCode(closeCode))
+                {
+                    clearSession();
+                    _fatalShutdownRequested = true;
+                }
+                else if (requiresFreshIdentify(closeCode))
+                {
+                    clearSession();
+                    _nextSessionMode = GatewaySessionMode.Identify;
+                }
+                else if (canResumeSession())
+                {
+                    _nextSessionMode = GatewaySessionMode.Resume;
+                }
+                else
+                {
+                    _nextSessionMode = GatewaySessionMode.Identify;
+                }
+
                 throw new DdiscordException(formatError(
                     "gateway",
                     "The Discord gateway connection closed.",
                     "Code `" ~ (cast(int) error.code).to!string ~ "` reason `" ~ error.reason ~ "`.",
-                    "The client will reconnect automatically unless shutdown was requested."
+                    fatalCloseHint(closeCode)
                 ));
             }
             catch (WebSocketStreamException error)
             {
                 if (isTimeoutError(error))
                     continue;
+                if (canResumeSession())
+                    _nextSessionMode = GatewaySessionMode.Resume;
                 throw new DdiscordException(error.msg);
             }
         }
@@ -471,6 +524,7 @@ final class GatewayClient
             info.sessionId = _sessionId;
             info.resumeGatewayUrl = _resumeGatewayUrl;
             _ready = true;
+            _nextSessionMode = GatewaySessionMode.Resume;
 
             if (onReady !is null)
                 onReady(info);
@@ -480,6 +534,7 @@ final class GatewayClient
         if (envelope.eventName == "RESUMED")
         {
             _ready = true;
+            _nextSessionMode = GatewaySessionMode.Resume;
             if (onResumed !is null)
                 onResumed();
             return;
@@ -569,6 +624,7 @@ final class GatewayClient
 
     private void sendIdentify()
     {
+        _nextSessionMode = GatewaySessionMode.Identify;
         JSONValue payload;
         payload["token"] = gatewayToken(config.token);
         payload["intents"] = config.intents;
@@ -580,15 +636,20 @@ final class GatewayClient
         payload["properties"] = properties;
 
         sendPayload(GatewayOpcode.Identify, payload);
+        if (onStatus !is null)
+            onStatus("Sent IDENTIFY to the Discord gateway.");
     }
 
     private void sendResume()
     {
+        _nextSessionMode = GatewaySessionMode.Resume;
         JSONValue payload;
         payload["token"] = gatewayToken(config.token);
         payload["session_id"] = _sessionId;
         payload["seq"] = _sequence.get;
         sendPayload(GatewayOpcode.Resume, payload);
+        if (onStatus !is null)
+            onStatus("Sent RESUME to the Discord gateway.");
     }
 
     private void sendPayload(GatewayOpcode opcode, JSONValue data)
@@ -596,7 +657,12 @@ final class GatewayClient
         JSONValue payload;
         payload["op"] = cast(int) opcode;
         payload["d"] = data;
-        _socket.send(payload.toString());
+        synchronized (_sendMutex)
+        {
+            if (_socket is null)
+                throw new DdiscordException("The Discord gateway socket is not available.");
+            _socket.send(payload.toString());
+        }
     }
 
     private Duration parseHeartbeatInterval(JSONValue data)
@@ -644,12 +710,121 @@ final class GatewayClient
         return _resumeGatewayUrl.length != 0 ? _resumeGatewayUrl : config.url;
     }
 
-    private void close()
+    private bool canResumeSession() const
+    {
+        return _sessionId.length != 0 && !_sequence.isNull;
+    }
+
+    private void startHeartbeatLoop(Duration initialDelay, Duration interval)
+    {
+        stopHeartbeatLoop();
+
+        synchronized (_heartbeatMutex)
+        {
+            _heartbeatLoopRunning = true;
+            _awaitingHeartbeatAck = false;
+        }
+
+        _heartbeatThread = new Thread({
+            if (!sleepHeartbeatDelay(initialDelay))
+                return;
+
+            while (heartbeatLoopActive())
+            {
+                bool missedAck;
+                synchronized (_heartbeatMutex)
+                    missedAck = _awaitingHeartbeatAck;
+
+                if (missedAck)
+                {
+                    abortCurrentConnection();
+                    return;
+                }
+
+                try
+                {
+                    sendHeartbeat();
+                }
+                catch (Throwable)
+                {
+                    abortCurrentConnection();
+                    return;
+                }
+
+                synchronized (_heartbeatMutex)
+                    _awaitingHeartbeatAck = true;
+
+                if (!sleepHeartbeatDelay(interval))
+                    return;
+            }
+        });
+        _heartbeatThread.start();
+    }
+
+    private void stopHeartbeatLoop()
+    {
+        synchronized (_heartbeatMutex)
+        {
+            _heartbeatLoopRunning = false;
+            _awaitingHeartbeatAck = false;
+        }
+
+        if (_heartbeatThread !is null)
+        {
+            _heartbeatThread.join();
+            _heartbeatThread = null;
+        }
+    }
+
+    private bool heartbeatLoopActive()
+    {
+        synchronized (_heartbeatMutex)
+            return _heartbeatLoopRunning && !_stopRequested;
+    }
+
+    private bool sleepHeartbeatDelay(Duration delay)
+    {
+        if (delay <= Duration.zero)
+            return heartbeatLoopActive();
+
+        auto remaining = delay;
+        auto slice = dur!"msecs"(100);
+        while (remaining > Duration.zero)
+        {
+            if (!heartbeatLoopActive())
+                return false;
+
+            auto currentSlice = remaining < slice ? remaining : slice;
+            Thread.sleep(currentSlice);
+            remaining -= currentSlice;
+        }
+
+        return heartbeatLoopActive();
+    }
+
+    private void abortCurrentConnection()
+    {
+        if (_stream !is null)
+            _stream.close();
+    }
+
+    private void clearSession()
+    {
+        _ready = false;
+        _sessionId = "";
+        _resumeGatewayUrl = "";
+        _sequence = Nullable!long.init;
+    }
+
+    private void close(bool graceful = false)
     {
         if (_socket !is null)
         {
             try
-                _socket.close();
+            {
+                if (graceful)
+                    _socket.close();
+            }
             catch (Exception)
             {
             }
@@ -662,6 +837,55 @@ final class GatewayClient
             _stream = null;
         }
     }
+}
+
+private Duration firstHeartbeatDelay(Duration heartbeatInterval)
+{
+    if (heartbeatInterval <= Duration.zero)
+        return Duration.zero;
+
+    auto factor = uniform(0.0, 1.0);
+    auto delayMs = cast(long) (heartbeatInterval.total!"msecs" * factor);
+    return dur!"msecs"(delayMs);
+}
+
+private Duration invalidSessionReconnectDelay()
+{
+    return dur!"msecs"(uniform(1_000, 5_001));
+}
+
+private bool parseInvalidSessionFlag(JSONValue value)
+{
+    return value.type == JSONType.true_;
+}
+
+private bool requiresFreshIdentify(int closeCode)
+{
+    return closeCode == GatewayCloseCode.NormalClosure ||
+        closeCode == GatewayCloseCode.GoingAway ||
+        closeCode == GatewayCloseCode.InvalidSeq ||
+        closeCode == GatewayCloseCode.SessionTimedOut;
+}
+
+private bool isFatalCloseCode(int closeCode)
+{
+    return closeCode == GatewayCloseCode.AuthenticationFailed ||
+        closeCode == GatewayCloseCode.InvalidShard ||
+        closeCode == GatewayCloseCode.ShardingRequired ||
+        closeCode == GatewayCloseCode.InvalidApiVersion ||
+        closeCode == GatewayCloseCode.InvalidIntents ||
+        closeCode == GatewayCloseCode.DisallowedIntents;
+}
+
+private string fatalCloseHint(int closeCode)
+{
+    if (isFatalCloseCode(closeCode))
+        return "Discord reported a non-recoverable gateway error. Fix the token, shard, version, or intent configuration before reconnecting.";
+
+    if (requiresFreshIdentify(closeCode))
+        return "The client will reconnect automatically and start a fresh gateway session.";
+
+    return "The client will reconnect automatically unless shutdown was requested.";
 }
 
 private string normalizedGatewayUrl(string url)
@@ -703,6 +927,34 @@ private string runtimeOs()
 private Duration minDuration(Duration left, Duration right)
 {
     return left <= right ? left : right;
+}
+
+unittest
+{
+    assert(requiresFreshIdentify(cast(int) GatewayCloseCode.NormalClosure));
+    assert(requiresFreshIdentify(cast(int) GatewayCloseCode.InvalidSeq));
+    assert(requiresFreshIdentify(cast(int) GatewayCloseCode.SessionTimedOut));
+    assert(!requiresFreshIdentify(4000));
+}
+
+unittest
+{
+    assert(isFatalCloseCode(cast(int) GatewayCloseCode.AuthenticationFailed));
+    assert(isFatalCloseCode(cast(int) GatewayCloseCode.InvalidIntents));
+    assert(!isFatalCloseCode(4000));
+}
+
+unittest
+{
+    auto delay = firstHeartbeatDelay(dur!"seconds"(10));
+    assert(delay >= Duration.zero);
+    assert(delay <= dur!"seconds"(10));
+}
+
+unittest
+{
+    auto client = new GatewayClient(GatewayClientConfig("token", 0, "wss://gateway.discord.gg"));
+    assert(client.sleepHeartbeatDelay(Duration.zero) == false);
 }
 
 unittest

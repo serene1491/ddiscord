@@ -16,40 +16,36 @@ The library currently ships a working core aimed at real bot usage:
 
 - real Discord REST calls over `requests`
 - real Discord gateway sessions over `aurora-websocket` + TLS sockets
-- command sync, prefix handling, slash-command handling, interaction replies, rate limits, cache/state, and scheduled tasks
+- command sync, prefix handling, slash-command handling, follow-up/edit interaction replies, rate limits, cache/state, and scheduled tasks
 - file-based Lua plugin loading with sandboxed execution and capability-gated host APIs
 - runnable example bots in `examples/`
 
 ## Example
 
 ```d
-module examples.basic_bot.commands.roll;
+import ddiscord;
+import std.path : buildPath;
 
-import ddiscord.commands        : Command, Option;
-import ddiscord.context.command : CommandContext, CommandSource;
-import std.format               : format;
-import std.random               : uniform;
-
-@Command("roll", description: "Roll a dice")
-void handleRoll(
-    CommandContext ctx,
-    @Option("sides", "Number of sides", min: 2, max: 1000) long sides = 6L
-)
+@Command("ping", description: "Check the bot latency", routes: CommandRoute.Prefix)
+void handlePing(CommandContext ctx)
 {
-    const result = uniform(1L, sides + 1L);
-    const response = format!"🎲 You rolled a **%d** (d%d)"(result, sides);
-
-    if (ctx.source == CommandSource.Slash)
-        ctx.reply(response, ephemeral: true).await();
-    else
-        ctx.reply(response).await();
+    ctx.reply("Pong!").await();
 }
-```
 
-```d
-import examples.basic_bot.commands.roll : handleRoll;
+void main()
+{
+    auto env = loadEnv(buildPath("examples"));
 
-client.registerCommands!handleRoll();
+    auto client = new Client(ClientConfig(
+        token: env.get!string("DISCORD_TOKEN", env.require!string("TOKEN")),
+        intents: cast(uint) (GatewayIntent.Guilds | GatewayIntent.GuildMessages | GatewayIntent.MessageContent),
+        prefix: "!"
+    ));
+
+    client.registerAllCommands!handlePing();
+    client.run();
+    client.wait();
+}
 ```
 
 ## Lua
@@ -61,3 +57,10 @@ Lua integrations are also attribute-driven:
 - sandbox profile and permission grants decide what is actually visible at runtime
 - untrusted scripts only receive safe proxy tables and capability-gated functions
 - file-based plugins can be loaded from `plugin.json` + `.lua` entrypoints and executed during client startup
+
+## Docs
+
+- [docs/index.md](docs/index.md) for user-facing guides
+- [examples/README.md](examples/README.md) for runnable consoles
+
+The client now ships with default console logging at `Information` level, so connection, sync, owner-configuration warnings, command failures, and plugin lifecycle problems are visible without extra setup. Successful command timing logs are available at `Debug`.

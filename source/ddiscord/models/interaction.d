@@ -15,7 +15,7 @@ import ddiscord.models.user : User;
 import ddiscord.util.optional : Nullable;
 import ddiscord.util.snowflake : Snowflake;
 import std.conv : to;
-import std.json : JSONType, JSONValue;
+import std.json : JSONType, JSONValue, parseJSON;
 
 /// Interaction option payload used by slash commands.
 struct InteractionOption
@@ -36,6 +36,7 @@ struct Interaction
     User user;
     Nullable!GuildMember member;
     ulong permissions;
+    ulong appPermissions;
     string commandName;
     InteractionOption[] options;
     AutocompleteChoice[] autocompleteChoices;
@@ -85,8 +86,8 @@ struct Interaction
         }
 
         auto appPermissions = json.object.get("app_permissions", JSONValue.init);
-        if (appPermissions.type != JSONType.null_ && interaction.permissions == 0)
-            interaction.permissions = appPermissions.str.to!ulong;
+        if (appPermissions.type != JSONType.null_)
+            interaction.appPermissions = appPermissions.str.to!ulong;
 
         auto dataValue = json.object.get("data", JSONValue.init);
         if (dataValue.type != JSONType.null_)
@@ -200,4 +201,24 @@ private string jsonScalarToString(JSONValue value)
         case JSONType.null_:
             return value.toString();
     }
+}
+
+unittest
+{
+    auto payload = parseJSON(`{
+        "id": "1",
+        "type": 2,
+        "token": "abc",
+        "app_permissions": "2048",
+        "member": {
+            "user": {"id": "2", "username": "alice"},
+            "roles": [],
+            "permissions": "1024"
+        },
+        "data": {"name": "ping"}
+    }`);
+
+    auto interaction = Interaction.fromJSON(payload);
+    assert(interaction.permissions == 1024);
+    assert(interaction.appPermissions == 2048);
 }

@@ -40,10 +40,15 @@ struct Snowflake
         return value.to!string;
     }
 
+    /// Unix timestamp in milliseconds encoded by the snowflake.
+    ulong timestampMilliseconds() const @property
+    {
+        return (value >> 22) + discordEpoch;
+    }
+
     /// Approximate creation time derived from the snowflake.
     SnowflakeTimestamp createdAt() const @property
     {
-        const timestampMs = (value >> 22) + discordEpoch;
-        return SnowflakeTimestamp(timestampMs.to!string);
+        return SnowflakeTimestamp(timestampMilliseconds.to!string);
     }
 }

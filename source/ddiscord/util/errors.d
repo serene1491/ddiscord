@@ -9,7 +9,7 @@ module ddiscord.util.errors;
 import std.array : appender;
 
 /// Exception thrown by fallible convenience APIs when a `Result` is not returned.
-final class DdiscordException : Exception
+class DdiscordException : Exception
 {
     this(string message, Throwable next = null, string file = __FILE__, size_t line = __LINE__) @safe pure nothrow
     {

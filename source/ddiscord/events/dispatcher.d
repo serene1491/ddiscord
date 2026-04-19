@@ -6,6 +6,7 @@
  */
 module ddiscord.events.dispatcher;
 
+import core.sync.mutex : Mutex;
 import ddiscord.util.errors : formatError;
 import std.algorithm : filter;
 import std.array : array;
@@ -20,41 +21,58 @@ private struct HandlerEntry(E)
 /// Lightweight typed event dispatcher.
 final class EventDispatcher
 {
+    private Mutex _mutex;
     private Variant[string] _handlers;
     private string[] _handlerErrors;
+
+    this()
+    {
+        _mutex = new Mutex;
+    }
 
     /// Registers a handler for an event type.
     void on(E)(void delegate(E) handler)
     {
         auto key = typeid(E).toString;
-        auto handlers = entries!E(key);
-        handlers ~= HandlerEntry!E(false, handler);
-        _handlers[key] = Variant(handlers);
+        synchronized (_mutex)
+        {
+            auto handlers = entries!E(key);
+            handlers ~= HandlerEntry!E(false, handler);
+            _handlers[key] = Variant(handlers);
+        }
     }
 
     /// Registers a one-shot handler for an event type.
     void once(E)(void delegate(E) handler)
     {
         auto key = typeid(E).toString;
-        auto handlers = entries!E(key);
-        handlers ~= HandlerEntry!E(true, handler);
-        _handlers[key] = Variant(handlers);
+        synchronized (_mutex)
+        {
+            auto handlers = entries!E(key);
+            handlers ~= HandlerEntry!E(true, handler);
+            _handlers[key] = Variant(handlers);
+        }
     }
 
     /// Removes a handler.
     void off(E)(void delegate(E) handler)
     {
         auto key = typeid(E).toString;
-        auto handlers = entries!E(key);
-        handlers = handlers.filter!(entry => entry.handler != handler).array;
-        _handlers[key] = Variant(handlers);
+        synchronized (_mutex)
+        {
+            auto handlers = entries!E(key);
+            handlers = handlers.filter!(entry => entry.handler != handler).array;
+            _handlers[key] = Variant(handlers);
+        }
     }
 
     /// Emits an event to all handlers of that type.
     void emit(E)(E event)
     {
         auto key = typeid(E).toString;
-        auto handlers = entries!E(key);
+        HandlerEntry!E[] handlers;
+        synchronized (_mutex)
+            handlers = entries!E(key);
         HandlerEntry!E[] survivors;
 
         foreach (entry; handlers)
@@ -65,19 +83,23 @@ final class EventDispatcher
             }
             catch (Throwable error)
             {
-                _handlerErrors ~= formatError(
-                    "events",
-                    "An event handler raised an exception.",
-                    "Event `" ~ typeid(E).toString ~ "` failed with: " ~ error.msg,
-                    "Inspect the handler implementation; the dispatcher continued running other handlers."
-                );
+                synchronized (_mutex)
+                {
+                    _handlerErrors ~= formatError(
+                        "events",
+                        "An event handler raised an exception.",
+                        "Event `" ~ typeid(E).toString ~ "` failed with: " ~ error.msg,
+                        "Inspect the handler implementation; the dispatcher continued running other handlers."
+                    );
+                }
             }
 
             if (!entry.once)
                 survivors ~= entry;
         }
 
-        _handlers[key] = Variant(survivors);
+        synchronized (_mutex)
+            _handlers[key] = Variant(survivors);
     }
 
     private HandlerEntry!E[] entries(E)(string key)
@@ -90,7 +112,8 @@ final class EventDispatcher
     /// Returns captured event handler failures.
     string[] handlerErrors() const @property
     {
-        return _handlerErrors.dup;
+        synchronized (_mutex)
+            return _handlerErrors.dup;
     }
 }
 

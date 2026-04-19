@@ -6,6 +6,7 @@
  */
 module ddiscord.plugins;
 
+import ddiscord.logging : Logger;
 import ddiscord.scripting : LuaCapability, LuaExpose, LuaRuntime, LuaSandboxProfile, ScriptingEngine;
 import ddiscord.state : StateStore;
 import ddiscord.util.errors : formatError;
@@ -91,6 +92,8 @@ private final class LoadedPlugin
 /// Minimal plugin registry with real Lua activation.
 final class PluginRegistry
 {
+    Logger logger;
+
     private PluginDescriptor[] _descriptors;
     private LoadedPlugin[] _loaded;
     private string[] _loadErrors;
@@ -124,28 +127,19 @@ final class PluginRegistry
         if (!exists(directory) || !isDir(directory))
             return;
 
-        foreach (entry; dirEntries(directory, SpanMode.shallow))
-        {
-            if (!entry.isDir && baseName(entry.name) == "plugin.json")
-                loadManifest(entry.name, directory);
-        }
         foreach (entry; dirEntries(directory, SpanMode.depth))
         {
-            if (entry.isDir || baseName(entry.name) != "plugin.json")
+            if (entry.isDir)
                 continue;
-            loadManifest(entry.name, directory);
-        }
 
-        foreach (entry; dirEntries(directory, SpanMode.shallow))
-        {
-            if (!entry.isDir && extension(entry.name) == ".lua")
-                loadLooseScript(entry.name, directory);
-        }
-        foreach (entry; dirEntries(directory, SpanMode.depth))
-        {
-            if (entry.isDir || extension(entry.name) != ".lua")
+            if (baseName(entry.name) == "plugin.json")
+            {
+                loadManifest(entry.name, directory);
                 continue;
-            loadLooseScript(entry.name, directory);
+            }
+
+            if (extension(entry.name) == ".lua")
+                loadLooseScript(entry.name, directory);
         }
     }
 
@@ -176,6 +170,8 @@ final class PluginRegistry
                 );
                 loaded.lastError = Nullable!string.of(message);
                 _loadErrors ~= message;
+                if (logger !is null)
+                    logger.error("plugins", message);
                 _loaded ~= loaded;
                 continue;
             }
@@ -190,6 +186,8 @@ final class PluginRegistry
                 );
                 loaded.lastError = Nullable!string.of(message);
                 _loadErrors ~= message;
+                if (logger !is null)
+                    logger.error("plugins", message);
                 _loaded ~= loaded;
                 continue;
             }
@@ -211,6 +209,8 @@ final class PluginRegistry
                 );
                 loaded.lastError = Nullable!string.of(message);
                 _loadErrors ~= message;
+                if (logger !is null)
+                    logger.error("plugins", message);
                 _loaded ~= loaded;
                 continue;
             }
@@ -230,6 +230,13 @@ final class PluginRegistry
             }
 
             loaded.enabled = true;
+            if (logger !is null)
+            {
+                logger.information(
+                    "plugins",
+                    "Activated plugin `" ~ descriptor.pluginName ~ "` from `" ~ descriptor.resolvedEntrypoint ~ "`."
+                );
+            }
             _loaded ~= loaded;
         }
     }
@@ -247,6 +254,8 @@ final class PluginRegistry
                 if (loaded.runtime.hasCallable("onUnload"))
                     callLifecycleHook(loaded, "onUnload");
                 loaded.enabled = false;
+                if (logger !is null)
+                    logger.information("plugins", "Deactivated plugin `" ~ loaded.descriptor.pluginName ~ "`.");
                 continue;
             }
 
@@ -254,6 +263,8 @@ final class PluginRegistry
                 callLifecycleHook(loaded, "onUnload");
 
             loaded.enabled = false;
+            if (logger !is null)
+                logger.information("plugins", "Deactivated plugin `" ~ loaded.descriptor.pluginName ~ "`.");
         }
     }
 
@@ -324,6 +335,8 @@ final class PluginRegistry
             );
             loaded.lastError = Nullable!string.of(message);
             _loadErrors ~= message;
+            if (logger !is null)
+                logger.error("plugins", message);
             return false;
         }
 
@@ -338,12 +351,15 @@ final class PluginRegistry
             json = parseJSON(readText(manifestPath));
         catch (Exception error)
         {
-            _loadErrors ~= formatError(
+            auto message = formatError(
                 "plugins",
                 "A plugin manifest could not be parsed as JSON.",
                 "Manifest `" ~ manifestPath ~ "` failed with: " ~ error.msg,
                 "Fix the JSON syntax before starting the bot again."
             );
+            _loadErrors ~= message;
+            if (logger !is null)
+                logger.error("plugins", message);
             return;
         }
 

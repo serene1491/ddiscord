@@ -6,6 +6,7 @@
  */
 module ddiscord.commands;
 
+import core.sync.mutex : Mutex;
 import core.time : Duration, MonoTime, dur;
 import ddiscord.core.http.client : HttpError, HttpResponse, HttpTransport;
 import ddiscord.context.autocomplete : AutocompleteContext;
@@ -14,6 +15,7 @@ import ddiscord.models.application_command : ApplicationCommandDefinition, Appli
     ApplicationCommandOptionType, ApplicationCommandType;
 import ddiscord.models.channel : Channel;
 import ddiscord.models.member : GuildMember;
+import ddiscord.permissions : missingPermissions, permissionNames;
 import ddiscord.models.role : Role;
 import ddiscord.models.user : User;
 import ddiscord.rest : RestClient, RestClientConfig;
@@ -259,10 +261,12 @@ final class CommandRegistry
     private ServiceContainer _services;
     private CommandDescriptor[] _descriptors;
     private RateLimitWindowState[string] _rateLimits;
+    private Mutex _rateLimitMutex;
 
     this(ServiceContainer services)
     {
         _services = services;
+        _rateLimitMutex = new Mutex;
     }
 
     /// Registers free function handlers by alias.
@@ -369,13 +373,24 @@ final class CommandRegistry
         if (parsed.isErr)
             return Result!(CommandExecution, string).err(parsed.error);
 
-        auto descriptor = parsed.value.descriptor.get;
+        return executeParsedPrefix(ctx, parsed.value);
+    }
+
+    /// Executes a previously parsed prefix invocation.
+    Result!(CommandExecution, string) executeParsedPrefix(
+        CommandContext ctx,
+        ParsedCommand parsed
+    )
+    {
+        enforce(!parsed.descriptor.isNull, "Parsed prefix commands must resolve to a registered descriptor.");
+
+        auto descriptor = parsed.descriptor.get;
         auto policyError = validatePolicy(descriptor, ctx);
         if (!policyError.isNull)
             return Result!(CommandExecution, string).err(policyError.get);
 
         enforce(descriptor.prefixExecutor !is null, "Prefix executor was not registered for " ~ descriptor.displayName);
-        return descriptor.prefixExecutor(ctx, parsed.value.args);
+        return descriptor.prefixExecutor(ctx, parsed.args);
     }
 
     /// Executes a slash or context-menu command by name.
@@ -459,6 +474,32 @@ final class CommandRegistry
         return definitions;
     }
 
+    /// Returns whether any registered command requires the configured owner.
+    bool hasOwnerRestrictedCommands() const @property
+    {
+        foreach (descriptor; _descriptors)
+        {
+            if (descriptor.policy.ownerOnly)
+                return true;
+        }
+
+        return false;
+    }
+
+    /// Returns the names of owner-restricted commands.
+    string[] ownerRestrictedCommandNames() const @property
+    {
+        string[] names;
+
+        foreach (descriptor; _descriptors)
+        {
+            if (descriptor.policy.ownerOnly)
+                names ~= descriptor.displayName;
+        }
+
+        return names;
+    }
+
     private void injectServices(T)()
     {
         T instance = T.init;
@@ -500,10 +541,12 @@ final class CommandRegistry
         {
             if ((ctx.permissions & descriptor.policy.requiredPermissions) != descriptor.policy.requiredPermissions)
             {
+                auto missing = missingPermissions(ctx.permissions, descriptor.policy.requiredPermissions);
                 return Nullable!string.of(formatError(
                     "commands",
                     "The invoker does not satisfy the command permission requirements.",
-                    "Required permissions mask: `" ~ descriptor.policy.requiredPermissions.to!string ~ "`, provided mask: `" ~ ctx.permissions.to!string ~ "`.",
+                    "Missing permissions: `" ~ permissionNames(missing).join(", ") ~ "`. Required mask: `" ~
+                        descriptor.policy.requiredPermissions.to!string ~ "`, provided mask: `" ~ ctx.permissions.to!string ~ "`.",
                     "Grant the required Discord permissions or remove `@RequirePermissions` from the command."
                 ));
             }
@@ -511,35 +554,38 @@ final class CommandRegistry
 
         if (descriptor.policy.hasRateLimit)
         {
-            auto key = rateLimitKey(descriptor, ctx);
-            auto now = MonoTime.currTime;
-
-            if (auto state = key in _rateLimits)
+            synchronized (_rateLimitMutex)
             {
-                if (now - (*state).windowStart >= descriptor.policy.rateLimitWindow)
-                {
-                    (*state).windowStart = now;
-                    (*state).used = 0;
-                }
+                auto key = rateLimitKey(descriptor, ctx);
+                auto now = MonoTime.currTime;
 
-                if ((*state).used >= descriptor.policy.rateLimitCount)
+                if (auto state = key in _rateLimits)
                 {
-                    return Nullable!string.of(formatError(
-                        "commands",
-                        "This command is temporarily rate limited.",
-                        "Bucket `" ~ descriptor.displayName ~ "` exceeded `" ~ descriptor.policy.rateLimitCount.to!string ~ "` invocation(s) in the active window.",
-                        "Wait for the cooldown window to expire before trying again."
-                    ));
-                }
+                    if (now - (*state).windowStart >= descriptor.policy.rateLimitWindow)
+                    {
+                        (*state).windowStart = now;
+                        (*state).used = 0;
+                    }
 
-                (*state).used++;
-            }
-            else
-            {
-                RateLimitWindowState state;
-                state.windowStart = now;
-                state.used = 1;
-                _rateLimits[key] = state;
+                    if ((*state).used >= descriptor.policy.rateLimitCount)
+                    {
+                        return Nullable!string.of(formatError(
+                            "commands",
+                            "This command is temporarily rate limited.",
+                            "Bucket `" ~ descriptor.displayName ~ "` exceeded `" ~ descriptor.policy.rateLimitCount.to!string ~ "` invocation(s) in the active window.",
+                            "Wait for the cooldown window to expire before trying again."
+                        ));
+                    }
+
+                    (*state).used++;
+                }
+                else
+                {
+                    RateLimitWindowState state;
+                    state.windowStart = now;
+                    state.used = 1;
+                    _rateLimits[key] = state;
+                }
             }
         }
 

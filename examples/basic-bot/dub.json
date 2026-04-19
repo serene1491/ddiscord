@@ -1,0 +1,16 @@
+{
+    "name": "ddiscord-basic-bot",
+    "description": "Basic ddiscord example bot",
+    "targetType": "executable",
+    "targetName": "basic-bot",
+    "targetPath": ".",
+    "dependencies": {
+        "ddiscord": {
+            "path": "../.."
+        }
+    },
+    "sourcePaths": [
+        "source"
+    ],
+    "mainSourceFile": "source/app.d"
+}

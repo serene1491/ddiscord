@@ -6,6 +6,7 @@
  */
 module ddiscord.core.http.client;
 
+import core.sync.mutex : Mutex;
 import ddiscord.util.errors : formatError;
 import ddiscord.util.limits : DiscordApiBase;
 import ddiscord.util.optional : Nullable;
@@ -115,6 +116,7 @@ struct HttpClientConfig
     string token;
     string userAgent = "DiscordBot (https://github.com/yourorg/ddiscord, 0.1.0)";
     Duration timeout;
+    size_t sessionPoolSize = 2;
     string[string] defaultHeaders;
     Nullable!HttpTransport transport;
 }
@@ -122,11 +124,34 @@ struct HttpClientConfig
 /// Blocking HTTP client with Discord-specific defaults.
 final class HttpClient
 {
+    private final class SessionSlot
+    {
+        Mutex mutex;
+        Request request;
+
+        this()
+        {
+            mutex = new Mutex;
+        }
+    }
+
     private HttpClientConfig _config;
+    private Mutex _poolMutex;
+    private SessionSlot[] _sessions;
+    private size_t _nextSessionIndex;
 
     this(HttpClientConfig config = HttpClientConfig.init)
     {
         _config = config;
+        _poolMutex = new Mutex;
+
+        auto poolSize = config.sessionPoolSize == 0 ? 1 : config.sessionPoolSize;
+        _sessions.length = poolSize;
+        foreach (index; 0 .. poolSize)
+        {
+            _sessions[index] = new SessionSlot;
+            resetRequestSession(_sessions[index]);
+        }
     }
 
     /// Executes a request and returns either a response or a structured error.
@@ -195,91 +220,118 @@ final class HttpClient
 
     private Result!(HttpResponse, HttpError) execute(HttpRequest request)
     {
-        Request rq;
+        auto slot = checkoutSession();
 
-        if (_config.timeout != Duration.init)
-            rq.timeout = _config.timeout;
-
-        rq.addHeaders(request.headers);
-
-        try
+        synchronized (slot.mutex)
         {
-            Response response;
+            if (_config.timeout != Duration.init)
+                slot.request.timeout = _config.timeout;
 
-            final switch (request.method)
+            slot.request.keepAlive = true;
+            slot.request.clearHeaders();
+            slot.request.addHeaders(request.headers);
+
+            try
             {
-                case HttpMethod.Get:
-                    response = rq.get(request.url);
-                    break;
-                case HttpMethod.Post:
-                    response = rq.exec!"POST"(request.url, request.body, request.contentType);
-                    break;
-                case HttpMethod.Put:
-                    response = rq.exec!"PUT"(request.url, request.body, request.contentType);
-                    break;
-                case HttpMethod.Patch:
-                    response = rq.exec!"PATCH"(request.url, request.body, request.contentType);
-                    break;
-                case HttpMethod.Delete:
-                    if (request.body.length == 0)
-                        response = rq.exec!"DELETE"(request.url);
-                    else
-                        response = rq.exec!"DELETE"(request.url, request.body, request.contentType);
-                    break;
+                Response response;
+
+                final switch (request.method)
+                {
+                    case HttpMethod.Get:
+                        response = slot.request.get(request.url);
+                        break;
+                    case HttpMethod.Post:
+                        response = slot.request.exec!"POST"(request.url, request.body, request.contentType);
+                        break;
+                    case HttpMethod.Put:
+                        response = slot.request.exec!"PUT"(request.url, request.body, request.contentType);
+                        break;
+                    case HttpMethod.Patch:
+                        response = slot.request.exec!"PATCH"(request.url, request.body, request.contentType);
+                        break;
+                    case HttpMethod.Delete:
+                        if (request.body.length == 0)
+                            response = slot.request.exec!"DELETE"(request.url);
+                        else
+                            response = slot.request.exec!"DELETE"(request.url, request.body, request.contentType);
+                        break;
+                }
+
+                HttpResponse converted;
+                converted.statusCode = response.code;
+                converted.body = response.responseBody.data.dup;
+
+                foreach (key, value; response.responseHeaders)
+                    converted.headers[normalizeHeaderName(key)] = value;
+
+                if (!converted.isSuccess)
+                    return Result!(HttpResponse, HttpError).err(statusError(request, converted));
+
+                return Result!(HttpResponse, HttpError).ok(converted);
             }
+            catch (TimeoutException e)
+            {
+                resetRequestSession(slot);
+                return Result!(HttpResponse, HttpError).err(httpError(
+                    HttpErrorKind.Timeout,
+                    "HTTP request to Discord timed out.",
+                    request,
+                    "Check your network connection, increase the timeout, or retry after a short delay.",
+                    e.msg
+                ));
+            }
+            catch (ConnectError e)
+            {
+                resetRequestSession(slot);
+                return Result!(HttpResponse, HttpError).err(httpError(
+                    HttpErrorKind.Transport,
+                    "Could not connect to the Discord API.",
+                    request,
+                    "Check DNS, outbound network access, proxy settings, or Discord availability.",
+                    e.msg
+                ));
+            }
+            catch (RequestException e)
+            {
+                resetRequestSession(slot);
+                return Result!(HttpResponse, HttpError).err(httpError(
+                    HttpErrorKind.Transport,
+                    "The HTTP client failed while talking to Discord.",
+                    request,
+                    "Inspect the nested error detail for transport-specific information.",
+                    e.msg
+                ));
+            }
+            catch (Exception e)
+            {
+                resetRequestSession(slot);
+                return Result!(HttpResponse, HttpError).err(httpError(
+                    HttpErrorKind.Transport,
+                    "An unexpected HTTP client failure occurred.",
+                    request,
+                    "This usually indicates a local networking issue or malformed request configuration.",
+                    e.msg
+                ));
+            }
+        }
+    }
 
-            HttpResponse converted;
-            converted.statusCode = response.code;
-            converted.body = response.responseBody.data.dup;
+    private SessionSlot checkoutSession()
+    {
+        synchronized (_poolMutex)
+        {
+            auto slot = _sessions[_nextSessionIndex % _sessions.length];
+            _nextSessionIndex++;
+            return slot;
+        }
+    }
 
-            foreach (key, value; response.responseHeaders)
-                converted.headers[normalizeHeaderName(key)] = value;
-
-            if (!converted.isSuccess)
-                return Result!(HttpResponse, HttpError).err(statusError(request, converted));
-
-            return Result!(HttpResponse, HttpError).ok(converted);
-        }
-        catch (TimeoutException e)
-        {
-            return Result!(HttpResponse, HttpError).err(httpError(
-                HttpErrorKind.Timeout,
-                "HTTP request to Discord timed out.",
-                request,
-                "Check your network connection, increase the timeout, or retry after a short delay.",
-                e.msg
-            ));
-        }
-        catch (ConnectError e)
-        {
-            return Result!(HttpResponse, HttpError).err(httpError(
-                HttpErrorKind.Transport,
-                "Could not connect to the Discord API.",
-                request,
-                "Check DNS, outbound network access, proxy settings, or Discord availability.",
-                e.msg
-            ));
-        }
-        catch (RequestException e)
-        {
-            return Result!(HttpResponse, HttpError).err(httpError(
-                HttpErrorKind.Transport,
-                "The HTTP client failed while talking to Discord.",
-                request,
-                "Inspect the nested error detail for transport-specific information.",
-                e.msg
-            ));
-        }
-        catch (Exception e)
-        {
-            return Result!(HttpResponse, HttpError).err(httpError(
-                HttpErrorKind.Transport,
-                "An unexpected HTTP client failure occurred.",
-                request,
-                "This usually indicates a local networking issue or malformed request configuration.",
-                e.msg
-            ));
-        }
+    private void resetRequestSession(SessionSlot slot)
+    {
+        slot.request = Request();
+        slot.request.keepAlive = true;
+        if (_config.timeout != Duration.init)
+            slot.request.timeout = _config.timeout;
     }
 
     private HttpError statusError(HttpRequest request, HttpResponse response)

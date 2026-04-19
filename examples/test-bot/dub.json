@@ -1,0 +1,16 @@
+{
+    "name": "ddiscord-test-bot",
+    "description": "Integration-focused ddiscord test bot",
+    "targetType": "executable",
+    "targetName": "test-bot",
+    "targetPath": ".",
+    "dependencies": {
+        "ddiscord": {
+            "path": "../.."
+        }
+    },
+    "sourcePaths": [
+        "source"
+    ],
+    "mainSourceFile": "source/app.d"
+}

@@ -1,0 +1,16 @@
+{
+    "name": "ddiscord-full-bot",
+    "description": "Full-featured ddiscord example bot",
+    "targetType": "executable",
+    "targetName": "full-bot",
+    "targetPath": ".",
+    "dependencies": {
+        "ddiscord": {
+            "path": "../.."
+        }
+    },
+    "sourcePaths": [
+        "source"
+    ],
+    "mainSourceFile": "source/app.d"
+}

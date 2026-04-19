@@ -6,7 +6,9 @@
  */
 module ddiscord.tasks;
 
+import core.sync.mutex : Mutex;
 import core.time : Duration, dur;
+import ddiscord.logging : Logger;
 import ddiscord.util.errors : DdiscordException, formatError;
 import ddiscord.util.optional : Nullable;
 import ddiscord.util.result : Result;
@@ -95,6 +97,8 @@ struct Task(T)
 /// Lightweight scheduler used by the client surface.
 final class TaskScheduler
 {
+    Logger logger;
+
     private struct ScheduledTask
     {
         string label;
@@ -104,8 +108,14 @@ final class TaskScheduler
         void delegate() callback;
     }
 
+    private Mutex _mutex;
     private ScheduledTask[string] _tasks;
     private string[] _taskErrors;
+
+    this()
+    {
+        _mutex = new Mutex;
+    }
 
     /// Registers a delayed task.
     void schedule(string label, Duration delay, void delegate() callback)
@@ -114,7 +124,8 @@ final class TaskScheduler
         task.label = label;
         task.dueAt = Clock.currTime + delay;
         task.callback = callback;
-        _tasks[label] = task;
+        synchronized (_mutex)
+            _tasks[label] = task;
     }
 
     /// Registers a recurring task.
@@ -126,7 +137,8 @@ final class TaskScheduler
         task.recurring = true;
         task.interval = interval;
         task.callback = callback;
-        _tasks[label] = task;
+        synchronized (_mutex)
+            _tasks[label] = task;
     }
 
     /// Registers a lightweight cron-style task using `@every:<seconds>s`.
@@ -142,19 +154,22 @@ final class TaskScheduler
     /// Cancels a task.
     void cancel(string label)
     {
-        _tasks.remove(label);
+        synchronized (_mutex)
+            _tasks.remove(label);
     }
 
     /// Returns whether a task is scheduled.
-    bool has(string label) const
+    bool has(string label)
     {
-        return cast(bool) (label in _tasks);
+        synchronized (_mutex)
+            return cast(bool) (label in _tasks);
     }
 
     /// Returns every registered task label.
-    string[] labels() const @property
+    string[] labels() @property
     {
-        return _tasks.keys.dup;
+        synchronized (_mutex)
+            return _tasks.keys.dup;
     }
 
     /// Runs all due tasks at the current time.
@@ -168,20 +183,34 @@ final class TaskScheduler
     {
         string[] dueLabels;
 
-        foreach (label, task; _tasks)
+        synchronized (_mutex)
         {
-            if (task.dueAt <= now)
-                dueLabels ~= label;
+            foreach (label, task; _tasks)
+            {
+                if (task.dueAt <= now)
+                    dueLabels ~= label;
+            }
         }
 
         size_t executed;
         foreach (label; dueLabels)
         {
-            auto taskPtr = label in _tasks;
-            if (taskPtr is null)
+            ScheduledTask task;
+            bool found;
+
+            synchronized (_mutex)
+            {
+                auto taskPtr = label in _tasks;
+                if (taskPtr !is null)
+                {
+                    task = *taskPtr;
+                    found = true;
+                }
+            }
+
+            if (!found)
                 continue;
 
-            auto task = *taskPtr;
             if (task.callback !is null)
             {
                 try
@@ -190,24 +219,35 @@ final class TaskScheduler
                 }
                 catch (Throwable error)
                 {
-                    _taskErrors ~= formatError(
+                    auto message = formatError(
                         "tasks",
                         "A scheduled task raised an exception.",
                         "Task `" ~ label ~ "` failed with: " ~ error.msg,
                         "Inspect the callback implementation; the scheduler kept running."
                     );
+                    synchronized (_mutex)
+                        _taskErrors ~= message;
+                    if (logger !is null)
+                        logger.error("tasks", message);
                 }
             }
             executed++;
 
-            if (task.recurring)
+            synchronized (_mutex)
             {
-                task.dueAt = now + task.interval;
-                _tasks[label] = task;
-            }
-            else
-            {
-                _tasks.remove(label);
+                auto current = label in _tasks;
+                if (current is null)
+                    continue;
+
+                if (task.recurring)
+                {
+                    task.dueAt = now + task.interval;
+                    _tasks[label] = task;
+                }
+                else
+                {
+                    _tasks.remove(label);
+                }
             }
         }
 
@@ -215,9 +255,10 @@ final class TaskScheduler
     }
 
     /// Returns captured task execution failures.
-    string[] taskErrors() const @property
+    string[] taskErrors() @property
     {
-        return _taskErrors.dup;
+        synchronized (_mutex)
+            return _taskErrors.dup;
     }
 }
 

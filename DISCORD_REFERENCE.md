@@ -3,6 +3,12 @@
 > Source of truth for all Discord types, events, constants, and opcodes.
 > Every item here must be implemented. Nothing may be skipped.
 
+Current runtime note:
+
+- the public permission helpers live in `ddiscord.permissions`
+- effective permission calculation follows Discord overwrite order: `@everyone`, roles, then member overwrite
+- prefix command permission checks now reuse the same effective-permission logic instead of relying only on raw gateway masks
+
 ---
 
 ## 1. Gateway Opcodes

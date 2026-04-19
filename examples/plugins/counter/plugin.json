@@ -1,8 +1,0 @@
-{
-    "name": "counter",
-    "version": "1.0.0",
-    "ddiscordApiVersion": "2",
-    "scripts": ["main.lua"],
-    "permissions": ["state.read", "state.write"],
-    "sandbox": "untrusted"
-}

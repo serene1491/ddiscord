@@ -6,9 +6,11 @@
  */
 module ddiscord.models.message;
 
+import ddiscord.interactions.components : componentToJSON;
 import ddiscord.models.attachment : Attachment;
 import ddiscord.models.channel : Channel;
 import ddiscord.models.embed : Embed;
+import ddiscord.models.member : GuildMember;
 import ddiscord.models.user : User;
 import ddiscord.util.limits : DiscordMaxEmbedsPerMessage, DiscordMaxMessageLength;
 import ddiscord.util.optional : Nullable;
@@ -68,6 +70,13 @@ struct MessageCreate
     /// Validates the message payload before a REST call.
     Result!(bool, string) validate() const
     {
+        if (content.length == 0 && embeds.length == 0 && components.length == 0)
+        {
+            return Result!(bool, string).err(
+                "Discord message payloads must contain content, embeds, or components."
+            );
+        }
+
         if (content.length > DiscordMaxMessageLength)
         {
             return Result!(bool, string).err(
@@ -81,6 +90,13 @@ struct MessageCreate
             return Result!(bool, string).err(
                 "A single Discord message can contain at most 10 embeds. " ~
                 "Current embed count: " ~ embeds.length.to!string ~ "."
+            );
+        }
+
+        if (components.length != 0 && (flags & MessageFlags.IsComponentsV2) == MessageFlags.None)
+        {
+            return Result!(bool, string).err(
+                "Message payloads with components must set `MessageFlags.IsComponentsV2`."
             );
         }
 
@@ -105,6 +121,14 @@ struct MessageCreate
             json["embeds"] = embedValues;
         }
 
+        if (components.length != 0)
+        {
+            JSONValue[] componentValues;
+            foreach (component; components)
+                componentValues ~= componentToJSON(component);
+            json["components"] = componentValues;
+        }
+
         return json;
     }
 }
@@ -126,6 +150,7 @@ struct Message
     Snowflake channelId;
     Nullable!Snowflake guildId;
     User author;
+    Nullable!GuildMember member;
     string content;
     Embed[] embeds;
     Object[] components;
@@ -163,6 +188,35 @@ struct Message
         if (authorValue.type != JSONType.null_)
             message.author = User.fromJSON(authorValue);
 
+        auto memberValue = json.object.get("member", JSONValue.init);
+        if (memberValue.type != JSONType.null_)
+        {
+            auto member = GuildMember.fromJSON(memberValue);
+            if (member.user.isNull && message.author.id.value != 0)
+                member.user = Nullable!User.of(message.author);
+            message.member = Nullable!GuildMember.of(member);
+        }
+
         return message;
     }
+}
+
+unittest
+{
+    import ddiscord.interactions.components : Container, Section, Separator, SeparatorSpacing, TextDisplay;
+
+    auto payload = MessageCreate("dashboard")
+        .addComponent(
+            Container()
+                .accentColor(0x57F287)
+                .addComponent(Section().addText(TextDisplay("hello")))
+                .addComponent(Separator(SeparatorSpacing.Medium))
+        )
+        .setFlag(MessageFlags.IsComponentsV2);
+
+    auto validation = payload.validate();
+    assert(validation.isOk);
+
+    auto json = payload.toJSON();
+    assert(json.object.get("components", JSONValue.init).type == JSONType.array);
 }

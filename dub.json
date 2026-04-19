@@ -1,8 +1,8 @@
 {
     "name": "ddiscord",
-    "description": "Another Discord library",
+    "description": "UDA-first Discord bot library for D",
     "authors": [
-        "solever"
+        "ddiscord contributors"
     ],
     "license": "MIT",
     "targetType": "library",
@@ -18,44 +18,5 @@
     ],
     "libs": [
         "lua5.4"
-    ],
-    "configurations": [
-        {
-            "name": "library",
-            "targetType": "library"
-        },
-        {
-            "name": "example-basic-bot",
-            "targetType": "executable",
-            "targetName": "example-basic-bot",
-            "targetPath": "examples",
-            "sourcePaths": [
-                "source",
-                "examples"
-            ],
-            "mainSourceFile": "examples/basic_bot.d"
-        },
-        {
-            "name": "example-plugin-bot",
-            "targetType": "executable",
-            "targetName": "example-plugin-bot",
-            "targetPath": "examples",
-            "sourcePaths": [
-                "source",
-                "examples"
-            ],
-            "mainSourceFile": "examples/plugin_bot.d"
-        },
-        {
-            "name": "example-full-bot",
-            "targetType": "executable",
-            "targetName": "example-full-bot",
-            "targetPath": "examples",
-            "sourcePaths": [
-                "source",
-                "examples"
-            ],
-            "mainSourceFile": "examples/full_bot.d"
-        }
     ]
 }
