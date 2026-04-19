@@ -6,7 +6,9 @@ The library currently supports the main interaction reply flow:
 - deferred responses
 - follow-up messages
 - editing the original interaction response
+- opening modals from interaction handlers
 - autocomplete callback transport
+- typed low-level events for autocomplete, message components, and modal submissions
 
 ## Immediate reply
 
@@ -47,12 +49,45 @@ auto container = Container()
 MessageCreate payload;
 payload = payload.withContent("dashboard");
 payload = payload.addComponent(container);
-payload = payload.setFlag(MessageFlags.IsComponentsV2);
 
 ctx.reply(payload).await();
 ```
 
-When sending components, set `MessageFlags.IsComponentsV2`.
+When using the current V2 component builders (`Container`, `Section`, `Separator`, `TextDisplay`, `Thumbnail`), the library now sets `MessageFlags.IsComponentsV2` automatically.
+
+## Modal response
+
+```d
+@Command("report", routes: CommandRoute.Slash)
+void report(CommandContext ctx)
+{
+    auto modal = Modal("bug_report", "Bug Report")
+        .addTextInput(TextInput("summary", "Summary"))
+        .addTextInput(TextInput("details", "Details", TextInputStyle.Paragraph));
+
+    ctx.showModal(modal).await();
+}
+```
+
+## Low-level interaction events
+
+Non-command interactions are now surfaced as dedicated typed events instead of being mixed into slash execution:
+
+- `AutocompleteInteractionEvent`
+- `MessageComponentEvent`
+- `ModalSubmitEvent`
+
+Example:
+
+```d
+client.on!ModalSubmitEvent((event) {
+    foreach (component; event.interaction.submittedComponents)
+    {
+        import std.stdio : writeln;
+        writeln(component.customId, " = ", component.value);
+    }
+});
+```
 
 ## Autocomplete
 
@@ -62,4 +97,4 @@ The transport pieces are present in the library:
 - `AutocompleteChoice`
 - interaction autocomplete response support in the REST surface
 
-For now, autocomplete is best treated as a lower-level interaction capability rather than a polished high-level command binder.
+Autocomplete is still a lower-level interaction capability rather than a polished high-level command binder, but it no longer falls through into normal slash-command execution.

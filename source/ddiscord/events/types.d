@@ -6,6 +6,7 @@
  */
 module ddiscord.events.types;
 
+import ddiscord.models.guild : UnavailableGuild;
 import ddiscord.models.interaction : Interaction;
 import ddiscord.models.member : GuildMember;
 import ddiscord.models.message : Message;
@@ -15,9 +16,11 @@ import ddiscord.models.user : User;
 /// Ready gateway event.
 struct ReadyEvent
 {
+    uint gatewayVersion;
     User selfUser;
-    User[] guilds;
+    UnavailableGuild[] guilds;
     string sessionId;
+    string resumeGatewayUrl;
 }
 
 /// Gateway resumed event.
@@ -46,6 +49,24 @@ struct MessageCreateEvent
 
 /// Interaction create event.
 struct InteractionCreateEvent
+{
+    Interaction interaction;
+}
+
+/// Low-level autocomplete interaction event.
+struct AutocompleteInteractionEvent
+{
+    Interaction interaction;
+}
+
+/// Message component interaction event.
+struct MessageComponentEvent
+{
+    Interaction interaction;
+}
+
+/// Modal submit interaction event.
+struct ModalSubmitEvent
 {
     Interaction interaction;
 }

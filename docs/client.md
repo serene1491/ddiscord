@@ -86,8 +86,13 @@ Useful events include:
 - `ResumedEvent`
 - `MessageCreateEvent`
 - `InteractionCreateEvent`
+- `AutocompleteInteractionEvent`
+- `MessageComponentEvent`
+- `ModalSubmitEvent`
 - `CommandExecutedEvent`
 - `CommandFailedEvent`
+
+`ReadyEvent` now also includes `gatewayVersion`, the placeholder guild list carried by the initial `READY`, and `resumeGatewayUrl`.
 
 ## Presence
 

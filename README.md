@@ -16,7 +16,7 @@ The library currently ships a working core aimed at real bot usage:
 
 - real Discord REST calls over `requests`
 - real Discord gateway sessions over `aurora-websocket` + TLS sockets
-- command sync, prefix handling, slash-command handling, follow-up/edit interaction replies, rate limits, cache/state, and scheduled tasks
+- command sync, prefix handling, slash-command handling, non-command interaction events, modal replies, follow-up/edit interaction replies, rate limits, cache/state, and scheduled tasks
 - file-based Lua plugin loading with sandboxed execution and capability-gated host APIs
 - runnable example bots in `examples/`
 

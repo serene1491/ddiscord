@@ -15,8 +15,9 @@ import ddiscord.commands : Command, CommandExecution, CommandExecutionSettings, 
     CommandRoute, ParsedCommand, RequireOwner, RequirePermissions;
 import ddiscord.context.command : CommandContext, CommandSource;
 import ddiscord.events.dispatcher : EventDispatcher;
-import ddiscord.events.types : CommandExecutedEvent, CommandFailedEvent, InteractionCreateEvent,
-    MessageCreateEvent, PresenceUpdateEvent, ReadyEvent, ResumedEvent;
+import ddiscord.events.types : AutocompleteInteractionEvent, CommandExecutedEvent,
+    CommandFailedEvent, InteractionCreateEvent, MessageComponentEvent, MessageCreateEvent,
+    ModalSubmitEvent, PresenceUpdateEvent, ReadyEvent, ResumedEvent;
 import ddiscord.gateway.client : GatewayClient, GatewayClientConfig, GatewayReadyInfo;
 import ddiscord.gateway.intents : GatewayIntent;
 import ddiscord.logging : LogLevel, Logger;
@@ -113,6 +114,7 @@ final class Client
     private Thread _taskThread;
     private bool _taskLoopRunning;
     private bool _dispatchLoopRunning;
+    private bool _pluginsActive;
     private Mutex _dispatchMutex;
     private Condition _dispatchAvailable;
     private DispatchItem[] _dispatchQueue;
@@ -158,6 +160,16 @@ final class Client
     /// Starts the client.
     void run()
     {
+        if (_running || _gatewayThread !is null || _dispatchThread !is null || _taskThread !is null)
+        {
+            throw new DdiscordException(formatError(
+                "client",
+                "The Discord client is already running.",
+                "",
+                "Create a new `Client` instance or call `stop()` and wait for shutdown before starting again."
+            ));
+        }
+
         if (config.token.length == 0)
         {
             throw new DdiscordException(formatError(
@@ -178,12 +190,14 @@ final class Client
 
         syncCommandExecutionSettings();
         _running = true;
+        resetDispatchQueue();
         _selfUser = me.value;
         _gatewayInfo = Nullable!GatewayBotInfo.of(gateway.value);
         logger.information("client", "Authenticated as `" ~ _selfUser.username ~ "` (" ~ _selfUser.id.toString ~ ").");
         logOwnerConfiguration();
         plugins.loadAll(config.pluginsDir);
         plugins.activateAll(services.get!ScriptingEngine(), state);
+        _pluginsActive = true;
         if (config.autoSyncCommands)
             syncCommandsIfChanged();
 
@@ -436,7 +450,7 @@ final class Client
         auto durationMs = (MonoTime.currTime - startedAt).total!"msecs";
         if (result.isErr && shouldSurfacePrefixFailure(result.error))
             surfacePrefixFailure(ctx, descriptor.displayName, result.error);
-        emitCommandOutcome(result, message, message.author);
+        emitCommandOutcome(result, descriptor.displayName, message, message.author);
         logCommandOutcome("prefix", message.author, result, durationMs);
         return result;
     }
@@ -476,6 +490,33 @@ final class Client
         event.interaction = interaction;
         emit!InteractionCreateEvent(event);
 
+        if (interaction.type == InteractionType.ApplicationCommandAutocomplete)
+        {
+            AutocompleteInteractionEvent autocompleteEvent;
+            autocompleteEvent.interaction = interaction;
+            emit!AutocompleteInteractionEvent(autocompleteEvent);
+            CommandExecution ignored;
+            return Result!(CommandExecution, string).ok(ignored);
+        }
+
+        if (interaction.type == InteractionType.MessageComponent)
+        {
+            MessageComponentEvent componentEvent;
+            componentEvent.interaction = interaction;
+            emit!MessageComponentEvent(componentEvent);
+            CommandExecution ignored;
+            return Result!(CommandExecution, string).ok(ignored);
+        }
+
+        if (interaction.type == InteractionType.ModalSubmit)
+        {
+            ModalSubmitEvent modalEvent;
+            modalEvent.interaction = interaction;
+            emit!ModalSubmitEvent(modalEvent);
+            CommandExecution ignored;
+            return Result!(CommandExecution, string).ok(ignored);
+        }
+
         auto ctx = interactionContext(interaction, channel);
         ctx.permissions = permissions;
         ctx.receiveLatencyMilliseconds = snowflakeLatencyMilliseconds(interaction.id);
@@ -493,7 +534,7 @@ final class Client
 
         if (result.isErr)
             surfaceInteractionFailure(ctx, interaction.commandName, result.error);
-        emitCommandOutcome(result, sourceMessage, interaction.user);
+        emitCommandOutcome(result, interaction.commandName, sourceMessage, interaction.user);
         logCommandOutcome("interaction", interaction.user, result, durationMs);
         return result;
     }
@@ -521,7 +562,8 @@ final class Client
         _running = false;
         _dispatchLoopRunning = false;
         _taskLoopRunning = false;
-        plugins.deactivateAll();
+        tasks.cancel(GatewayReadyWatchdogLabel);
+        deactivatePluginsIfNeeded();
         logger.information("client", "Stopping the Discord client.");
         signalDispatchLoop();
         if (_gateway !is null)
@@ -587,6 +629,7 @@ final class Client
 
     private void emitCommandOutcome(
         Result!(CommandExecution, string) result,
+        string attemptedName,
         Message sourceMessage,
         User user
     )
@@ -603,7 +646,7 @@ final class Client
         else
         {
             CommandFailedEvent event;
-            event.attemptedName = sourceMessage.content;
+            event.attemptedName = attemptedName;
             event.sourceMessage = sourceMessage;
             event.user = user;
             event.error = result.error;
@@ -652,8 +695,11 @@ final class Client
                 cache.store(_selfUser);
 
             ReadyEvent event;
+            event.gatewayVersion = ready.gatewayVersion;
             event.selfUser = _selfUser;
+            event.guilds = ready.guilds.dup;
             event.sessionId = ready.sessionId;
+            event.resumeGatewayUrl = ready.resumeGatewayUrl;
             emit!ReadyEvent(event);
             logger.information("gateway", "READY received for `" ~ _selfUser.username ~ "`.");
             _gateway.updatePresence(_status, _activity);
@@ -669,23 +715,9 @@ final class Client
             enqueueMessage(message);
         };
         _gateway.onInteractionCreate = (Interaction interaction) {
-            if (
-                (
-                    interaction.type == InteractionType.ApplicationCommand ||
-                    interaction.type == InteractionType.ApplicationCommandAutocomplete
-                ) &&
-                interaction.commandName.length != 0
-            )
-            {
-                Channel channel;
-                channel.id = interaction.channelId;
-                enqueueInteraction(interaction, channel);
-                return;
-            }
-
-            InteractionCreateEvent event;
-            event.interaction = interaction;
-            emit!InteractionCreateEvent(event);
+            Channel channel;
+            channel.id = interaction.channelId;
+            enqueueInteraction(interaction, channel);
         };
         _gateway.onError = (string message) {
             logger.error("gateway", message);
@@ -712,8 +744,9 @@ final class Client
             _running = false;
             _dispatchLoopRunning = false;
             _taskLoopRunning = false;
+            tasks.cancel(GatewayReadyWatchdogLabel);
             signalDispatchLoop();
-            plugins.deactivateAll();
+            deactivatePluginsIfNeeded();
             logger.warning("gateway", "Gateway loop exited.");
         });
         _gatewayThread.start();
@@ -819,6 +852,15 @@ final class Client
         if (_dispatchQueueHead >= 64 && _dispatchQueueHead * 2 >= _dispatchQueue.length)
         {
             _dispatchQueue = _dispatchQueue[_dispatchQueueHead .. $].dup;
+            _dispatchQueueHead = 0;
+        }
+    }
+
+    private void resetDispatchQueue()
+    {
+        synchronized (_dispatchMutex)
+        {
+            _dispatchQueue.length = 0;
             _dispatchQueueHead = 0;
         }
     }
@@ -1040,6 +1082,15 @@ final class Client
             "Configured bot owner `" ~ config.ownerId.get.toString ~ "` for owner-restricted commands."
         );
     }
+
+    private void deactivatePluginsIfNeeded()
+    {
+        if (!_pluginsActive)
+            return;
+
+        plugins.deactivateAll();
+        _pluginsActive = false;
+    }
 }
 
 private template IsTypeSymbol(alias symbol)
@@ -1111,6 +1162,40 @@ unittest
     client.emit!int(5);
 
     assert(seen);
+}
+
+unittest
+{
+    import std.exception : assertThrown;
+
+    auto client = new Client(ClientConfig("token", cast(uint) GatewayIntent.Guilds));
+    client._running = true;
+    assertThrown!DdiscordException(client.run());
+}
+
+unittest
+{
+    auto client = new Client(ClientConfig("token", cast(uint) GatewayIntent.Guilds));
+    bool sawAutocomplete;
+    bool sawCommandFailure;
+
+    client.on!AutocompleteInteractionEvent((_event) {
+        sawAutocomplete = true;
+    });
+    client.on!CommandFailedEvent((_event) {
+        sawCommandFailure = true;
+    });
+
+    Interaction interaction;
+    interaction.id = Snowflake(1);
+    interaction.type = InteractionType.ApplicationCommandAutocomplete;
+    interaction.commandName = "ping";
+    interaction.token = "abc";
+
+    auto result = client.receiveInteraction(interaction);
+    assert(result.isOk);
+    assert(sawAutocomplete);
+    assert(!sawCommandFailure);
 }
 
 unittest

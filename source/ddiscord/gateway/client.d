@@ -14,6 +14,7 @@ import aurora_websocket.stream : IWebSocketStream, WebSocketStreamException;
 import core.sync.mutex : Mutex;
 import core.thread : Thread;
 import core.time : Duration, MonoTime, dur;
+import ddiscord.models.guild : UnavailableGuild;
 import ddiscord.models.interaction : Interaction;
 import ddiscord.models.message : Message;
 import ddiscord.models.presence : Activity, StatusType;
@@ -58,7 +59,9 @@ struct GatewayClientConfig
 /// READY payload values surfaced to the high-level client.
 struct GatewayReadyInfo
 {
+    uint gatewayVersion;
     User selfUser;
+    UnavailableGuild[] guilds;
     string sessionId;
     string resumeGatewayUrl;
 }
@@ -518,9 +521,21 @@ final class GatewayClient
                 _resumeGatewayUrl = resumeUrlValue.str;
 
             GatewayReadyInfo info;
+            auto versionValue = envelope.data.object.get("v", JSONValue.init);
+            if (versionValue.type != JSONType.null_)
+                info.gatewayVersion = cast(uint) versionValue.integer;
+
             auto userValue = envelope.data.object.get("user", JSONValue.init);
             if (userValue.type != JSONType.null_)
                 info.selfUser = User.fromJSON(userValue);
+
+            auto guildsValue = envelope.data.object.get("guilds", JSONValue.init);
+            if (guildsValue.type == JSONType.array)
+            {
+                foreach (item; guildsValue.array)
+                    info.guilds ~= UnavailableGuild.fromJSON(item);
+            }
+
             info.sessionId = _sessionId;
             info.resumeGatewayUrl = _resumeGatewayUrl;
             _ready = true;

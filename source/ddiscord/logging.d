@@ -116,7 +116,7 @@ final class Logger
 
 private void defaultConsoleSink(scope const LogRecord record)
 {
-    auto line = "[ddiscord][" ~ levelLabel(record.level) ~ "][" ~ record.category ~ "] " ~ record.message;
+    auto line = "[" ~ levelLabel(record.level) ~ "][" ~ record.category ~ "] " ~ record.message;
     if (record.level == LogLevel.Error)
         stderr.writeln(line);
     else

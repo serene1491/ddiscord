@@ -11,6 +11,7 @@ import core.time : MonoTime;
 import ddiscord.core.http.client : HttpClient, HttpClientConfig, HttpError, HttpErrorKind,
     HttpMethod, HttpRequest, HttpResponse, HttpTransport;
 import ddiscord.core.rest.rate_limiter : RestRateLimiter;
+import ddiscord.interactions.components : Modal, TextInput;
 import ddiscord.models.application_command : ApplicationCommandDefinition, AutocompleteChoice;
 import ddiscord.models.channel : Channel;
 import ddiscord.models.guild : Guild;
@@ -79,6 +80,7 @@ enum InteractionCallbackType : int
     ChannelMessageWithSource = 4,
     DeferredChannelMessageWithSource = 5,
     ApplicationCommandAutocompleteResult = 8,
+    Modal = 9,
 }
 
 private final class MessageHistory
@@ -437,6 +439,29 @@ private final class RealDiscordRest
         }
         data["choices"] = choiceValues;
         body["data"] = data;
+
+        auto request = jsonRequest(
+            HttpMethod.Post,
+            "POST:/interactions/{interaction_id}/{interaction_token}/callback",
+            "/interactions/" ~ interactionId.toString ~ "/" ~ interactionToken ~ "/callback",
+            body,
+            false
+        );
+        if (request.isErr)
+            return Result!(bool, string).err(request.error);
+
+        return Result!(bool, string).ok(true);
+    }
+
+    Result!(bool, string) respondWithModal(
+        Snowflake interactionId,
+        string interactionToken,
+        Modal modal
+    )
+    {
+        JSONValue body;
+        body["type"] = cast(int) InteractionCallbackType.Modal;
+        body["data"] = modal.toJSON();
 
         auto request = jsonRequest(
             HttpMethod.Post,
@@ -866,6 +891,26 @@ final class InteractionsEndpoints
         return Task!void.success();
     }
 
+    /// Responds to an interaction by opening a modal.
+    Task!void respondModal(Snowflake interactionId, string interactionToken, Modal modal)
+    {
+        if (_real.isNull)
+        {
+            return Task!void.failure(formatError(
+                "rest",
+                "Cannot show an interaction modal because the REST transport is not configured.",
+                "",
+                "Configure a bot token or inject a transport before opening modals."
+            ));
+        }
+
+        auto sent = _real.get.respondWithModal(interactionId, interactionToken, modal);
+        if (sent.isErr)
+            return Task!void.failure(sent.error);
+
+        return Task!void.success();
+    }
+
     /// Sends a deferred interaction acknowledgement.
     Task!void deferMessage(Snowflake interactionId, string interactionToken, bool ephemeral = false)
     {
@@ -1007,4 +1052,33 @@ unittest
     auto sent = rest.messages.create(Snowflake(1), MessageCreate("hello")).await();
     assert(sent.content == "hello");
     assert(rest.messages.history.length == 1);
+}
+
+unittest
+{
+    HttpRequest captured;
+    HttpTransport transport = (request) {
+        captured = request;
+        HttpResponse response;
+        response.statusCode = 204;
+        return Result!(HttpResponse, HttpError).ok(response);
+    };
+
+    RestClientConfig config;
+    config.token = "token";
+    config.applicationId = Nullable!Snowflake.of(Snowflake(42));
+    config.transport = Nullable!HttpTransport.of(transport);
+
+    auto rest = new RestClient(config);
+    auto modal = Modal("bug_modal", "Bug Report")
+        .addTextInput(TextInput("summary", "Summary"));
+    auto result = rest.interactions.respondModal(Snowflake(9), "abc", modal).awaitResult();
+
+    assert(result.isOk);
+    assert(captured.url.canFind("/interactions/9/abc/callback"));
+    auto body = cast(string) captured.body;
+    assert(body.canFind(`"type":9`));
+    assert(body.canFind(`"custom_id":"bug_modal"`));
+    assert(body.canFind(`"title":"Bug Report"`));
+    assert(body.canFind(`"custom_id":"summary"`));
 }

@@ -7,6 +7,7 @@
 module ddiscord.context.command;
 
 import ddiscord.cache : CacheStore;
+import ddiscord.interactions.components : Modal;
 import ddiscord.models.application_command : AutocompleteChoice;
 import ddiscord.models.channel : Channel;
 import ddiscord.models.interaction : Interaction;
@@ -131,6 +132,27 @@ struct CommandContext
         }
 
         auto sent = rest.interactions.respondAutocomplete(interaction.get.id, interaction.get.token, choices).awaitResult();
+        if (sent.isErr)
+            return Task!void.failure(sent.error);
+
+        interactionResponded = true;
+        return Task!void.success();
+    }
+
+    /// Opens a modal in response to the current interaction.
+    Task!void showModal(Modal modal)
+    {
+        if (interaction.isNull || interaction.get.token.length == 0)
+        {
+            return Task!void.failure(formatError(
+                "context",
+                "Opening a modal requires an active interaction token.",
+                "",
+                "Call `showModal` only while handling a real interaction."
+            ));
+        }
+
+        auto sent = rest.interactions.respondModal(interaction.get.id, interaction.get.token, modal).awaitResult();
         if (sent.isErr)
             return Task!void.failure(sent.error);
 

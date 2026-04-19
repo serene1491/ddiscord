@@ -11,6 +11,38 @@ import ddiscord.util.snowflake : Snowflake;
 import std.conv : to;
 import std.json : JSONType, JSONValue;
 
+/// Placeholder guild descriptor included in READY before full guild state arrives.
+struct UnavailableGuild
+{
+    Snowflake id;
+    bool unavailable;
+
+    /// Parses a Discord unavailable-guild payload.
+    static UnavailableGuild fromJSON(JSONValue json)
+    {
+        UnavailableGuild guild;
+
+        auto idValue = json.object.get("id", JSONValue.init);
+        if (idValue.type != JSONType.null_)
+            guild.id = Snowflake(idValue.str.to!ulong);
+
+        auto unavailableValue = json.object.get("unavailable", JSONValue.init);
+        if (unavailableValue.type == JSONType.true_ || unavailableValue.type == JSONType.false_)
+            guild.unavailable = unavailableValue.boolean;
+
+        return guild;
+    }
+
+    /// Serializes the unavailable guild into Discord JSON.
+    JSONValue toJSON() const
+    {
+        JSONValue json;
+        json["id"] = id.toString;
+        json["unavailable"] = unavailable;
+        return json;
+    }
+}
+
 /// Minimal Discord guild model used by the runtime.
 struct Guild
 {
@@ -50,4 +82,12 @@ struct Guild
 
         return json;
     }
+}
+
+unittest
+{
+    auto json = JSONValue(["id": JSONValue("42"), "unavailable": JSONValue(true)]);
+    auto guild = UnavailableGuild.fromJSON(json);
+    assert(guild.id == Snowflake(42));
+    assert(guild.unavailable);
 }

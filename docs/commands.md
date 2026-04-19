@@ -93,6 +93,7 @@ If you want explicit registration paths, `registerCommands!`, `registerCommandGr
 - `ctx.defer(...)`
 - `ctx.followup(...)`
 - `ctx.editOriginal(...)`
+- `ctx.showModal(...)`
 - `ctx.user`
 - `ctx.channel`
 - `ctx.cache`
@@ -100,3 +101,17 @@ If you want explicit registration paths, `registerCommands!`, `registerCommandGr
 - `ctx.services`
 
 If the command came from an interaction, `reply` sends the initial interaction response. After `defer()`, use `followup()` or `editOriginal()`.
+
+Slash and context-menu commands can also open a modal:
+
+```d
+@Command("report", routes: CommandRoute.Slash)
+void report(CommandContext ctx)
+{
+    auto modal = Modal("bug_report", "Bug Report")
+        .addTextInput(TextInput("summary", "Summary"))
+        .addTextInput(TextInput("details", "Details", TextInputStyle.Paragraph));
+
+    ctx.showModal(modal).await();
+}
+```

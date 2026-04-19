@@ -6,7 +6,7 @@
  */
 module ddiscord.models.message;
 
-import ddiscord.interactions.components : componentToJSON;
+import ddiscord.interactions.components : IsComponentsV2Component, componentToJSON;
 import ddiscord.models.attachment : Attachment;
 import ddiscord.models.channel : Channel;
 import ddiscord.models.embed : Embed;
@@ -58,6 +58,8 @@ struct MessageCreate
     MessageCreate addComponent(T)(T component)
     {
         components ~= cast(Object) new ComponentBox!T(component);
+        static if (IsComponentsV2Component!T)
+            flags |= MessageFlags.IsComponentsV2;
         return this;
     }
 
@@ -90,13 +92,6 @@ struct MessageCreate
             return Result!(bool, string).err(
                 "A single Discord message can contain at most 10 embeds. " ~
                 "Current embed count: " ~ embeds.length.to!string ~ "."
-            );
-        }
-
-        if (components.length != 0 && (flags & MessageFlags.IsComponentsV2) == MessageFlags.None)
-        {
-            return Result!(bool, string).err(
-                "Message payloads with components must set `MessageFlags.IsComponentsV2`."
             );
         }
 
@@ -211,11 +206,11 @@ unittest
                 .accentColor(0x57F287)
                 .addComponent(Section().addText(TextDisplay("hello")))
                 .addComponent(Separator(SeparatorSpacing.Medium))
-        )
-        .setFlag(MessageFlags.IsComponentsV2);
+        );
 
     auto validation = payload.validate();
     assert(validation.isOk);
+    assert((payload.flags & MessageFlags.IsComponentsV2) == MessageFlags.IsComponentsV2);
 
     auto json = payload.toJSON();
     assert(json.object.get("components", JSONValue.init).type == JSONType.array);

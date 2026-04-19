@@ -6,6 +6,7 @@
  */
 module ddiscord.models.interaction;
 
+import ddiscord.interactions.components : ComponentType;
 import ddiscord.models.application_command : AutocompleteChoice, InteractionType;
 import ddiscord.models.channel : Channel;
 import ddiscord.models.member : GuildMember;
@@ -25,6 +26,15 @@ struct InteractionOption
     bool focused;
 }
 
+/// Component values submitted through message components or modals.
+struct InteractionSubmittedComponent
+{
+    ComponentType type = ComponentType.Unknown;
+    string customId;
+    string value;
+    string[] values;
+}
+
 /// Discord interaction model.
 struct Interaction
 {
@@ -38,10 +48,15 @@ struct Interaction
     ulong permissions;
     ulong appPermissions;
     string commandName;
+    string customId;
+    ComponentType componentType = ComponentType.Unknown;
     InteractionOption[] options;
     AutocompleteChoice[] autocompleteChoices;
+    string[] values;
+    InteractionSubmittedComponent[] submittedComponents;
     Nullable!Message targetMessage;
     User[] resolvedUsers;
+    GuildMember[] resolvedMembers;
     Channel[] resolvedChannels;
     Role[] resolvedRoles;
 
@@ -118,6 +133,25 @@ private void parseInteractionData(ref Interaction interaction, JSONValue dataVal
     if (resolvedValue.type != JSONType.null_)
         parseResolved(interaction, resolvedValue);
 
+    auto customIdValue = dataValue.object.get("custom_id", JSONValue.init);
+    if (customIdValue.type != JSONType.null_)
+        interaction.customId = customIdValue.str;
+
+    auto componentTypeValue = dataValue.object.get("component_type", JSONValue.init);
+    if (componentTypeValue.type != JSONType.null_)
+        interaction.componentType = cast(ComponentType) cast(int) componentTypeValue.integer;
+
+    auto valuesValue = dataValue.object.get("values", JSONValue.init);
+    if (valuesValue.type == JSONType.array)
+        interaction.values = jsonArrayToStrings(valuesValue);
+
+    auto componentsValue = dataValue.object.get("components", JSONValue.init);
+    if (componentsValue.type == JSONType.array)
+    {
+        foreach (item; componentsValue.array)
+            parseSubmittedComponent(interaction.submittedComponents, item);
+    }
+
     auto targetMessageValue = dataValue.object.get("target_id", JSONValue.init);
     if (targetMessageValue.type != JSONType.null_ && interaction.targetMessage.isNull)
     {
@@ -160,11 +194,32 @@ private void parseOption(ref InteractionOption[] destination, JSONValue optionVa
 
 private void parseResolved(ref Interaction interaction, JSONValue resolvedValue)
 {
+    User[string] resolvedUserMap;
+
     auto usersValue = resolvedValue.object.get("users", JSONValue.init);
     if (usersValue.type == JSONType.object)
     {
-        foreach (_, item; usersValue.object)
-            interaction.resolvedUsers ~= User.fromJSON(item);
+        foreach (userId, item; usersValue.object)
+        {
+            auto user = User.fromJSON(item);
+            interaction.resolvedUsers ~= user;
+            resolvedUserMap[userId] = user;
+        }
+    }
+
+    auto membersValue = resolvedValue.object.get("members", JSONValue.init);
+    if (membersValue.type == JSONType.object)
+    {
+        foreach (userId, item; membersValue.object)
+        {
+            auto member = GuildMember.fromJSON(item);
+            if (member.user.isNull)
+            {
+                if (auto user = userId in resolvedUserMap)
+                    member.user = Nullable!User.of(*user);
+            }
+            interaction.resolvedMembers ~= member;
+        }
     }
 
     auto channelsValue = resolvedValue.object.get("channels", JSONValue.init);
@@ -180,6 +235,54 @@ private void parseResolved(ref Interaction interaction, JSONValue resolvedValue)
         foreach (_, item; rolesValue.object)
             interaction.resolvedRoles ~= Role.fromJSON(item);
     }
+}
+
+private void parseSubmittedComponent(ref InteractionSubmittedComponent[] destination, JSONValue componentValue)
+{
+    auto nestedComponent = componentValue.object.get("component", JSONValue.init);
+    if (nestedComponent.type == JSONType.object)
+        parseSubmittedComponent(destination, nestedComponent);
+
+    auto childrenValue = componentValue.object.get("components", JSONValue.init);
+    if (childrenValue.type == JSONType.array)
+    {
+        foreach (item; childrenValue.array)
+            parseSubmittedComponent(destination, item);
+    }
+
+    InteractionSubmittedComponent component;
+
+    auto typeValue = componentValue.object.get("component_type", JSONValue.init);
+    if (typeValue.type == JSONType.null_)
+        typeValue = componentValue.object.get("type", JSONValue.init);
+    if (typeValue.type != JSONType.null_)
+        component.type = cast(ComponentType) cast(int) typeValue.integer;
+
+    auto customIdValue = componentValue.object.get("custom_id", JSONValue.init);
+    if (customIdValue.type != JSONType.null_)
+        component.customId = customIdValue.str;
+
+    auto valueValue = componentValue.object.get("value", JSONValue.init);
+    if (valueValue.type != JSONType.null_)
+        component.value = jsonScalarToString(valueValue);
+
+    auto valuesValue = componentValue.object.get("values", JSONValue.init);
+    if (valuesValue.type == JSONType.array)
+        component.values = jsonArrayToStrings(valuesValue);
+
+    if (component.customId.length != 0)
+        destination ~= component;
+}
+
+private string[] jsonArrayToStrings(JSONValue value)
+{
+    string[] values;
+    if (value.type != JSONType.array)
+        return values;
+
+    foreach (item; value.array)
+        values ~= jsonScalarToString(item);
+    return values;
 }
 
 private string jsonScalarToString(JSONValue value)
@@ -221,4 +324,66 @@ unittest
     auto interaction = Interaction.fromJSON(payload);
     assert(interaction.permissions == 1024);
     assert(interaction.appPermissions == 2048);
+}
+
+unittest
+{
+    auto payload = parseJSON(`{
+        "id": "3",
+        "type": 3,
+        "token": "abc",
+        "channel_id": "12",
+        "data": {
+            "custom_id": "favorite_bug",
+            "component_type": 3,
+            "values": ["ant", "moth"],
+            "resolved": {
+                "users": {
+                    "9": {"id": "9", "username": "alice"}
+                },
+                "members": {
+                    "9": {"roles": []}
+                }
+            }
+        }
+    }`);
+
+    auto interaction = Interaction.fromJSON(payload);
+    assert(interaction.customId == "favorite_bug");
+    assert(interaction.componentType == ComponentType.StringSelect);
+    assert(interaction.values == ["ant", "moth"]);
+    assert(interaction.resolvedMembers.length == 1);
+    assert(!interaction.resolvedMembers[0].user.isNull);
+    assert(interaction.resolvedMembers[0].user.get.username == "alice");
+}
+
+unittest
+{
+    auto payload = parseJSON(`{
+        "id": "4",
+        "type": 5,
+        "token": "abc",
+        "channel_id": "12",
+        "data": {
+            "custom_id": "bug_modal",
+            "components": [
+                {
+                    "type": 1,
+                    "components": [
+                        {
+                            "type": 4,
+                            "custom_id": "summary",
+                            "value": "oops"
+                        }
+                    ]
+                }
+            ]
+        }
+    }`);
+
+    auto interaction = Interaction.fromJSON(payload);
+    assert(interaction.customId == "bug_modal");
+    assert(interaction.submittedComponents.length == 1);
+    assert(interaction.submittedComponents[0].customId == "summary");
+    assert(interaction.submittedComponents[0].value == "oops");
 }
