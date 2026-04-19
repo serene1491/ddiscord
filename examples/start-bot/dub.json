@@ -1,0 +1,16 @@
+{
+    "name": "start-bot",
+    "description": "Minimum ddiscord example bot",
+    "targetType": "executable",
+    "targetName": "start-bot",
+    "targetPath": ".",
+    "dependencies": {
+        "ddiscord": {
+            "path": "../.."
+        }
+    },
+    "sourcePaths": [
+        "source"
+    ],
+    "mainSourceFile": "source/app.d"
+}
