@@ -18,6 +18,7 @@ public import ddiscord.gateway.client;
 public import ddiscord.gateway.intents;
 public import ddiscord.core.http.client;
 public import ddiscord.core.rest.rate_limiter;
+public import ddiscord.models.application;
 public import ddiscord.models.application_command;
 public import ddiscord.models.channel;
 public import ddiscord.models.embed;

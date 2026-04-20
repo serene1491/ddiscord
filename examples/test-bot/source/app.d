@@ -70,7 +70,7 @@ void main()
 
         if (!startupChannelId.isNull)
         {
-            auto sent = client.rest.messages.create(
+            auto sent = client.messages.create(
                 startupChannelId.get,
                 MessageCreate("test-bot ready | synced=" ~ client.commands.applicationCommands.length.to!string)
             ).awaitResult();
