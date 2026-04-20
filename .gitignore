@@ -14,9 +14,6 @@
 # Executables
 *.exe
 ddiscord-test-library
-examples/basic-bot/basic-bot
-examples/plugin-bot/plugin-bot
-examples/full-bot/full-bot
 
 # DUB
 .dub

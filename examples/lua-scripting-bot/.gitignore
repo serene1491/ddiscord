@@ -1,4 +1,5 @@
-migrations/
-
+# Executables
 lua-scripting-bot
+
+migrations/
 *.sqlite3
