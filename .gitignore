@@ -18,6 +18,7 @@ ddiscord-test-library
 # DUB
 .dub
 docs.json
+docs/
 __dummy.html
 
 # Code coverage
