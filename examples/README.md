@@ -35,3 +35,6 @@ Accepted token variables for the examples:
 - `BOT_OWNER_ID` or `OWNER_ID` for the owner-only Lua eval command in `plugin-bot`
 - `PLUGINS_DIR` to override the default plugin directory used by `plugin-bot`
 - `TEST_CHANNEL_ID` to let `test-bot` send a startup validation message after `READY`
+
+When adapting the examples, you can now use `ctx.think()` for long-running handlers and
+`ctx.replyTo(...)` when you want a real Discord reply instead of a plain channel message.

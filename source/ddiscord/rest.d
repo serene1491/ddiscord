@@ -12,6 +12,7 @@ import ddiscord.core.http.client : HttpClient, HttpClientConfig, HttpError, Http
     HttpMethod, HttpRequest, HttpResponse, HttpTransport;
 import ddiscord.core.rest.rate_limiter : RestRateLimiter;
 import ddiscord.interactions.components : Modal, TextInput;
+import ddiscord.models.application : Application;
 import ddiscord.models.application_command : ApplicationCommandDefinition, AutocompleteChoice;
 import ddiscord.models.channel : Channel;
 import ddiscord.models.guild : Guild;
@@ -28,7 +29,7 @@ import ddiscord.util.result : Result;
 import ddiscord.util.snowflake : Snowflake;
 import std.algorithm : canFind;
 import std.datetime : Clock, Duration, dur;
-import std.json : JSONType, JSONValue;
+import std.json : JSONType, JSONValue, parseJSON;
 
 /// Minimal latency sample.
 struct LatencySample
@@ -81,6 +82,40 @@ enum InteractionCallbackType : int
     DeferredChannelMessageWithSource = 5,
     ApplicationCommandAutocompleteResult = 8,
     Modal = 9,
+}
+
+/// Current-user update payload.
+struct ModifyCurrentUser
+{
+    Nullable!string username;
+    Nullable!string avatar;
+    Nullable!string banner;
+
+    JSONValue toJSON() const
+    {
+        JSONValue json;
+        if (!username.isNull)
+            json["username"] = username.get;
+        if (!avatar.isNull)
+            json["avatar"] = avatar.get;
+        if (!banner.isNull)
+            json["banner"] = banner.get;
+        return json;
+    }
+}
+
+/// Current-application update payload.
+struct ModifyCurrentApplication
+{
+    Nullable!string description;
+
+    JSONValue toJSON() const
+    {
+        JSONValue json;
+        if (!description.isNull)
+            json["description"] = description.get;
+        return json;
+    }
 }
 
 private final class MessageHistory
@@ -270,6 +305,75 @@ private final class RealDiscordRest
         return Result!(User, string).ok(user);
     }
 
+    Result!(User, string) modifyCurrentUser(ModifyCurrentUser payload)
+    {
+        auto request = jsonRequest(
+            HttpMethod.Patch,
+            "PATCH:/users/@me",
+            "/users/@me",
+            payload.toJSON()
+        );
+        if (request.isErr)
+            return Result!(User, string).err(request.error);
+
+        auto json = request.value.json();
+        if (json.isErr)
+            return Result!(User, string).err(formatError("rest", "Discord returned an invalid modified-user payload.", json.error));
+
+        auto user = User.fromJSON(json.value);
+        if (_resolvedApplicationId.isNull && user.id.value != 0)
+            _resolvedApplicationId = Nullable!Snowflake.of(user.id);
+
+        return Result!(User, string).ok(user);
+    }
+
+    Result!(Application, string) currentApplication()
+    {
+        auto request = perform(
+            HttpMethod.Get,
+            "GET:/oauth2/applications/@me",
+            "/oauth2/applications/@me"
+        );
+        if (request.isErr)
+            return Result!(Application, string).err(request.error);
+
+        auto json = request.value.json();
+        if (json.isErr)
+            return Result!(Application, string).err(formatError("rest", "Discord returned an invalid current-application payload.", json.error));
+        if (json.value.type != JSONType.object)
+            return Result!(Application, string).err(formatError("rest", "Discord returned an invalid current-application payload.", "Expected a JSON object."));
+
+        auto application = Application.fromJSON(json.value);
+        if (application.id.value != 0)
+            _resolvedApplicationId = Nullable!Snowflake.of(application.id);
+
+        return Result!(Application, string).ok(application);
+    }
+
+    Result!(Application, string) modifyCurrentApplication(ModifyCurrentApplication payload)
+    {
+        auto request = jsonRequest(
+            HttpMethod.Patch,
+            "PATCH:/applications/@me",
+            "/applications/@me",
+            payload.toJSON()
+        );
+        if (request.isErr)
+            return Result!(Application, string).err(request.error);
+
+        auto json = request.value.json();
+        if (json.isErr)
+            return Result!(Application, string).err(formatError("rest", "Discord returned an invalid modified-application payload.", json.error));
+        if (json.value.type != JSONType.object)
+            return Result!(Application, string).err(formatError("rest", "Discord returned an invalid modified-application payload.", "Expected a JSON object."));
+
+        auto application = Application.fromJSON(json.value);
+        if (application.id.value != 0)
+            _resolvedApplicationId = Nullable!Snowflake.of(application.id);
+
+        return Result!(Application, string).ok(application);
+    }
+
     Result!(GatewayBotInfo, string) gatewayBot()
     {
         auto request = perform(HttpMethod.Get, "GET:/gateway/bot", "/gateway/bot");
@@ -372,6 +476,19 @@ private final class RealDiscordRest
             return Result!(Channel, string).err(formatError("rest", "Discord returned an invalid channel payload.", json.error));
 
         return Result!(Channel, string).ok(Channel.fromJSON(json.value));
+    }
+
+    Result!(bool, string) triggerTypingIndicator(Snowflake channelId)
+    {
+        auto request = perform(
+            HttpMethod.Post,
+            "POST:/channels/{channel_id}/typing",
+            "/channels/" ~ channelId.toString ~ "/typing"
+        );
+        if (request.isErr)
+            return Result!(bool, string).err(request.error);
+
+        return Result!(bool, string).ok(true);
     }
 
     Result!(bool, string) respondToInteraction(
@@ -605,22 +722,26 @@ private final class RealDiscordRest
         if (!_resolvedApplicationId.isNull)
             return Result!(Snowflake, string).ok(_resolvedApplicationId.get);
 
-        auto current = currentUser();
-        if (current.isErr)
-            return Result!(Snowflake, string).err(current.error);
+        auto currentApplication = currentApplication();
+        if (currentApplication.isOk && currentApplication.value.id.value != 0)
+            return Result!(Snowflake, string).ok(currentApplication.value.id);
 
-        if (current.value.id.value == 0)
+        auto currentUser = currentUser();
+        if (currentUser.isErr)
+            return Result!(Snowflake, string).err(currentUser.error);
+
+        if (currentUser.value.id.value == 0)
         {
             return Result!(Snowflake, string).err(formatError(
                 "rest",
                 "Could not determine the application ID for command synchronization.",
-                "Discord returned a user payload without an `id` field.",
+                "Discord returned neither an application payload nor a user payload with an `id` field.",
                 "Set `ClientConfig.applicationId` explicitly if your deployment requires a non-standard application identifier."
             ));
         }
 
-        _resolvedApplicationId = Nullable!Snowflake.of(current.value.id);
-        return Result!(Snowflake, string).ok(current.value.id);
+        _resolvedApplicationId = Nullable!Snowflake.of(currentUser.value.id);
+        return Result!(Snowflake, string).ok(currentUser.value.id);
     }
 }
 
@@ -701,6 +822,12 @@ final class ApplicationCommandsEndpoints
         return Task!(ApplicationCommandDefinition[]).success(synced.value);
     }
 
+    /// Short alias for `bulkOverwrite`.
+    Task!(ApplicationCommandDefinition[]) sync(ApplicationCommandDefinition[] definitions)
+    {
+        return bulkOverwrite(definitions);
+    }
+
     /// Lists globally registered application commands.
     Task!(ApplicationCommandDefinition[]) listGlobal()
     {
@@ -713,6 +840,12 @@ final class ApplicationCommandsEndpoints
 
         _store.overwrite(listed.value);
         return Task!(ApplicationCommandDefinition[]).success(listed.value);
+    }
+
+    /// Short alias for `listGlobal`.
+    Task!(ApplicationCommandDefinition[]) list()
+    {
+        return listGlobal();
     }
 
     /// Returns the last known command manifest.
@@ -743,6 +876,62 @@ final class UsersEndpoints
             return Task!User.failure(user.error);
 
         return Task!User.success(user.value);
+    }
+
+    /// Updates the current bot user.
+    Task!User update(ModifyCurrentUser payload)
+    {
+        if (_real.isNull)
+            return Task!User.failure(formatError("rest", "Cannot call `PATCH /users/@me` because the REST transport is not configured.", "", "Provide a bot token or an explicit test transport before calling authenticated Discord endpoints."));
+
+        auto user = _real.get.modifyCurrentUser(payload);
+        if (user.isErr)
+            return Task!User.failure(user.error);
+
+        return Task!User.success(user.value);
+    }
+}
+
+/// Current application REST surface.
+final class ApplicationsEndpoints
+{
+    private Nullable!RealDiscordRest _real;
+
+    this(Nullable!RealDiscordRest realTransport)
+    {
+        _real = realTransport;
+    }
+
+    /// Returns the current Discord application.
+    Task!Application me()
+    {
+        if (_real.isNull)
+            return Task!Application.failure(formatError("rest", "Cannot call `GET /oauth2/applications/@me` because the REST transport is not configured.", "", "Provide a bot token or an explicit test transport before calling authenticated Discord endpoints."));
+
+        auto application = _real.get.currentApplication();
+        if (application.isErr)
+            return Task!Application.failure(application.error);
+
+        return Task!Application.success(application.value);
+    }
+
+    /// Updates the current Discord application.
+    Task!Application update(ModifyCurrentApplication payload)
+    {
+        if (_real.isNull)
+            return Task!Application.failure(formatError("rest", "Cannot call `PATCH /applications/@me` because the REST transport is not configured.", "", "Provide a bot token or an explicit test transport before calling authenticated Discord endpoints."));
+
+        auto application = _real.get.modifyCurrentApplication(payload);
+        if (application.isErr)
+            return Task!Application.failure(application.error);
+
+        return Task!Application.success(application.value);
+    }
+
+    /// Short alias for `me`.
+    Task!Application current()
+    {
+        return me();
     }
 }
 
@@ -842,6 +1031,25 @@ final class ChannelsEndpoints
 
         return Task!Channel.success(channel.value);
     }
+
+    /// Triggers the Discord typing indicator for a channel.
+    Task!void triggerTyping(Snowflake channelId)
+    {
+        if (_real.isNull)
+            return Task!void.failure(formatError("rest", "Cannot trigger typing because the REST transport is not configured.", "", "Provide a bot token or a transport before posting typing indicators."));
+
+        auto triggered = _real.get.triggerTypingIndicator(channelId);
+        if (triggered.isErr)
+            return Task!void.failure(triggered.error);
+
+        return Task!void.success();
+    }
+
+    /// Short alias for `triggerTyping`.
+    Task!void typing(Snowflake channelId)
+    {
+        return triggerTyping(channelId);
+    }
 }
 
 /// Interaction callback REST surface.
@@ -872,6 +1080,12 @@ final class InteractionsEndpoints
             return Task!void.failure(sent.error);
 
         return Task!void.success();
+    }
+
+    /// Short alias for `respondMessage`.
+    Task!void reply(Snowflake interactionId, string interactionToken, MessageCreate payload)
+    {
+        return respondMessage(interactionId, interactionToken, payload);
     }
 
     /// Sends autocomplete choices for an interaction.
@@ -933,6 +1147,12 @@ final class InteractionsEndpoints
         return Task!void.success();
     }
 
+    /// Short alias for `deferMessage`.
+    Task!void defer(Snowflake interactionId, string interactionToken, bool ephemeral = false)
+    {
+        return deferMessage(interactionId, interactionToken, ephemeral);
+    }
+
     /// Sends a follow-up message after the initial interaction acknowledgement.
     Task!Message followupMessage(string interactionToken, MessageCreate payload)
     {
@@ -945,6 +1165,12 @@ final class InteractionsEndpoints
 
         _history.store(created.value);
         return Task!Message.success(created.value);
+    }
+
+    /// Short alias for `followupMessage`.
+    Task!Message followup(string interactionToken, MessageCreate payload)
+    {
+        return followupMessage(interactionToken, payload);
     }
 
     /// Edits the original interaction response.
@@ -960,6 +1186,12 @@ final class InteractionsEndpoints
         _history.store(edited.value);
         return Task!Message.success(edited.value);
     }
+
+    /// Short alias for `editOriginalMessage`.
+    Task!Message editOriginal(string interactionToken, MessageCreate payload)
+    {
+        return editOriginalMessage(interactionToken, payload);
+    }
 }
 
 /// REST client surface.
@@ -972,6 +1204,7 @@ final class RestClient
     MessagesEndpoints messages;
     ApplicationCommandsEndpoints applicationCommands;
     UsersEndpoints users;
+    ApplicationsEndpoints applications;
     GatewayEndpoints gateway;
     GuildsEndpoints guilds;
     ChannelsEndpoints channels;
@@ -991,6 +1224,7 @@ final class RestClient
         messages = new MessagesEndpoints(_history, _real);
         applicationCommands = new ApplicationCommandsEndpoints(_commands, _real);
         users = new UsersEndpoints(_real);
+        applications = new ApplicationsEndpoints(_real);
         gateway = new GatewayEndpoints(_real);
         guilds = new GuildsEndpoints(_real);
         channels = new ChannelsEndpoints(_real);
@@ -1081,4 +1315,114 @@ unittest
     assert(body.canFind(`"custom_id":"bug_modal"`));
     assert(body.canFind(`"title":"Bug Report"`));
     assert(body.canFind(`"custom_id":"summary"`));
+}
+
+unittest
+{
+    HttpRequest captured;
+    HttpTransport transport = (request) {
+        captured = request;
+
+        HttpResponse response;
+        response.statusCode = 200;
+        response.body = cast(ubyte[]) `{"id":"42","username":"renamed-bot","avatar":"hash","bot":true}`.dup;
+        return Result!(HttpResponse, HttpError).ok(response);
+    };
+
+    RestClientConfig config;
+    config.token = "token";
+    config.transport = Nullable!HttpTransport.of(transport);
+
+    auto rest = new RestClient(config);
+
+    ModifyCurrentUser payload;
+    payload.username = Nullable!string.of("renamed-bot");
+    payload.avatar = Nullable!string.of("data:image/png;base64,abc");
+
+    auto updated = rest.users.update(payload).await();
+    assert(updated.username == "renamed-bot");
+    assert(captured.method == HttpMethod.Patch);
+    assert(captured.url.canFind("/users/@me"));
+    auto body = parseJSON(cast(string) captured.body);
+    assert(body.object.get("username", JSONValue.init).str == "renamed-bot");
+    assert(body.object.get("avatar", JSONValue.init).str == "data:image/png;base64,abc");
+}
+
+unittest
+{
+    HttpRequest[] captured;
+    HttpTransport transport = (request) {
+        captured ~= request;
+
+        HttpResponse response;
+        response.statusCode = 200;
+
+        if (request.url.canFind("/oauth2/applications/@me"))
+        {
+            response.body = cast(ubyte[]) `{
+                "id":"55",
+                "description":"Helpful app",
+                "owner":{"id":"7","username":"owner","bot":false},
+                "team":{"id":"99","owner_user_id":"8"}
+            }`.dup;
+            return Result!(HttpResponse, HttpError).ok(response);
+        }
+
+        response.body = cast(ubyte[]) `{
+            "id":"55",
+            "description":"Updated description",
+            "owner":{"id":"7","username":"owner","bot":false}
+        }`.dup;
+        return Result!(HttpResponse, HttpError).ok(response);
+    };
+
+    RestClientConfig config;
+    config.token = "token";
+    config.transport = Nullable!HttpTransport.of(transport);
+
+    auto rest = new RestClient(config);
+
+    auto application = rest.applications.me().await();
+    assert(application.id == Snowflake(55));
+    assert(application.description == "Helpful app");
+    assert(!application.owner.isNull);
+    assert(application.owner.get.id == Snowflake(7));
+    assert(!application.team.isNull);
+    assert(application.team.get.ownerUserId.get == Snowflake(8));
+
+    ModifyCurrentApplication payload;
+    payload.description = Nullable!string.of("Updated description");
+    auto updated = rest.applications.update(payload).await();
+    assert(updated.description == "Updated description");
+
+    assert(captured.length == 2);
+    assert(captured[0].method == HttpMethod.Get);
+    assert(captured[0].url.canFind("/oauth2/applications/@me"));
+    assert(captured[1].method == HttpMethod.Patch);
+    assert(captured[1].url.canFind("/applications/@me"));
+    auto body = parseJSON(cast(string) captured[1].body);
+    assert(body.object.get("description", JSONValue.init).str == "Updated description");
+}
+
+unittest
+{
+    HttpRequest captured;
+    HttpTransport transport = (request) {
+        captured = request;
+
+        HttpResponse response;
+        response.statusCode = 204;
+        return Result!(HttpResponse, HttpError).ok(response);
+    };
+
+    RestClientConfig config;
+    config.token = "token";
+    config.transport = Nullable!HttpTransport.of(transport);
+
+    auto rest = new RestClient(config);
+    auto result = rest.channels.triggerTyping(Snowflake(77)).awaitResult();
+
+    assert(result.isOk);
+    assert(captured.method == HttpMethod.Post);
+    assert(captured.url.canFind("/channels/77/typing"));
 }

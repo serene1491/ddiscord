@@ -34,7 +34,9 @@ import ddiscord.models.user : User;
 import ddiscord.plugins : LuaPlugin, PluginRegistry;
 import ddiscord.permissions : computeEffectivePermissions;
 import ddiscord.core.http.client : HttpError, HttpErrorKind, HttpResponse, HttpTransport;
-import ddiscord.rest : GatewayBotInfo, RestClient, RestClientConfig;
+import ddiscord.rest : ApplicationCommandsEndpoints, ApplicationsEndpoints, ChannelsEndpoints,
+    GatewayBotInfo, GatewayEndpoints, GuildsEndpoints, InteractionsEndpoints, MessagesEndpoints,
+    RestClient, RestClientConfig, UsersEndpoints;
 import ddiscord.scripting : LuaCapability, LuaRuntime, LuaSandboxProfile, ScriptingEngine;
 import ddiscord.services : ServiceContainer;
 import ddiscord.state : StateStore;
@@ -240,6 +242,60 @@ final class Client
         emit!PresenceUpdateEvent(event);
     }
 
+    /// Direct shortcut to message REST endpoints.
+    MessagesEndpoints messages() @property
+    {
+        return rest.messages;
+    }
+
+    /// Direct shortcut to user REST endpoints.
+    UsersEndpoints users() @property
+    {
+        return rest.users;
+    }
+
+    /// Direct shortcut to application REST endpoints.
+    ApplicationsEndpoints apps() @property
+    {
+        return rest.applications;
+    }
+
+    /// Long-form alias for `apps`.
+    ApplicationsEndpoints applications() @property
+    {
+        return rest.applications;
+    }
+
+    /// Direct shortcut to gateway REST endpoints.
+    GatewayEndpoints gatewayApi() @property
+    {
+        return rest.gateway;
+    }
+
+    /// Direct shortcut to guild REST endpoints.
+    GuildsEndpoints guilds() @property
+    {
+        return rest.guilds;
+    }
+
+    /// Direct shortcut to channel REST endpoints.
+    ChannelsEndpoints channels() @property
+    {
+        return rest.channels;
+    }
+
+    /// Direct shortcut to interaction REST endpoints.
+    InteractionsEndpoints interactions() @property
+    {
+        return rest.interactions;
+    }
+
+    /// Direct shortcut to application-command REST endpoints.
+    ApplicationCommandsEndpoints slash() @property
+    {
+        return rest.applicationCommands;
+    }
+
     /// Builds a command context for an incoming prefix message.
     CommandContext prefixContext(
         string content,
@@ -299,7 +355,7 @@ final class Client
     /// Syncs slash and context-menu definitions to Discord REST.
     ApplicationCommandDefinition[] syncCommands()
     {
-        auto synced = rest.applicationCommands.bulkOverwrite(commands.applicationCommands).await();
+        auto synced = rest.applicationCommands.sync(commands.applicationCommands).await();
         logger.information("client", "Synchronized " ~ synced.length.to!string ~ " application command(s) with Discord.");
         return synced;
     }
@@ -308,7 +364,7 @@ final class Client
     ApplicationCommandDefinition[] syncCommandsIfChanged()
     {
         auto local = commands.applicationCommands;
-        auto remoteResult = rest.applicationCommands.listGlobal().awaitResult();
+        auto remoteResult = rest.applicationCommands.list().awaitResult();
         if (remoteResult.isErr)
             throw new DdiscordException(remoteResult.error);
 
@@ -318,7 +374,7 @@ final class Client
             return remoteResult.value;
         }
 
-        auto synced = rest.applicationCommands.bulkOverwrite(local).await();
+        auto synced = rest.applicationCommands.sync(local).await();
         logger.information("client", "Updated the Discord command manifest with " ~ synced.length.to!string ~ " definition(s).");
         return synced;
     }
@@ -387,6 +443,25 @@ final class Client
 
         if (message.author.id.value != 0)
             cache.store(message.author);
+        foreach (mentionedUser; message.mentions)
+        {
+            if (mentionedUser.id.value != 0)
+                cache.store(mentionedUser);
+        }
+        if (!message.referencedMessage.isNull)
+        {
+            auto referencedMessage = message.referencedMessage.get;
+            if (referencedMessage.author.id.value != 0)
+                cache.store(referencedMessage.author);
+
+            Message cachedReferencedMessage;
+            cachedReferencedMessage.id = referencedMessage.id;
+            cachedReferencedMessage.channelId = referencedMessage.channelId;
+            cachedReferencedMessage.guildId = referencedMessage.guildId;
+            cachedReferencedMessage.author = referencedMessage.author;
+            cachedReferencedMessage.content = referencedMessage.content;
+            cache.store(cachedReferencedMessage);
+        }
 
         Channel channel;
         channel.id = message.channelId;
@@ -1317,6 +1392,21 @@ unittest
     assert(!client.commands.find("ping", CommandRoute.Prefix).isNull);
     assert(!client.commands.find("group-ping", CommandRoute.Prefix).isNull);
     assert(client.plugins.registeredNames.canFind("counter"));
+}
+
+unittest
+{
+    auto client = new Client(ClientConfig("token", cast(uint) GatewayIntent.Guilds));
+
+    assert(client.messages is client.rest.messages);
+    assert(client.users is client.rest.users);
+    assert(client.apps is client.rest.applications);
+    assert(client.applications is client.rest.applications);
+    assert(client.channels is client.rest.channels);
+    assert(client.guilds is client.rest.guilds);
+    assert(client.interactions is client.rest.interactions);
+    assert(client.slash is client.rest.applicationCommands);
+    assert(client.gatewayApi is client.rest.gateway);
 }
 
 unittest
