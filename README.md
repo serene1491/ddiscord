@@ -299,7 +299,9 @@ The public naming is being tightened before `1.0.0`:
 - `@CommandCategory` and `@HideFromHelp` shape the default help output
 - `client.errorBehavior` controls how command failures are surfaced back to users
 - events now have typed context companions such as `ReadyEventContext` and `MessageCreateEventContext`
+- gateway-driven `GuildMemberAddEvent` and `PresenceUpdateEvent` are now emitted with typed contexts
 - command outcome events now expose route-aware helpers like `prefix`, `slash`, `contextMenu`, and `hybrid`
 - `@Event` can register event handlers through `client.registerAllCommands!(...)`
+- `ClientConfig.logUnhandledGatewayDispatchEvents` can sample-log unknown dispatch names while coverage grows
 
 That means pre-`1.0.0` consistency wins over keeping older aliases around.

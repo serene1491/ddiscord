@@ -4,6 +4,12 @@ All notable changes to `ddiscord` should be documented in this file.
 
 ## [0.3.1]
 
+### Added
+
+- Gateway dispatch coverage for `GUILD_MEMBER_ADD` and `PRESENCE_UPDATE` with typed payload parsing in `GatewayClient`.
+- Client-level emission of `GuildMemberAddEvent` and gateway-driven `PresenceUpdateEvent`, both with typed event contexts.
+- Optional sampled logging for unhandled gateway dispatch event names (`logUnhandledGatewayDispatchEvents`, `gatewayUnhandledDispatchLogEvery`).
+
 ### Fixed
 
 - Reduced noisy unittest output by disabling intentional dispatch-overflow warning logs in the queue-boundary client test.

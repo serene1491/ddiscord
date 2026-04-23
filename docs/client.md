@@ -30,6 +30,8 @@ The most important `ClientConfig` fields are:
 - `ownerId`: used by `@RequireOwner`; if owner-only commands are registered and this is unset, startup logs a warning and those commands deny every invoker until you configure an owner ID
 - `autoSyncCommands`: keeps slash commands in sync during startup
 - `logLevel`: optional minimum log level, defaults to `Information`
+- `logUnhandledGatewayDispatchEvents`: emits sampled logs for dispatch events that still have no typed handler (`false` by default)
+- `gatewayUnhandledDispatchLogEvery`: sampling interval for repeated unhandled dispatch logs (`100` by default, `0` behaves like `1`)
 - `maxDispatchQueueSize`: upper bound for pending gateway dispatch work (default `4096`, `0` = unbounded)
 - `dropOldestDispatchOnOverflow`: when queue pressure is high, keep latest events by dropping oldest pending items (`true` by default)
 - `dispatchOverflowLogEvery`: overflow warning cadence (`100` by default, `0` disables warning logs)
@@ -177,6 +179,8 @@ Useful events include:
 - `ResumedEvent`
 - `MessageCreateEvent`
 - `InteractionCreateEvent`
+- `GuildMemberAddEvent`
+- `PresenceUpdateEvent`
 - `AutocompleteInteractionEvent`
 - `MessageComponentEvent`
 - `ModalSubmitEvent`

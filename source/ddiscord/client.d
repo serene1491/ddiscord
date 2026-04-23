@@ -34,7 +34,8 @@ import ddiscord.events.dispatcher : Event, EventDispatcher;
 import ddiscord.events.types : AutocompleteInteractionEvent, CommandExecutedEvent,
     CommandFailedEvent, GuildMemberAddEvent, InteractionCreateEvent, MessageComponentEvent,
     MessageCreateEvent, ModalSubmitEvent, PresenceUpdateEvent, ReadyEvent, ResumedEvent;
-import ddiscord.gateway.client : GatewayClient, GatewayClientConfig, GatewayReadyInfo;
+import ddiscord.gateway.client : GatewayClient, GatewayClientConfig, GatewayGuildMemberAddInfo,
+    GatewayPresenceUpdateInfo, GatewayReadyInfo;
 import ddiscord.gateway.intents : GatewayIntent;
 import ddiscord.help.navigation : BuiltInHelpCustomIdPrefix, BuiltInHelpDefaultPageSize,
     BuiltInHelpNoopCustomId, buildPersistentHelpCustomId, parsePersistentHelpCustomId;
@@ -88,6 +89,8 @@ struct ClientConfig
     bool autoSyncCommands = true;
     LogLevel logLevel = LogLevel.Information;
     Nullable!HttpTransport transport;
+    bool logUnhandledGatewayDispatchEvents = false;
+    size_t gatewayUnhandledDispatchLogEvery = 100;
     size_t maxDispatchQueueSize = DefaultMaxDispatchQueueSize;
     bool dropOldestDispatchOnOverflow = true;
     size_t dispatchOverflowLogEvery = DefaultDispatchOverflowLogEvery;
@@ -953,6 +956,20 @@ final class Client
         return ctx;
     }
 
+    private GuildMemberAddEventContext buildGuildMemberAddEventContext(
+        GuildMember member,
+        Nullable!Snowflake guildId
+    )
+    {
+        GuildMemberAddEventContext ctx;
+        Nullable!User user;
+        if (!member.user.isNull)
+            user = Nullable!User.of(member.user.get);
+        ctx.event = buildEventContext(user, lookupGuild(guildId), Nullable!GuildMember.of(member));
+        ctx.memberData = member;
+        return ctx;
+    }
+
     private AutocompleteInteractionEventContext buildAutocompleteInteractionEventContext(
         Interaction interaction,
         Channel channel
@@ -993,8 +1010,25 @@ final class Client
 
     private PresenceUpdateEventContext buildPresenceUpdateEventContext(StatusType status, Activity activity)
     {
+        return buildGatewayPresenceUpdateEventContext(
+            status,
+            activity,
+            Nullable!User.of(_selfUser),
+            Nullable!Snowflake.init,
+            Nullable!GuildMember.init
+        );
+    }
+
+    private PresenceUpdateEventContext buildGatewayPresenceUpdateEventContext(
+        StatusType status,
+        Activity activity,
+        Nullable!User user,
+        Nullable!Snowflake guildId,
+        Nullable!GuildMember member
+    )
+    {
         PresenceUpdateEventContext ctx;
-        ctx.event = buildEventContext(Nullable!User.of(_selfUser));
+        ctx.event = buildEventContext(user, lookupGuild(guildId), member);
         ctx.status = status;
         ctx.activity = activity;
         return ctx;
@@ -1091,6 +1125,8 @@ final class Client
         gatewayConfig.url = url;
         gatewayConfig.logger = logger;
         gatewayConfig.pollTimeout = dur!"msecs"(250);
+        gatewayConfig.logUnhandledDispatchEvents = config.logUnhandledGatewayDispatchEvents;
+        gatewayConfig.unhandledDispatchLogEvery = config.gatewayUnhandledDispatchLogEvery;
 
         _gateway = new GatewayClient(gatewayConfig);
         _gateway.onReady = (GatewayReadyInfo ready) {
@@ -1127,6 +1163,32 @@ final class Client
             Channel channel;
             channel.id = interaction.channelId;
             enqueueInteraction(interaction, channel);
+        };
+        _gateway.onGuildMemberAdd = (GatewayGuildMemberAddInfo info) {
+            if (!info.member.user.isNull)
+                cache.store(info.member.user.get);
+
+            GuildMemberAddEvent event;
+            event.member = info.member;
+            event.guild.memberCount = info.memberCount;
+            event.context = buildGuildMemberAddEventContext(info.member, info.guildId);
+            emit!GuildMemberAddEvent(event);
+        };
+        _gateway.onPresenceUpdate = (GatewayPresenceUpdateInfo info) {
+            if (info.user.id.value != 0)
+                cache.store(info.user);
+
+            PresenceUpdateEvent event;
+            event.status = info.status;
+            event.activity = info.activity;
+            event.context = buildGatewayPresenceUpdateEventContext(
+                info.status,
+                info.activity,
+                Nullable!User.of(info.user),
+                info.guildId,
+                info.member
+            );
+            emit!PresenceUpdateEvent(event);
         };
         _gateway.onError = (string message) {
             CommandFailedEvent event;

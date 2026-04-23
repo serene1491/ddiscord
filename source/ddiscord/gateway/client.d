@@ -17,15 +17,17 @@ import core.time : Duration, MonoTime, dur;
 import ddiscord.logging : ILogger, LogLevel;
 import ddiscord.models.guild : UnavailableGuild;
 import ddiscord.models.interaction : Interaction;
+import ddiscord.models.member : GuildMember;
 import ddiscord.models.message : Message;
-import ddiscord.models.presence : Activity, StatusType;
+import ddiscord.models.presence : Activity, ActivityType, StatusType, statusFromDiscord;
 import ddiscord.models.user : User;
 import ddiscord.util.errors : DdiscordException, formatError;
 import ddiscord.util.optional : Nullable;
+import ddiscord.util.snowflake : Snowflake;
 import requests.streams : ConnectError, NetworkStream, SSLSocketStream,
     SSLOptions, TCPSocketStream, TimeoutException;
 import std.algorithm : canFind;
-import std.conv : to;
+import std.conv : ConvException, to;
 import std.json : JSONType, JSONValue, parseJSON;
 import std.random : uniform;
 import std.string : endsWith, startsWith;
@@ -56,6 +58,8 @@ struct GatewayClientConfig
     Duration reconnectDelay = dur!"seconds"(2);
     Duration maxReconnectDelay = dur!"seconds"(30);
     bool autoReconnect = true;
+    bool logUnhandledDispatchEvents = false;
+    size_t unhandledDispatchLogEvery = 100;
 }
 
 /// READY payload values surfaced to the high-level client.
@@ -66,6 +70,24 @@ struct GatewayReadyInfo
     UnavailableGuild[] guilds;
     string sessionId;
     string resumeGatewayUrl;
+}
+
+/// Typed payload for `GUILD_MEMBER_ADD`.
+struct GatewayGuildMemberAddInfo
+{
+    GuildMember member;
+    Nullable!Snowflake guildId;
+    size_t memberCount;
+}
+
+/// Typed payload for `PRESENCE_UPDATE`.
+struct GatewayPresenceUpdateInfo
+{
+    Nullable!Snowflake guildId;
+    User user;
+    Nullable!GuildMember member;
+    StatusType status = StatusType.Offline;
+    Activity activity;
 }
 
 private struct GatewayEnvelope
@@ -235,6 +257,8 @@ final class GatewayClient
     void delegate(string) onStatus;
     void delegate(Message) onMessageCreate;
     void delegate(Interaction) onInteractionCreate;
+    void delegate(GatewayGuildMemberAddInfo) onGuildMemberAdd;
+    void delegate(GatewayPresenceUpdateInfo) onPresenceUpdate;
     void delegate(string) onError;
 
     private bool _running;
@@ -253,6 +277,7 @@ final class GatewayClient
     private bool _awaitingHeartbeatAck;
     private RequestsWebSocketStreamAdapter _stream;
     private WebSocketConnection _socket;
+    private size_t[string] _unhandledDispatchEventCounts;
 
     this(GatewayClientConfig config)
     {
@@ -565,7 +590,24 @@ final class GatewayClient
         {
             if (onInteractionCreate !is null)
                 onInteractionCreate(Interaction.fromJSON(envelope.data));
+            return;
         }
+
+        if (envelope.eventName == "GUILD_MEMBER_ADD")
+        {
+            if (onGuildMemberAdd !is null)
+                onGuildMemberAdd(parseGuildMemberAdd(envelope.data));
+            return;
+        }
+
+        if (envelope.eventName == "PRESENCE_UPDATE")
+        {
+            if (onPresenceUpdate !is null)
+                onPresenceUpdate(parsePresenceUpdate(envelope.data));
+            return;
+        }
+
+        reportUnhandledDispatch(envelope.eventName);
     }
 
     private GatewayEnvelope receiveEnvelope()
@@ -867,6 +909,82 @@ final class GatewayClient
         if (onError !is null)
             onError(message);
     }
+
+    private void reportUnhandledDispatch(string eventName)
+    {
+        if (!config.logUnhandledDispatchEvents)
+            return;
+
+        auto current = _unhandledDispatchEventCounts.get(eventName, 0) + 1;
+        _unhandledDispatchEventCounts[eventName] = current;
+
+        auto every = config.unhandledDispatchLogEvery == 0 ? 1 : config.unhandledDispatchLogEvery;
+        if (current == 1 || (current % every) == 0)
+        {
+            reportStatus(
+                "Received unhandled gateway dispatch `" ~ eventName ~ "` (" ~ current.to!string ~ " observed)."
+            );
+        }
+    }
+}
+
+private GatewayGuildMemberAddInfo parseGuildMemberAdd(JSONValue data)
+{
+    GatewayGuildMemberAddInfo info;
+    info.member = GuildMember.fromJSON(data);
+
+    auto guildIdValue = data.object.get("guild_id", JSONValue.init);
+    if (guildIdValue.type != JSONType.null_)
+    {
+        try
+        {
+            info.guildId = Nullable!Snowflake.of(Snowflake(guildIdValue.str.to!ulong));
+        }
+        catch (ConvException)
+        {
+        }
+    }
+
+    auto memberCountValue = data.object.get("member_count", JSONValue.init);
+    if (memberCountValue.type != JSONType.null_)
+        info.memberCount = cast(size_t) memberCountValue.integer;
+
+    return info;
+}
+
+private GatewayPresenceUpdateInfo parsePresenceUpdate(JSONValue data)
+{
+    GatewayPresenceUpdateInfo info;
+
+    auto guildIdValue = data.object.get("guild_id", JSONValue.init);
+    if (guildIdValue.type != JSONType.null_)
+    {
+        try
+        {
+            info.guildId = Nullable!Snowflake.of(Snowflake(guildIdValue.str.to!ulong));
+        }
+        catch (ConvException)
+        {
+        }
+    }
+
+    auto userValue = data.object.get("user", JSONValue.init);
+    if (userValue.type != JSONType.null_)
+        info.user = User.fromJSON(userValue);
+
+    auto memberValue = data.object.get("member", JSONValue.init);
+    if (memberValue.type != JSONType.null_)
+        info.member = Nullable!GuildMember.of(GuildMember.fromJSON(memberValue));
+
+    auto statusValue = data.object.get("status", JSONValue.init);
+    if (statusValue.type != JSONType.null_)
+        info.status = statusFromDiscord(statusValue.str);
+
+    auto activitiesValue = data.object.get("activities", JSONValue.init);
+    if (activitiesValue.type == JSONType.array && activitiesValue.array.length != 0)
+        info.activity = Activity.fromJSON(activitiesValue.array[0]);
+
+    return info;
 }
 
 private Duration firstHeartbeatDelay(Duration heartbeatInterval)
@@ -995,6 +1113,85 @@ unittest
     assert(logger.entries.length == 2);
     assert(logger.entries[0].canFind("connected"));
     assert(logger.entries[1].canFind("failed"));
+}
+
+unittest
+{
+    JSONValue payload;
+    payload["guild_id"] = "42";
+    payload["member_count"] = 123;
+
+    JSONValue user;
+    user["id"] = "9";
+    user["username"] = "alice";
+    payload["user"] = user;
+    JSONValue[] roles;
+    payload["roles"] = roles;
+    payload["permissions"] = "0";
+
+    auto info = parseGuildMemberAdd(payload);
+    assert(!info.guildId.isNull);
+    assert(info.guildId.get == Snowflake(42));
+    assert(info.memberCount == 123);
+    assert(!info.member.user.isNull);
+    assert(info.member.user.get.username == "alice");
+}
+
+unittest
+{
+    JSONValue payload;
+    payload["guild_id"] = "77";
+    payload["status"] = "online";
+
+    JSONValue user;
+    user["id"] = "11";
+    user["username"] = "presence-user";
+    payload["user"] = user;
+
+    JSONValue[] activities;
+    JSONValue activity;
+    activity["type"] = 2;
+    activity["name"] = "spotify";
+    activities ~= activity;
+    payload["activities"] = activities;
+
+    auto info = parsePresenceUpdate(payload);
+    assert(!info.guildId.isNull);
+    assert(info.guildId.get == Snowflake(77));
+    assert(info.user.username == "presence-user");
+    assert(info.status == StatusType.Online);
+    assert(info.activity.type == ActivityType.Listening);
+    assert(info.activity.name == "spotify");
+}
+
+unittest
+{
+    final class CapturingGatewayLogger : ILogger
+    {
+        string[] entries;
+
+        override void log(LogLevel level, string category, string message)
+        {
+            entries ~= category ~ ":" ~ (cast(int) level).to!string ~ ":" ~ message;
+        }
+    }
+
+    auto logger = new CapturingGatewayLogger;
+    GatewayClientConfig config = GatewayClientConfig("token", 0, "wss://gateway.discord.gg");
+    config.logger = logger;
+    config.logUnhandledDispatchEvents = true;
+    config.unhandledDispatchLogEvery = 2;
+    auto client = new GatewayClient(config);
+
+    GatewayEnvelope envelope;
+    envelope.opcode = GatewayOpcode.Dispatch;
+    envelope.eventName = "THREAD_CREATE";
+    client.handleDispatch(envelope);
+    client.handleDispatch(envelope);
+
+    assert(logger.entries.length >= 2);
+    assert(logger.entries[0].canFind("THREAD_CREATE"));
+    assert(logger.entries[$ - 1].canFind("(2 observed)"));
 }
 
 unittest
