@@ -14,6 +14,7 @@ import aurora_websocket.stream : IWebSocketStream, WebSocketStreamException;
 import core.sync.mutex : Mutex;
 import core.thread : Thread;
 import core.time : Duration, MonoTime, dur;
+import ddiscord.logging : ILogger, LogLevel;
 import ddiscord.models.guild : UnavailableGuild;
 import ddiscord.models.interaction : Interaction;
 import ddiscord.models.message : Message;
@@ -49,6 +50,7 @@ struct GatewayClientConfig
     string token;
     uint intents;
     string url;
+    ILogger logger;
     Duration connectTimeout = dur!"seconds"(15);
     Duration pollTimeout = dur!"msecs"(250);
     Duration reconnectDelay = dur!"seconds"(2);
@@ -285,8 +287,7 @@ final class GatewayClient
                     "The client will reconnect automatically unless `autoReconnect` is disabled."
                 );
 
-                if (onError !is null)
-                    onError(_lastError);
+                reportError(_lastError);
 
                 if (_stopRequested || _fatalShutdownRequested || !config.autoReconnect)
                     break;
@@ -376,8 +377,7 @@ final class GatewayClient
 
         auto networkStream = openNetworkStream(parsed.host, parsed.port, parsed.isSecure);
         networkStream.readTimeout = config.connectTimeout;
-        if (onStatus !is null)
-            onStatus("Opened the Discord gateway TCP/TLS connection to `" ~ parsed.host ~ "`.");
+        reportStatus("Opened the Discord gateway TCP/TLS connection to `" ~ parsed.host ~ "`.");
 
         _stream = new RequestsWebSocketStreamAdapter(networkStream);
 
@@ -400,8 +400,7 @@ final class GatewayClient
         }
 
         auto heartbeatInterval = parseHeartbeatInterval(hello.data);
-        if (onStatus !is null)
-            onStatus("Received HELLO from Discord with heartbeat interval `" ~ heartbeatInterval.total!"msecs".to!string ~ "ms`.");
+        reportStatus("Received HELLO from Discord with heartbeat interval `" ~ heartbeatInterval.total!"msecs".to!string ~ "ms`.");
         startHeartbeatLoop(firstHeartbeatDelay(heartbeatInterval), heartbeatInterval);
         if (_nextSessionMode == GatewaySessionMode.Resume && canResumeSession())
             sendResume();
@@ -651,8 +650,7 @@ final class GatewayClient
         payload["properties"] = properties;
 
         sendPayload(GatewayOpcode.Identify, payload);
-        if (onStatus !is null)
-            onStatus("Sent IDENTIFY to the Discord gateway.");
+        reportStatus("Sent IDENTIFY to the Discord gateway.");
     }
 
     private void sendResume()
@@ -663,8 +661,7 @@ final class GatewayClient
         payload["session_id"] = _sessionId;
         payload["seq"] = _sequence.get;
         sendPayload(GatewayOpcode.Resume, payload);
-        if (onStatus !is null)
-            onStatus("Sent RESUME to the Discord gateway.");
+        reportStatus("Sent RESUME to the Discord gateway.");
     }
 
     private void sendPayload(GatewayOpcode opcode, JSONValue data)
@@ -852,6 +849,22 @@ final class GatewayClient
             _stream = null;
         }
     }
+
+    private void reportStatus(string message)
+    {
+        if (config.logger !is null)
+            config.logger.log(LogLevel.Information, "gateway", message);
+        if (onStatus !is null)
+            onStatus(message);
+    }
+
+    private void reportError(string message)
+    {
+        if (config.logger !is null)
+            config.logger.log(LogLevel.Error, "gateway", message);
+        if (onError !is null)
+            onError(message);
+    }
 }
 
 private Duration firstHeartbeatDelay(Duration heartbeatInterval)
@@ -942,6 +955,44 @@ private string runtimeOs()
 private Duration minDuration(Duration left, Duration right)
 {
     return left <= right ? left : right;
+}
+
+unittest
+{
+    final class CapturingGatewayLogger : ILogger
+    {
+        string[] entries;
+
+        override void log(LogLevel level, string category, string message)
+        {
+            entries ~= category ~ ":" ~ (cast(int) level).to!string ~ ":" ~ message;
+        }
+    }
+
+    auto logger = new CapturingGatewayLogger;
+    GatewayClientConfig config = GatewayClientConfig("token", 0, "wss://gateway.discord.gg");
+    config.logger = logger;
+
+    auto client = new GatewayClient(config);
+    size_t statusCalls;
+    size_t errorCalls;
+    client.onStatus = (string message) {
+        auto _ = message;
+        statusCalls++;
+    };
+    client.onError = (string message) {
+        auto _ = message;
+        errorCalls++;
+    };
+
+    client.reportStatus("connected");
+    client.reportError("failed");
+
+    assert(statusCalls == 1);
+    assert(errorCalls == 1);
+    assert(logger.entries.length == 2);
+    assert(logger.entries[0].canFind("connected"));
+    assert(logger.entries[1].canFind("failed"));
 }
 
 unittest

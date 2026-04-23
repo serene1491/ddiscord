@@ -8,6 +8,7 @@ module ddiscord.core.http.client;
 
 import core.sync.mutex : Mutex;
 import ddiscord.util.errors : formatError;
+import ddiscord.util.identity : DdiscordUserAgent;
 import ddiscord.util.limits : DiscordApiBase;
 import ddiscord.util.optional : Nullable;
 import ddiscord.util.result : Result;
@@ -114,7 +115,7 @@ struct HttpClientConfig
 {
     string baseUrl = DiscordApiBase;
     string token;
-    string userAgent = "DiscordBot (https://github.com/yourorg/ddiscord, 0.1.0)";
+    string userAgent = DdiscordUserAgent;
     Duration timeout;
     size_t sessionPoolSize = 2;
     string[string] defaultHeaders;
@@ -502,8 +503,16 @@ private string httpMethodName(HttpMethod method)
 unittest
 {
     HttpClientConfig config;
+    assert(config.userAgent == DdiscordUserAgent);
+}
+
+unittest
+{
+    HttpClientConfig config;
     config.token = "token";
+    HttpRequest captured;
     HttpTransport transport = (HttpRequest request) {
+        captured = request;
         HttpResponse response;
         response.statusCode = 200;
         response.body = cast(ubyte[]) `{"ok":true}`.dup;
@@ -518,6 +527,7 @@ unittest
     auto response = client.send(request).expect("request should succeed");
     assert(response.statusCode == 200);
     assert(response.json.expect("json").object["ok"].type != JSONType.null_);
+    assert(captured.headers.get("User-Agent", "") == DdiscordUserAgent);
 }
 
 unittest

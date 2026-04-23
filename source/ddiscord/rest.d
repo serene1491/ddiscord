@@ -6,6 +6,7 @@
  */
 module ddiscord.rest;
 
+import core.thread : Thread;
 import core.sync.mutex : Mutex;
 import core.time : MonoTime;
 import ddiscord.core.http.client : HttpClient, HttpClientConfig, HttpError, HttpErrorKind,
@@ -23,6 +24,7 @@ import ddiscord.models.role : Role;
 import ddiscord.models.user : User;
 import ddiscord.tasks : Task;
 import ddiscord.util.errors : formatError;
+import ddiscord.util.identity : DdiscordUserAgent;
 import ddiscord.util.limits : DiscordApiBase;
 import ddiscord.util.optional : Nullable;
 import ddiscord.util.result : Result;
@@ -52,8 +54,12 @@ struct RestClientConfig
     string token;
     Nullable!Snowflake applicationId;
     string apiBase = DiscordApiBase;
-    string userAgent = "DiscordBot (https://github.com/yourorg/ddiscord, 0.1.0)";
+    string userAgent = DdiscordUserAgent;
     Duration timeout = dur!"seconds"(15);
+    bool autoRetryServerErrors = true;
+    uint maxServerErrorRetries = 3;
+    Duration retryBaseDelay = dur!"msecs"(500);
+    Duration maxRetryDelay = dur!"seconds"(30);
     Nullable!HttpTransport transport;
     LatencySample* latencyTarget;
 }
@@ -682,7 +688,9 @@ private final class RealDiscordRest
 
     private Result!(HttpResponse, string) performRequest(string routeKey, HttpRequest request)
     {
-        uint attempts;
+        uint rateLimitRetries;
+        uint serverErrorRetries;
+        auto retryDelay = _config.retryBaseDelay;
 
         while (true)
         {
@@ -704,9 +712,22 @@ private final class RealDiscordRest
                 response.error.responseBody
             );
 
-            if (response.error.kind == HttpErrorKind.RateLimited && outcome.shouldRetry && attempts < 3)
+            if (response.error.kind == HttpErrorKind.RateLimited && outcome.shouldRetry && rateLimitRetries < 3)
             {
-                attempts++;
+                rateLimitRetries++;
+                continue;
+            }
+
+            if (
+                _config.autoRetryServerErrors &&
+                shouldRetryServerError(response.error.kind) &&
+                serverErrorRetries < _config.maxServerErrorRetries
+            )
+            {
+                serverErrorRetries++;
+                if (retryDelay > Duration.zero)
+                    Thread.sleep(retryDelay);
+                retryDelay = nextRetryDelay(retryDelay, _config.maxRetryDelay);
                 continue;
             }
 
@@ -747,6 +768,24 @@ private final class RealDiscordRest
         _resolvedApplicationId = Nullable!Snowflake.of(currentUser.value.id);
         return Result!(Snowflake, string).ok(currentUser.value.id);
     }
+}
+
+private bool shouldRetryServerError(HttpErrorKind kind)
+{
+    return kind == HttpErrorKind.Server ||
+        kind == HttpErrorKind.Timeout ||
+        kind == HttpErrorKind.Transport;
+}
+
+private Duration nextRetryDelay(Duration delay, Duration maxDelay)
+{
+    if (delay <= Duration.zero)
+        return delay;
+
+    auto doubled = delay + delay;
+    if (maxDelay <= Duration.zero || doubled <= maxDelay)
+        return doubled;
+    return maxDelay;
 }
 
 private ApplicationCommandDefinition commandDefinitionFromJSON(JSONValue json)
@@ -1235,6 +1274,74 @@ final class RestClient
     {
         return !_real.isNull;
     }
+}
+
+unittest
+{
+    RestClientConfig config;
+    assert(config.userAgent == DdiscordUserAgent);
+}
+
+unittest
+{
+    uint attempts;
+    HttpTransport transport = (request) {
+        attempts++;
+
+        if (attempts < 3)
+        {
+            HttpError error;
+            error.kind = HttpErrorKind.Server;
+            error.message = "temporary outage";
+            error.method = "GET";
+            error.url = request.url;
+            error.statusCode = 503;
+            return Result!(HttpResponse, HttpError).err(error);
+        }
+
+        HttpResponse response;
+        response.statusCode = 200;
+        response.body = cast(ubyte[]) `{"id":"77","username":"retry-bot","bot":true}`.dup;
+        return Result!(HttpResponse, HttpError).ok(response);
+    };
+
+    RestClientConfig config;
+    config.token = "token";
+    config.transport = Nullable!HttpTransport.of(transport);
+    config.retryBaseDelay = Duration.zero;
+    config.maxRetryDelay = Duration.zero;
+    config.maxServerErrorRetries = 3;
+
+    auto rest = new RestClient(config);
+    auto me = rest.users.me().await();
+    assert(me.username == "retry-bot");
+    assert(attempts == 3);
+}
+
+unittest
+{
+    uint attempts;
+    HttpTransport transport = (request) {
+        attempts++;
+
+        HttpError error;
+        error.kind = HttpErrorKind.Server;
+        error.message = "temporary outage";
+        error.method = "GET";
+        error.url = request.url;
+        error.statusCode = 503;
+        return Result!(HttpResponse, HttpError).err(error);
+    };
+
+    RestClientConfig config;
+    config.token = "token";
+    config.transport = Nullable!HttpTransport.of(transport);
+    config.autoRetryServerErrors = false;
+
+    auto rest = new RestClient(config);
+    auto result = rest.users.me().awaitResult();
+    assert(result.isErr);
+    assert(attempts == 1);
 }
 
 unittest

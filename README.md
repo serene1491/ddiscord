@@ -1,6 +1,6 @@
-# ddiscord
+# dDiscord <img src="logo.svg" width="24">
 
-A UDA-first Discord bot library for D.
+A Discord bot library for D-lang.
 
 > [!NOTE]
 `ddiscord` is an early-stage project (pre-`1.0.0`) developed in the open with AI assistance.  
@@ -245,7 +245,12 @@ arguments, and handler failures. That behavior is also customizable through `cli
 
 ## Examples
 
+- [`examples/start-bot`](examples/start-bot/source/app.d): minimal env-driven startup
 - [`examples/basic-bot`](examples/basic-bot/source/app.d): prefix + slash basics
+- [`examples/events-bot`](examples/events-bot/source/app.d): typed event handling in isolation
+- [`examples/interactions-bot`](examples/interactions-bot/source/app.d): button + modal interaction flow
+- [`examples/services-bot`](examples/services-bot/source/app.d): `@Stateful` groups with injected services
+- [`examples/tasks-bot`](examples/tasks-bot/source/app.d): scheduled reminders and recurring task loops
 - [`examples/full-bot`](examples/full-bot/source/app.d): state, permissions, rate limits, and components
 - [`examples/plugin-bot`](examples/plugin-bot/source/app.d): Lua host APIs and file-based plugins
 - [`examples/test-bot`](examples/test-bot/source/app.d): integration-oriented validation bot with startup REST checks
@@ -257,7 +262,6 @@ arguments, and handler failures. That behavior is also customizable through `cli
 
 - [`docs/client.md`](docs/client.md) for the runtime/client guide
 - [`examples/README.md`](examples/README.md) for the runnable consoles
-- [`agent-docs/`](agent-docs) for architecture and contribution notes during development
 - [`CHANGELOG.md`](CHANGELOG.md) for release notes in progress
 
 ## Current API Direction

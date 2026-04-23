@@ -31,8 +31,15 @@ struct LogRecord
 /// Sink used by the runtime logger.
 alias LogSink = void delegate(scope const LogRecord record);
 
+/// Minimal logger contract used by runtime components.
+interface ILogger
+{
+    /// Writes a record at the requested level.
+    void log(LogLevel level, string category, string message);
+}
+
 /// Default logger used by the client surface.
-final class Logger
+final class Logger : ILogger
 {
     private LogLevel _minimumLevel = LogLevel.Information;
     private LogSink _sink;
@@ -53,7 +60,7 @@ final class Logger
     }
 
     /// Writes a record when the current level allows it.
-    void log(LogLevel level, string category, string message)
+    override void log(LogLevel level, string category, string message)
     {
         if (!shouldLog(level))
             return;
@@ -114,6 +121,17 @@ final class Logger
     }
 }
 
+/// Logger implementation that intentionally drops every record.
+final class NullLogger : ILogger
+{
+    override void log(LogLevel level, string category, string message)
+    {
+        auto _ = level;
+        auto __ = category;
+        auto ___ = message;
+    }
+}
+
 private void defaultConsoleSink(scope const LogRecord record)
 {
     auto line = "[" ~ levelLabel(record.level) ~ "][" ~ record.category ~ "] " ~ record.message;
@@ -138,4 +156,23 @@ private string levelLabel(LogLevel level)
         case LogLevel.Trace:
             return "trace";
     }
+}
+
+unittest
+{
+    size_t sinkCalls;
+    auto logger = new Logger(LogLevel.Warning, (scope const LogRecord record) {
+        sinkCalls++;
+        assert(record.category == "unit");
+    });
+
+    logger.information("unit", "ignored");
+    logger.warning("unit", "captured");
+    assert(sinkCalls == 1);
+}
+
+unittest
+{
+    auto logger = new NullLogger;
+    logger.log(LogLevel.Error, "unit", "ignored");
 }

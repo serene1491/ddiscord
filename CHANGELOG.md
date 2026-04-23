@@ -12,6 +12,7 @@ All notable changes to `ddiscord` should be documented in this file.
 - Configurable command error behavior (`CommandErrorBehavior`) for unknown commands, argument issues, and handler failures.
 - Help-oriented command metadata via `@CommandCategory` and `@HideFromHelp`.
 - Expanded runnable examples with `help-bot` and `filter-bot`.
+- `ILogger` and `NullLogger` in `ddiscord.logging` for pluggable logging integrations.
 
 ### Changed
 
@@ -24,6 +25,9 @@ All notable changes to `ddiscord` should be documented in this file.
 - Corrected Components V2 serialization to emit Discord-compatible integer component types and payload shapes.
 - Fixed message component serialization in `MessageCreate` so complex component payloads no longer degrade into unknown types.
 - Improved default user-facing command failure messages to stay concise while still giving actionable hints.
+- Built-in help filtering now matches command text case-insensitively.
+- Updated default Discord `User-Agent` values to the real repository/version and centralized them in `ddiscord.util.identity`.
+- Added automatic retry with exponential backoff for transient REST failures (`5xx`, timeout, transport), configurable through `RestClientConfig`.
 
 ### Refactored
 
@@ -33,3 +37,4 @@ All notable changes to `ddiscord` should be documented in this file.
 ### Documentation
 
 - Updated README/examples/client docs for auto-registration filters, built-in help/error behavior, and new runnable consoles.
+- Expanded runnable examples with focused event, interaction, services, and task scheduler consoles.

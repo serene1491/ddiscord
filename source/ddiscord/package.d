@@ -40,5 +40,6 @@ public import ddiscord.state;
 public import ddiscord.tasks;
 public import ddiscord.util.errors;
 public import ddiscord.util.limits;
+public import ddiscord.util.identity;
 public import ddiscord.util.optional;
 public import ddiscord.util.snowflake;

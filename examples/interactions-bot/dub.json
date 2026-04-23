@@ -1,0 +1,16 @@
+{
+    "name": "ddiscord-interactions-bot",
+    "description": "Interactions and components ddiscord example bot",
+    "targetType": "executable",
+    "targetName": "interactions-bot",
+    "targetPath": ".",
+    "dependencies": {
+        "ddiscord": {
+            "path": "../.."
+        }
+    },
+    "sourcePaths": [
+        "source"
+    ],
+    "mainSourceFile": "source/app.d"
+}

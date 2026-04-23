@@ -60,6 +60,7 @@ import ddiscord.util.optional : Nullable;
 import ddiscord.util.result : Result;
 import ddiscord.util.snowflake : Snowflake;
 import std.algorithm : canFind, sort;
+import std.ascii : toLower;
 import std.conv : to;
 import std.datetime : Clock;
 import std.string : indexOf, startsWith, strip;
@@ -1064,12 +1065,10 @@ final class Client
         gatewayConfig.token = config.token;
         gatewayConfig.intents = config.intents;
         gatewayConfig.url = url;
+        gatewayConfig.logger = logger;
         gatewayConfig.pollTimeout = dur!"msecs"(250);
 
         _gateway = new GatewayClient(gatewayConfig);
-        _gateway.onStatus = (string message) {
-            logger.information("gateway", message);
-        };
         _gateway.onReady = (GatewayReadyInfo ready) {
             tasks.cancel(GatewayReadyWatchdogLabel);
             if (ready.selfUser.id.value != 0)
@@ -1106,7 +1105,6 @@ final class Client
             enqueueInteraction(interaction, channel);
         };
         _gateway.onError = (string message) {
-            logger.error("gateway", message);
             CommandFailedEvent event;
             event.attemptedName = "[gateway]";
             event.error = message;
@@ -1644,14 +1642,27 @@ final class Client
 
     private bool helpQueryMatches(CommandDescriptor descriptor, string query)
     {
-        if (query.length == 0)
+        auto normalizedQuery = normalizeHelpQueryText(query.strip);
+        if (normalizedQuery.length == 0)
             return true;
 
-        auto normalized = query;
-        return descriptor.displayName.canFind(normalized) ||
-            descriptor.description.canFind(normalized) ||
-            descriptor.symbolName.canFind(normalized) ||
-            descriptor.category.canFind(normalized);
+        return helpFieldMatches(descriptor.displayName, normalizedQuery) ||
+            helpFieldMatches(descriptor.description, normalizedQuery) ||
+            helpFieldMatches(descriptor.symbolName, normalizedQuery) ||
+            helpFieldMatches(descriptor.category, normalizedQuery);
+    }
+
+    private bool helpFieldMatches(string value, string normalizedQuery)
+    {
+        return normalizeHelpQueryText(value).canFind(normalizedQuery);
+    }
+
+    private string normalizeHelpQueryText(string value)
+    {
+        string normalized;
+        foreach (ch; value)
+            normalized ~= toLower(ch);
+        return normalized;
     }
 
     private void handleBuiltInComponent(MessageComponentEvent event)
@@ -2854,6 +2865,40 @@ unittest
     assert(bodies[0].canFind(`"type":17`));
     assert(!client.commands.find("help", CommandRoute.Prefix).isNull);
     assert(client.commands.find("hidden-alpha", CommandRoute.Prefix).get.hiddenFromHelp);
+}
+
+unittest
+{
+    string[] bodies;
+    HttpTransport transport = (request) {
+        bodies ~= cast(string) request.body;
+
+        HttpResponse response;
+        response.statusCode = 200;
+        response.body = cast(ubyte[]) `{"id":"1","channel_id":"10","content":"ok","author":{"id":"999","username":"ddiscord","bot":true}}`.dup;
+        return Result!(HttpResponse, HttpError).ok(response);
+    };
+
+    auto client = new Client(ClientConfig(
+        "token",
+        cast(uint) GatewayIntent.Guilds,
+        transport: Nullable!HttpTransport.of(transport)
+    ));
+    client.logger.minimumLevel = cast(LogLevel) -1;
+    client.registerCommands(CommandRegistrationFilter.names("alpha", "ping"));
+
+    Message message;
+    message.channelId = Snowflake(10);
+    message.content = "!help ALPHA";
+    message.author.id = Snowflake(22);
+    message.author.username = "alice";
+
+    auto result = client.receiveMessage(message);
+    assert(result.isOk);
+    assert(bodies.length == 1);
+    assert(bodies[0].canFind("Filter: `ALPHA`"));
+    assert(bodies[0].canFind("**alpha**"));
+    assert(!bodies[0].canFind("**ping**"));
 }
 
 unittest

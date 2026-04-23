@@ -150,6 +150,7 @@ Its defaults are meant to be useful immediately:
 
 - paginated output
 - embeds or Components V2 rendering
+- case-insensitive query matching
 - visibility checks against owner-only and permission-gated commands
 - support for `@CommandCategory` and `@HideFromHelp`
 
