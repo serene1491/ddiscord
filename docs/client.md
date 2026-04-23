@@ -27,6 +27,9 @@ The most important `ClientConfig` fields are:
 - `ownerId`: used by `@RequireOwner`; if owner-only commands are registered and this is unset, startup logs a warning and those commands deny every invoker until you configure an owner ID
 - `autoSyncCommands`: keeps slash commands in sync during startup
 - `logLevel`: optional minimum log level, defaults to `Information`
+- `maxDispatchQueueSize`: upper bound for pending gateway dispatch work (default `4096`, `0` = unbounded)
+- `dropOldestDispatchOnOverflow`: when queue pressure is high, keep latest events by dropping oldest pending items (`true` by default)
+- `dispatchOverflowLogEvery`: overflow warning cadence (`100` by default, `0` disables warning logs)
 
 ## Runtime lifecycle
 
@@ -41,6 +44,33 @@ The most important `ClientConfig` fields are:
 7. starts the dispatch and task loops
 
 Use `wait()` to keep the process running and `stop()` to shut it down cleanly.
+
+## Production Backpressure
+
+`Client` now has bounded dispatch queue controls so long traffic spikes do not grow memory
+without limits.
+
+```d
+auto client = new Client(ClientConfig(
+    token: env.require!string("TOKEN"),
+    intents: cast(uint) (GatewayIntent.Guilds | GatewayIntent.GuildMessages),
+    maxDispatchQueueSize: 8192,
+    dropOldestDispatchOnOverflow: true,
+    dispatchOverflowLogEvery: 50
+));
+```
+
+You can inspect queue pressure at runtime:
+
+```d
+auto health = client.dispatchQueueHealth;
+// health.queued
+// health.peakQueued
+// health.maxQueued
+// health.droppedTotal
+```
+
+This keeps bots responsive under bursts while still exposing enough telemetry to tune limits.
 
 ## Logging
 

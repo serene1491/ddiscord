@@ -203,3 +203,12 @@ struct HelpRequest
     string query;
     size_t page = 1;
 }
+
+/// Runtime dispatch queue telemetry for production monitoring.
+struct DispatchQueueHealth
+{
+    size_t queued;
+    size_t peakQueued;
+    size_t maxQueued;
+    ulong droppedTotal;
+}

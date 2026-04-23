@@ -7,13 +7,15 @@
 module ddiscord.client;
 
 public import ddiscord.client_types : CommandErrorBehavior, CommandErrorContext, CommandErrorKind,
-    CommandHelpBehavior, CommandHelpEntry, CommandHelpPage, CommandRegistrationFilter;
+    CommandHelpBehavior, CommandHelpEntry, CommandHelpPage, CommandRegistrationFilter,
+    DispatchQueueHealth;
 
 import core.sync.condition : Condition;
 import core.sync.mutex : Mutex;
 import core.thread : Thread;
 import core.time : MonoTime, dur;
 import ddiscord.cache : CacheStore;
+import ddiscord.client_queue : DispatchQueuePushOutcome, compactQueue, pushBounded, queueDepth;
 import ddiscord.client_types : HelpRequest, RegistrationCandidate;
 import ddiscord.commands : Command, CommandCategory, CommandDescriptor, CommandExecution,
     CommandExecutionSettings, CommandOptionDescriptor, CommandRegistry, CommandRoute,
@@ -67,6 +69,9 @@ import std.string : indexOf, startsWith, strip;
 import std.traits : Parameters, fullyQualifiedName, isCallable;
 
 /// Client configuration.
+private enum DefaultMaxDispatchQueueSize = 4096;
+private enum DefaultDispatchOverflowLogEvery = 100;
+
 struct ClientConfig
 {
     string token;
@@ -78,6 +83,9 @@ struct ClientConfig
     bool autoSyncCommands = true;
     LogLevel logLevel = LogLevel.Information;
     Nullable!HttpTransport transport;
+    size_t maxDispatchQueueSize = DefaultMaxDispatchQueueSize;
+    bool dropOldestDispatchOnOverflow = true;
+    size_t dispatchOverflowLogEvery = DefaultDispatchOverflowLogEvery;
 }
 
 /// Simple uptime sample used by docs and examples.
@@ -137,6 +145,8 @@ final class Client
     private DispatchItem[] _dispatchQueue;
     private size_t _dispatchQueueHead;
     private ulong _nextHelpQueryTokenId;
+    private size_t _peakDispatchQueueDepth;
+    private ulong _droppedDispatchItems;
 
     this(ClientConfig config)
     {
@@ -247,6 +257,18 @@ final class Client
     void emit(E)(E event)
     {
         events.emit!E(event);
+    }
+
+    /// Returns dispatch-loop queue telemetry for production monitoring.
+    DispatchQueueHealth dispatchQueueHealth() @property
+    {
+        DispatchQueueHealth health;
+        synchronized (_dispatchMutex)
+            health.queued = queueDepth(_dispatchQueue, _dispatchQueueHead);
+        health.peakQueued = _peakDispatchQueueDepth;
+        health.maxQueued = config.maxDispatchQueueSize;
+        health.droppedTotal = _droppedDispatchItems;
+        return health;
     }
 
     /// Updates presence.
@@ -1165,7 +1187,7 @@ final class Client
 
                     item = _dispatchQueue[_dispatchQueueHead];
                     _dispatchQueueHead++;
-                    compactDispatchQueue();
+                    compactQueue(_dispatchQueue, _dispatchQueueHead);
                     hasItem = true;
                 }
 
@@ -1194,7 +1216,18 @@ final class Client
         item.permissions = permissions;
         synchronized (_dispatchMutex)
         {
-            _dispatchQueue ~= item;
+            auto outcome = pushBounded(
+                _dispatchQueue,
+                _dispatchQueueHead,
+                item,
+                config.maxDispatchQueueSize,
+                config.dropOldestDispatchOnOverflow,
+                _droppedDispatchItems
+            );
+            if (outcome.droppedIncoming || outcome.droppedOldest)
+                logDispatchOverflow(outcome, "message");
+            if (outcome.accepted)
+                updateDispatchQueuePeak(outcome.depth);
             _dispatchAvailable.notify();
         }
     }
@@ -1212,7 +1245,18 @@ final class Client
         item.permissions = permissions;
         synchronized (_dispatchMutex)
         {
-            _dispatchQueue ~= item;
+            auto outcome = pushBounded(
+                _dispatchQueue,
+                _dispatchQueueHead,
+                item,
+                config.maxDispatchQueueSize,
+                config.dropOldestDispatchOnOverflow,
+                _droppedDispatchItems
+            );
+            if (outcome.droppedIncoming || outcome.droppedOldest)
+                logDispatchOverflow(outcome, "interaction");
+            if (outcome.accepted)
+                updateDispatchQueuePeak(outcome.depth);
             _dispatchAvailable.notify();
         }
     }
@@ -1228,32 +1272,41 @@ final class Client
         return _dispatchQueueHead >= _dispatchQueue.length;
     }
 
-    private void compactDispatchQueue()
-    {
-        if (_dispatchQueueHead == 0)
-            return;
-
-        if (_dispatchQueueHead >= _dispatchQueue.length)
-        {
-            _dispatchQueue.length = 0;
-            _dispatchQueueHead = 0;
-            return;
-        }
-
-        if (_dispatchQueueHead >= 64 && _dispatchQueueHead * 2 >= _dispatchQueue.length)
-        {
-            _dispatchQueue = _dispatchQueue[_dispatchQueueHead .. $].dup;
-            _dispatchQueueHead = 0;
-        }
-    }
-
     private void resetDispatchQueue()
     {
         synchronized (_dispatchMutex)
         {
             _dispatchQueue.length = 0;
             _dispatchQueueHead = 0;
+            _peakDispatchQueueDepth = 0;
+            _droppedDispatchItems = 0;
         }
+    }
+
+    private void updateDispatchQueuePeak(size_t depth)
+    {
+        if (depth > _peakDispatchQueueDepth)
+            _peakDispatchQueueDepth = depth;
+    }
+
+    private void logDispatchOverflow(DispatchQueuePushOutcome outcome, string kind)
+    {
+        if (config.dispatchOverflowLogEvery == 0)
+            return;
+        if (outcome.droppedTotal % config.dispatchOverflowLogEvery != 0)
+            return;
+
+        auto action = config.dropOldestDispatchOnOverflow
+            ? "dropping the oldest pending item"
+            : "dropping the new incoming item";
+
+        logger.warning(
+            "client",
+            "Dispatch queue overflow reached " ~ outcome.droppedTotal.to!string ~
+                " dropped item(s) while enqueueing " ~ kind ~ " events; " ~ action ~
+                ". queueDepth=" ~ outcome.depth.to!string ~
+                ", maxDepth=" ~ config.maxDispatchQueueSize.to!string ~ "."
+        );
     }
 
     private void startTaskLoop()
@@ -3233,6 +3286,34 @@ unittest
     assert(result.isOk);
     assert(client.sentMessages.length == 1);
     assert(client.sentMessages[0].content == "ok");
+}
+
+unittest
+{
+    auto client = new Client(ClientConfig(
+        "token",
+        cast(uint) GatewayIntent.Guilds,
+        maxDispatchQueueSize: 2,
+        dropOldestDispatchOnOverflow: false,
+        dispatchOverflowLogEvery: 1
+    ));
+
+    Message one;
+    one.content = "!one";
+    Message two;
+    two.content = "!two";
+    Message three;
+    three.content = "!three";
+
+    client.enqueueMessage(one);
+    client.enqueueMessage(two);
+    client.enqueueMessage(three);
+
+    auto health = client.dispatchQueueHealth;
+    assert(health.maxQueued == 2);
+    assert(health.queued == 2);
+    assert(health.peakQueued == 2);
+    assert(health.droppedTotal == 1);
 }
 
 unittest

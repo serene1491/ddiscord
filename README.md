@@ -14,6 +14,13 @@ This library is also used in personal projects, so changes may be frequent and o
 - Interaction helpers for replies, follow-ups, modals, autocomplete, and deferred responses
 - Components V2 coverage with runnable examples
 - State, cache, rate limiting, services, tasks, and Lua/plugin support
+- Production-minded runtime controls (dispatch backpressure, error surfacing, and telemetry)
+
+## Philosophy
+
+`ddiscord` is being built as a production runtime for D bots: typed APIs, explicit failure
+handling, bounded backpressure, and modular internals that scale past small toy projects.
+More detail is in [`docs/philosophy.md`](docs/philosophy.md).
 
 ## Installing
 
@@ -261,6 +268,7 @@ arguments, and handler failures. That behavior is also customizable through `cli
 ## Documentation
 
 - [`docs/client.md`](docs/client.md) for the runtime/client guide
+- [`docs/philosophy.md`](docs/philosophy.md) for project direction and engineering principles
 - [`examples/README.md`](examples/README.md) for the runnable consoles
 - [`CHANGELOG.md`](CHANGELOG.md) for release notes in progress
 

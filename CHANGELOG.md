@@ -13,6 +13,9 @@ All notable changes to `ddiscord` should be documented in this file.
 - Help-oriented command metadata via `@CommandCategory` and `@HideFromHelp`.
 - Expanded runnable examples with `help-bot` and `filter-bot`.
 - `ILogger` and `NullLogger` in `ddiscord.logging` for pluggable logging integrations.
+- Dispatch queue backpressure controls in `ClientConfig` (`maxDispatchQueueSize`, `dropOldestDispatchOnOverflow`, `dispatchOverflowLogEvery`).
+- `client.dispatchQueueHealth` runtime telemetry for queued/peak/dropped dispatch tracking.
+- Production philosophy document at `docs/philosophy.md`.
 
 ### Changed
 
@@ -33,6 +36,7 @@ All notable changes to `ddiscord` should be documented in this file.
 
 - Split large command/client type surfaces into dedicated modules:
   `ddiscord.command_types` and `ddiscord.client_types`.
+- Split client dispatch queue internals into `ddiscord.client_queue` to reduce `client.d` responsibility.
 
 ### Documentation
 
