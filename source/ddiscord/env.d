@@ -7,7 +7,7 @@
 module ddiscord.env;
 
 import ddiscord.util.errors : DdiscordException, formatError;
-import std.conv : to;
+import std.conv : ConvException, to;
 import std.file : exists, isDir, readText;
 import std.path : buildPath;
 import std.process : environment;
@@ -63,7 +63,7 @@ struct EnvLoader
         {
             return value.to!T;
         }
-        catch (Exception e)
+        catch (ConvException e)
         {
             throw new DdiscordException(formatError(
                 "env",

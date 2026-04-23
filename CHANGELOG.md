@@ -2,6 +2,15 @@
 
 All notable changes to `ddiscord` should be documented in this file.
 
+## [0.3.1]
+
+### Fixed
+
+- Reduced noisy unittest output by disabling intentional dispatch-overflow warning logs in the queue-boundary client test.
+- Hardened REST rate-limit retry parsing to handle multiple `retry_after` JSON types safely and ignore invalid/non-positive delays.
+- Narrowed several broad conversion catches to typed conversion exceptions in help/env/scripting parsing paths.
+- Improved gateway diagnostics by logging explicit heartbeat-send and graceful-close failures before reconnect/cleanup.
+
 ## [0.3.0]
 
 ### Added

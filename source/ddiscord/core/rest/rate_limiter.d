@@ -12,9 +12,9 @@ import ddiscord.util.limits : DiscordGlobalRestRequestsPerSecond;
 import ddiscord.util.optional : Nullable;
 import ddiscord.util.result : Result;
 import std.array : appender;
-import std.conv : to;
+import std.conv : ConvException, to;
 import std.datetime : Clock, Duration, SysTime;
-import std.json : JSONType, JSONValue, parseJSON;
+import std.json : JSONException, JSONType, JSONValue, parseJSON;
 import std.string : split, strip;
 import core.thread : Thread;
 import core.time : dur;
@@ -187,7 +187,7 @@ private Nullable!uint parseUIntHeader(string[string] headers, string name)
     {
         return Nullable!uint.of(value.get.to!uint);
     }
-    catch (Exception)
+    catch (ConvException)
     {
         return Nullable!uint.init;
     }
@@ -203,7 +203,7 @@ private Nullable!int parseIntHeader(string[string] headers, string name)
     {
         return Nullable!int.of(value.get.to!int);
     }
-    catch (Exception)
+    catch (ConvException)
     {
         return Nullable!int.init;
     }
@@ -219,7 +219,7 @@ private Nullable!Duration parseDurationHeader(string[string] headers, string nam
     {
         return Nullable!Duration.of(parseSeconds(value.get));
     }
-    catch (Exception)
+    catch (ConvException)
     {
         return Nullable!Duration.init;
     }
@@ -230,13 +230,9 @@ private Nullable!Duration parseRetryAfter(string[string] headers, string body)
     auto headerValue = getHeader(headers, "retry-after");
     if (!headerValue.isNull)
     {
-        try
-        {
-            return Nullable!Duration.of(parseSeconds(headerValue.get));
-        }
-        catch (Exception)
-        {
-        }
+        auto parsed = parseDurationSafe(headerValue.get);
+        if (!parsed.isNull)
+            return parsed;
     }
 
     if (body.length != 0)
@@ -247,13 +243,46 @@ private Nullable!Duration parseRetryAfter(string[string] headers, string body)
             auto retryAfter = json.object.get("retry_after", JSONValue.init);
             if (retryAfter.type != JSONType.null_)
             {
-                auto value = retryAfter.type == JSONType.float_
-                    ? retryAfter.floating
-                    : retryAfter.integer;
-                return Nullable!Duration.of(parseSeconds(value.to!string));
+                final switch (retryAfter.type)
+                {
+                    case JSONType.float_:
+                    {
+                        auto parsed = parseDurationSafe(retryAfter.floating.to!string);
+                        if (!parsed.isNull)
+                            return parsed;
+                        break;
+                    }
+                    case JSONType.integer:
+                    {
+                        auto parsed = parseDurationSafe(retryAfter.integer.to!string);
+                        if (!parsed.isNull)
+                            return parsed;
+                        break;
+                    }
+                    case JSONType.uinteger:
+                    {
+                        auto parsed = parseDurationSafe(retryAfter.uinteger.to!string);
+                        if (!parsed.isNull)
+                            return parsed;
+                        break;
+                    }
+                    case JSONType.string:
+                    {
+                        auto parsed = parseDurationSafe(retryAfter.str);
+                        if (!parsed.isNull)
+                            return parsed;
+                        break;
+                    }
+                    case JSONType.object:
+                    case JSONType.array:
+                    case JSONType.true_:
+                    case JSONType.false_:
+                    case JSONType.null_:
+                        break;
+                }
             }
         }
-        catch (Exception)
+        catch (JSONException)
         {
         }
     }
@@ -279,6 +308,21 @@ private Duration parseSeconds(string value)
     }
 
     return result;
+}
+
+private Nullable!Duration parseDurationSafe(string raw)
+{
+    try
+    {
+        auto parsed = parseSeconds(raw);
+        if (parsed <= Duration.zero)
+            return Nullable!Duration.init;
+        return Nullable!Duration.of(parsed);
+    }
+    catch (ConvException)
+    {
+        return Nullable!Duration.init;
+    }
 }
 
 private string normalizeHeader(string value)

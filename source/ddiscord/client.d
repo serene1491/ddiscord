@@ -66,7 +66,7 @@ import ddiscord.util.result : Result;
 import ddiscord.util.snowflake : Snowflake;
 import std.algorithm : canFind, sort;
 import std.ascii : toLower;
-import std.conv : to;
+import std.conv : ConvException, to;
 import std.string : indexOf, startsWith, strip;
 import std.traits : Parameters, fullyQualifiedName, isCallable;
 
@@ -1457,7 +1457,7 @@ final class Client
         {
             page = raw.to!size_t;
         }
-        catch (Exception)
+        catch (ConvException)
         {
             return Result!(size_t, string).err(formatError(
                 "help",
@@ -3149,7 +3149,7 @@ unittest
         cast(uint) GatewayIntent.Guilds,
         maxDispatchQueueSize: 2,
         dropOldestDispatchOnOverflow: false,
-        dispatchOverflowLogEvery: 1
+        dispatchOverflowLogEvery: 0
     ));
 
     Message one;

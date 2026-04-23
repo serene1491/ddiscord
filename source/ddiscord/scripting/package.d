@@ -11,7 +11,7 @@ import ddiscord.util.errors : DdiscordException, formatError;
 import ddiscord.util.result : Result;
 import std.algorithm : canFind;
 import std.array : join;
-import std.conv : to;
+import std.conv : ConvException, to;
 import std.string : toStringz;
 import std.traits : Parameters, ReturnType, isCallable;
 
@@ -939,7 +939,7 @@ private size_t extractLine(string message)
         {
             try
                 return message[index + 1 .. end].to!size_t;
-            catch (Exception)
+            catch (ConvException)
             {
                 return 0;
             }

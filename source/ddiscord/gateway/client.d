@@ -757,8 +757,9 @@ final class GatewayClient
                 {
                     sendHeartbeat();
                 }
-                catch (Exception)
+                catch (Exception error)
                 {
+                    reportError("Heartbeat send failed; resetting gateway connection. detail=" ~ error.msg);
                     abortCurrentConnection();
                     return;
                 }
@@ -837,8 +838,9 @@ final class GatewayClient
                 if (graceful)
                     _socket.close();
             }
-            catch (Exception)
+            catch (Exception error)
             {
+                reportError("Graceful gateway socket close failed. detail=" ~ error.msg);
             }
             _socket = null;
         }

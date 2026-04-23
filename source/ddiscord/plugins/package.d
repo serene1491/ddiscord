@@ -477,8 +477,15 @@ final class PluginRegistry
                     return;
                 }
             }
-            catch (Exception)
+            catch (Exception error)
             {
+                if (logger !is null)
+                {
+                    logger.warning(
+                        "plugins",
+                        "Could not determine manifest size for `" ~ manifestPath ~ "`; continuing without size guard. detail=" ~ error.msg
+                    );
+                }
             }
         }
 

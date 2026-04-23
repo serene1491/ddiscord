@@ -11,8 +11,8 @@ import ddiscord.state : StateStore;
 import ddiscord.util.errors : formatError;
 import ddiscord.util.result : Result;
 import ddiscord.util.snowflake : Snowflake;
-import std.base64 : Base64URLNoPadding;
-import std.conv : to;
+import std.base64 : Base64Exception, Base64URLNoPadding;
+import std.conv : ConvException, to;
 import std.datetime : Clock;
 import std.string : startsWith;
 
@@ -90,7 +90,7 @@ Result!(HelpNavigationTarget, string) parsePersistentHelpCustomId(StateStore sta
     {
         ownerId = Snowflake(parts[3].to!ulong);
     }
-    catch (Exception)
+    catch (ConvException)
     {
         return Result!(HelpNavigationTarget, string).err(formatError(
             "help",
@@ -105,7 +105,7 @@ Result!(HelpNavigationTarget, string) parsePersistentHelpCustomId(StateStore sta
     {
         page = parts[4].to!size_t;
     }
-    catch (Exception)
+    catch (ConvException)
     {
         return Result!(HelpNavigationTarget, string).err(formatError(
             "help",
@@ -133,7 +133,7 @@ Result!(HelpNavigationTarget, string) parsePersistentHelpCustomId(StateStore sta
             auto decoded = Base64URLNoPadding.decode(parts[6]);
             query = cast(string) decoded.idup;
         }
-        catch (Exception)
+        catch (Base64Exception)
         {
             return Result!(HelpNavigationTarget, string).err(formatError(
                 "help",
