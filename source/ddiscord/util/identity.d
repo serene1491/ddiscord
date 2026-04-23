@@ -10,7 +10,7 @@ module ddiscord.util.identity;
 enum DdiscordRepositoryUrl = "https://github.com/soloverdrive/ddiscord";
 
 /// Library version used in Discord user-agent strings.
-enum DdiscordVersion = "0.3.1";
+enum DdiscordVersion = "0.3.2";
 
 /// Discord-compliant user-agent used by default in HTTP and REST clients.
 enum DdiscordUserAgent = "DiscordBot (" ~ DdiscordRepositoryUrl ~ ", " ~ DdiscordVersion ~ ")";

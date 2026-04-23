@@ -81,7 +81,7 @@ All notable changes to `ddiscord` should be documented in this file.
 - `ILogger` and `NullLogger` in `ddiscord.logging` for pluggable logging integrations.
 - Dispatch queue backpressure controls in `ClientConfig` (`maxDispatchQueueSize`, `dropOldestDispatchOnOverflow`, `dispatchOverflowLogEvery`).
 - `client.dispatchQueueHealth` runtime telemetry for queued/peak/dropped dispatch tracking.
-- Philosophy document at `manual/philosophy.md`.
+- Production philosophy document at `manual/philosophy.md`.
 - Real `client.uptime` tracking with elapsed milliseconds and human-readable formatting.
 - Lua plugin host API additions: `state_has`, `state_del`, `log_info`, `log_warn`, `log_error`.
 - Lua plugin context exports: `plugin_version`, `plugin_api_version`, `plugin_entrypoint`, and `plugin_sandbox`.
