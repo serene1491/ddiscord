@@ -22,6 +22,19 @@ import std.datetime : Duration;
 import std.json : JSONType, JSONValue, parseJSON;
 import std.string : strip;
 
+version (Posix)
+{
+    import core.sys.posix.signal : SIGPIPE, SIG_IGN, signal;
+}
+
+version (Posix)
+shared static this()
+{
+    // Prevent process-wide termination on socket writes to a peer that already closed.
+    // The HTTP layer will surface the failure as a regular transport error instead.
+    signal(SIGPIPE, SIG_IGN);
+}
+
 /// Supported HTTP verbs for Discord REST.
 enum HttpMethod
 {

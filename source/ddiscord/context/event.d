@@ -11,16 +11,18 @@ import ddiscord.context.command : CommandContext, CommandSource, ContextMenuComm
     HybridCommandContext, PrefixCommandContext, SlashCommandContext;
 import ddiscord.logging : Logger;
 import ddiscord.models.channel : Channel;
-import ddiscord.models.guild : Guild;
+import ddiscord.models.guild : Guild, UnavailableGuild;
 import ddiscord.models.interaction : Interaction, InteractionSubmittedComponent;
 import ddiscord.models.member : GuildMember;
 import ddiscord.models.message : Message;
 import ddiscord.models.presence : Activity, StatusType;
+import ddiscord.models.role : Role;
 import ddiscord.models.user : User;
 import ddiscord.rest : RestClient;
 import ddiscord.services : ServiceContainer;
 import ddiscord.state : StateStore;
 import ddiscord.util.optional : Nullable;
+import ddiscord.util.snowflake : Snowflake;
 
 /// Shared event context surface with cached/current entities.
 struct EventContext
@@ -84,6 +86,30 @@ struct ResumedEventContext
     User selfUser;
 }
 
+/// Guild-create event context.
+struct GuildCreateEventContext
+{
+    EventContext event;
+    alias event this;
+    Guild guildData;
+}
+
+/// Guild-delete event context.
+struct GuildDeleteEventContext
+{
+    EventContext event;
+    alias event this;
+    UnavailableGuild guildData;
+}
+
+/// Guild member remove event context.
+struct GuildMemberRemoveEventContext
+{
+    EventContext event;
+    alias event this;
+    User userData;
+}
+
 /// Guild-member event context.
 struct GuildMemberAddEventContext
 {
@@ -92,12 +118,109 @@ struct GuildMemberAddEventContext
     GuildMember memberData;
 }
 
+/// Channel-create event context.
+struct ChannelCreateEventContext
+{
+    EventContext event;
+    alias event this;
+    Channel channelData;
+}
+
+/// Channel-update event context.
+struct ChannelUpdateEventContext
+{
+    EventContext event;
+    alias event this;
+    Channel channelData;
+}
+
+/// Channel-delete event context.
+struct ChannelDeleteEventContext
+{
+    EventContext event;
+    alias event this;
+    Channel channelData;
+}
+
+/// Channel pins update event context.
+struct ChannelPinsUpdateEventContext
+{
+    EventContext event;
+    alias event this;
+    Snowflake channelId;
+    Nullable!Snowflake guildId;
+    string lastPinTimestamp;
+}
+
 /// Message-create event context.
 struct MessageCreateEventContext
 {
     EventContext event;
     alias event this;
     Message message;
+}
+
+/// Message-update event context.
+struct MessageUpdateEventContext
+{
+    EventContext event;
+    alias event this;
+    Message message;
+}
+
+/// Message-delete event context.
+struct MessageDeleteEventContext
+{
+    EventContext event;
+    alias event this;
+    Snowflake messageId;
+    Nullable!Snowflake channelId;
+    Nullable!Snowflake guildId;
+}
+
+/// Message reaction add event context.
+struct MessageReactionAddEventContext
+{
+    EventContext event;
+    alias event this;
+    Snowflake userId;
+    Snowflake channelId;
+    Snowflake messageId;
+    Nullable!Snowflake guildId;
+    string emojiName;
+}
+
+/// Message reaction remove event context.
+struct MessageReactionRemoveEventContext
+{
+    EventContext event;
+    alias event this;
+    Snowflake userId;
+    Snowflake channelId;
+    Snowflake messageId;
+    Nullable!Snowflake guildId;
+    string emojiName;
+}
+
+/// Message reaction remove-all event context.
+struct MessageReactionRemoveAllEventContext
+{
+    EventContext event;
+    alias event this;
+    Snowflake channelId;
+    Snowflake messageId;
+    Nullable!Snowflake guildId;
+}
+
+/// Message reaction remove-emoji event context.
+struct MessageReactionRemoveEmojiEventContext
+{
+    EventContext event;
+    alias event this;
+    Snowflake channelId;
+    Snowflake messageId;
+    Nullable!Snowflake guildId;
+    string emojiName;
 }
 
 /// Base interaction event context.
@@ -143,6 +266,99 @@ struct PresenceUpdateEventContext
     alias event this;
     StatusType status;
     Activity activity;
+}
+
+/// Typing-start event context.
+struct TypingStartEventContext
+{
+    EventContext event;
+    alias event this;
+    Snowflake channelId;
+    Nullable!Snowflake guildId;
+    Snowflake userId;
+    long timestampUnix;
+}
+
+/// Guild role create event context.
+struct GuildRoleCreateEventContext
+{
+    EventContext event;
+    alias event this;
+    Snowflake guildId;
+    Role roleData;
+}
+
+/// Guild role update event context.
+struct GuildRoleUpdateEventContext
+{
+    EventContext event;
+    alias event this;
+    Snowflake guildId;
+    Role roleData;
+}
+
+/// Guild role delete event context.
+struct GuildRoleDeleteEventContext
+{
+    EventContext event;
+    alias event this;
+    Snowflake guildId;
+    Snowflake roleId;
+}
+
+/// Invite create event context.
+struct InviteCreateEventContext
+{
+    EventContext event;
+    alias event this;
+    string code;
+    Snowflake channelId;
+    Nullable!Snowflake guildId;
+}
+
+/// Invite delete event context.
+struct InviteDeleteEventContext
+{
+    EventContext event;
+    alias event this;
+    string code;
+    Snowflake channelId;
+    Nullable!Snowflake guildId;
+}
+
+/// Webhooks update event context.
+struct WebhooksUpdateEventContext
+{
+    EventContext event;
+    alias event this;
+    Snowflake channelId;
+    Nullable!Snowflake guildId;
+}
+
+/// Thread create event context.
+struct ThreadCreateEventContext
+{
+    EventContext event;
+    alias event this;
+    Channel threadData;
+}
+
+/// Thread update event context.
+struct ThreadUpdateEventContext
+{
+    EventContext event;
+    alias event this;
+    Channel threadData;
+}
+
+/// Thread delete event context.
+struct ThreadDeleteEventContext
+{
+    EventContext event;
+    alias event this;
+    Snowflake threadId;
+    Nullable!Snowflake guildId;
+    Nullable!Snowflake parentId;
 }
 
 /// Command success event context.

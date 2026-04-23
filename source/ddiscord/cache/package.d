@@ -119,6 +119,41 @@ final class CacheStore
             return Nullable!Message.init;
         }
     }
+
+    /// Evicts a cached user by ID.
+    void evictUser(Snowflake id)
+    {
+        synchronized (_mutex)
+            _users.remove(id.value);
+    }
+
+    /// Evicts a cached channel by ID.
+    void evictChannel(Snowflake id)
+    {
+        synchronized (_mutex)
+            _channels.remove(id.value);
+    }
+
+    /// Evicts a cached guild by ID.
+    void evictGuild(Snowflake id)
+    {
+        synchronized (_mutex)
+            _guilds.remove(id.value);
+    }
+
+    /// Evicts a cached role by ID.
+    void evictRole(Snowflake id)
+    {
+        synchronized (_mutex)
+            _roles.remove(id.value);
+    }
+
+    /// Evicts a cached message by ID.
+    void evictMessage(Snowflake id)
+    {
+        synchronized (_mutex)
+            _messages.remove(id.value);
+    }
 }
 
 unittest
@@ -129,4 +164,6 @@ unittest
     user.username = "alice";
     cache.store(user);
     assert(cache.user(Snowflake(1)).get.username == "alice");
+    cache.evictUser(Snowflake(1));
+    assert(cache.user(Snowflake(1)).isNull);
 }

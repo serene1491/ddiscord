@@ -26,16 +26,34 @@ import ddiscord.commands : Command, CommandCategory, CommandDescriptor, CommandE
     RequirePermissions, UserCommand;
 import ddiscord.context.command : CommandContext, CommandSource;
 import ddiscord.context.event : AutocompleteInteractionEventContext, CommandExecutedEventContext,
-    CommandFailedEventContext, EventContext, GuildMemberAddEventContext,
-    InteractionCreateEventContext,
-    MessageComponentEventContext, MessageCreateEventContext, ModalSubmitEventContext,
-    PresenceUpdateEventContext, ReadyEventContext, ResumedEventContext;
+    ChannelCreateEventContext, ChannelDeleteEventContext, ChannelPinsUpdateEventContext,
+    ChannelUpdateEventContext, CommandFailedEventContext, EventContext, GuildCreateEventContext,
+    GuildDeleteEventContext, GuildMemberAddEventContext, GuildMemberRemoveEventContext,
+    GuildRoleCreateEventContext, GuildRoleDeleteEventContext, GuildRoleUpdateEventContext,
+    InteractionCreateEventContext, InviteCreateEventContext, InviteDeleteEventContext,
+    MessageComponentEventContext, MessageCreateEventContext, MessageDeleteEventContext,
+    MessageReactionAddEventContext, MessageReactionRemoveAllEventContext,
+    MessageReactionRemoveEmojiEventContext, MessageReactionRemoveEventContext,
+    MessageUpdateEventContext, ModalSubmitEventContext, PresenceUpdateEventContext,
+    ReadyEventContext, ResumedEventContext, ThreadCreateEventContext, ThreadDeleteEventContext,
+    ThreadUpdateEventContext, TypingStartEventContext, WebhooksUpdateEventContext;
 import ddiscord.events.dispatcher : Event, EventDispatcher;
 import ddiscord.events.types : AutocompleteInteractionEvent, CommandExecutedEvent,
-    CommandFailedEvent, GuildMemberAddEvent, InteractionCreateEvent, MessageComponentEvent,
-    MessageCreateEvent, ModalSubmitEvent, PresenceUpdateEvent, ReadyEvent, ResumedEvent;
+    ChannelCreateEvent, ChannelDeleteEvent, ChannelPinsUpdateEvent, ChannelUpdateEvent,
+    CommandFailedEvent, GuildCreateEvent, GuildDeleteEvent, GuildMemberAddEvent,
+    GuildMemberRemoveEvent, GuildRoleCreateEvent, GuildRoleDeleteEvent, GuildRoleUpdateEvent,
+    InteractionCreateEvent, InviteCreateEvent, InviteDeleteEvent, MessageComponentEvent,
+    MessageCreateEvent, MessageDeleteEvent, MessageReactionAddEvent,
+    MessageReactionRemoveAllEvent, MessageReactionRemoveEmojiEvent, MessageReactionRemoveEvent,
+    MessageUpdateEvent, ModalSubmitEvent, PresenceUpdateEvent, ReadyEvent, ResumedEvent,
+    ThreadCreateEvent, ThreadDeleteEvent, ThreadUpdateEvent, TypingStartEvent,
+    WebhooksUpdateEvent;
 import ddiscord.gateway.client : GatewayClient, GatewayClientConfig, GatewayGuildMemberAddInfo,
-    GatewayPresenceUpdateInfo, GatewayReadyInfo;
+    GatewayGuildMemberRemoveInfo, GatewayGuildRoleDeleteInfo, GatewayGuildRoleInfo,
+    GatewayInviteInfo, GatewayMessageDeleteInfo, GatewayMessageReactionInfo,
+    GatewayMessageReactionRemoveAllInfo, GatewayPresenceUpdateInfo, GatewayReadyInfo,
+    GatewayThreadDeleteInfo, GatewayTypingStartInfo, GatewayWebhooksUpdateInfo,
+    GatewayChannelPinsUpdateInfo;
 import ddiscord.gateway.intents : GatewayIntent;
 import ddiscord.help.navigation : BuiltInHelpCustomIdPrefix, BuiltInHelpDefaultPageSize,
     BuiltInHelpNoopCustomId, buildPersistentHelpCustomId, parsePersistentHelpCustomId;
@@ -44,7 +62,7 @@ import ddiscord.logging : LogLevel, Logger;
 import ddiscord.models.application_command : ApplicationCommandDefinition, ApplicationCommandOption,
     ApplicationCommandOptionType, ApplicationCommandType, InteractionType;
 import ddiscord.models.channel : Channel;
-import ddiscord.models.guild : Guild;
+import ddiscord.models.guild : Guild, UnavailableGuild;
 import ddiscord.models.interaction : Interaction, InteractionOption;
 import ddiscord.models.member : GuildMember;
 import ddiscord.models.message : Message, MessageCreate;
@@ -927,6 +945,79 @@ final class Client
         return ctx;
     }
 
+    private GuildCreateEventContext buildGuildCreateEventContext(Guild guild)
+    {
+        GuildCreateEventContext ctx;
+        ctx.event = buildEventContext(Nullable!User.of(_selfUser), Nullable!Guild.of(guild));
+        ctx.guildData = guild;
+        return ctx;
+    }
+
+    private GuildDeleteEventContext buildGuildDeleteEventContext(UnavailableGuild guild)
+    {
+        GuildDeleteEventContext ctx;
+        ctx.event = buildEventContext(Nullable!User.of(_selfUser), lookupGuild(Nullable!Snowflake.of(guild.id)));
+        ctx.guildData = guild;
+        return ctx;
+    }
+
+    private GuildMemberRemoveEventContext buildGuildMemberRemoveEventContext(
+        User user,
+        Nullable!Snowflake guildId
+    )
+    {
+        GuildMemberRemoveEventContext ctx;
+        ctx.event = buildEventContext(Nullable!User.of(user), lookupGuild(guildId));
+        ctx.userData = user;
+        return ctx;
+    }
+
+    private ChannelCreateEventContext buildChannelCreateEventContext(Channel channel)
+    {
+        ChannelCreateEventContext ctx;
+        ctx.event = buildEventContext(
+            Nullable!User.of(_selfUser),
+            lookupGuild(channel.guildId),
+            Nullable!GuildMember.init,
+            nullableChannel(channel)
+        );
+        ctx.channelData = channel;
+        return ctx;
+    }
+
+    private ChannelUpdateEventContext buildChannelUpdateEventContext(Channel channel)
+    {
+        ChannelUpdateEventContext ctx;
+        ctx.event = buildChannelCreateEventContext(channel).event;
+        ctx.channelData = channel;
+        return ctx;
+    }
+
+    private ChannelDeleteEventContext buildChannelDeleteEventContext(Channel channel)
+    {
+        ChannelDeleteEventContext ctx;
+        ctx.event = buildChannelCreateEventContext(channel).event;
+        ctx.channelData = channel;
+        return ctx;
+    }
+
+    private ChannelPinsUpdateEventContext buildChannelPinsUpdateEventContext(
+        GatewayChannelPinsUpdateInfo info
+    )
+    {
+        ChannelPinsUpdateEventContext ctx;
+        ctx.event = buildEventContext(
+            Nullable!User.of(_selfUser),
+            lookupGuild(info.guildId),
+            Nullable!GuildMember.init,
+            lookupChannel(info.channelId)
+        );
+        ctx.channelId = info.channelId;
+        ctx.guildId = info.guildId;
+        ctx.lastPinTimestamp = info.lastPinTimestamp;
+        return ctx;
+    }
+
     private MessageCreateEventContext buildMessageCreateEventContext(Message message, Channel channel)
     {
         MessageCreateEventContext ctx;
@@ -938,6 +1029,122 @@ final class Client
             Nullable!Message.of(message)
         );
         ctx.message = message;
+        return ctx;
+    }
+
+    private MessageUpdateEventContext buildMessageUpdateEventContext(Message message)
+    {
+        Channel channel;
+        channel.id = message.channelId;
+        if (!message.guildId.isNull)
+            channel.guildId = message.guildId;
+
+        MessageUpdateEventContext ctx;
+        ctx.event = buildMessageCreateEventContext(message, channel).event;
+        ctx.message = message;
+        return ctx;
+    }
+
+    private MessageDeleteEventContext buildMessageDeleteEventContext(
+        GatewayMessageDeleteInfo info,
+        Nullable!Message cachedMessage
+    )
+    {
+        MessageDeleteEventContext ctx;
+        Nullable!User user;
+        Nullable!GuildMember member;
+        if (!cachedMessage.isNull)
+        {
+            user = Nullable!User.of(cachedMessage.get.author);
+            member = cachedMessage.get.member;
+        }
+
+        Channel channel;
+        if (!info.channelId.isNull)
+            channel.id = info.channelId.get;
+
+        ctx.event = buildEventContext(
+            user,
+            lookupGuild(info.guildId),
+            member,
+            nullableChannel(channel),
+            cachedMessage
+        );
+        ctx.messageId = info.messageId;
+        ctx.channelId = info.channelId;
+        ctx.guildId = info.guildId;
+        return ctx;
+    }
+
+    private MessageReactionAddEventContext buildMessageReactionAddEventContext(
+        GatewayMessageReactionInfo info
+    )
+    {
+        MessageReactionAddEventContext ctx;
+        auto user = cache.user(info.userId);
+        ctx.event = buildEventContext(
+            user,
+            lookupGuild(info.guildId),
+            Nullable!GuildMember.init,
+            lookupChannel(info.channelId),
+            cache.message(info.messageId)
+        );
+        ctx.userId = info.userId;
+        ctx.channelId = info.channelId;
+        ctx.messageId = info.messageId;
+        ctx.guildId = info.guildId;
+        ctx.emojiName = info.emojiName;
+        return ctx;
+    }
+
+    private MessageReactionRemoveEventContext buildMessageReactionRemoveEventContext(
+        GatewayMessageReactionInfo info
+    )
+    {
+        MessageReactionRemoveEventContext ctx;
+        auto built = buildMessageReactionAddEventContext(info);
+        ctx.event = built.event;
+        ctx.userId = built.userId;
+        ctx.channelId = built.channelId;
+        ctx.messageId = built.messageId;
+        ctx.guildId = built.guildId;
+        ctx.emojiName = built.emojiName;
+        return ctx;
+    }
+
+    private MessageReactionRemoveAllEventContext buildMessageReactionRemoveAllEventContext(
+        GatewayMessageReactionRemoveAllInfo info
+    )
+    {
+        MessageReactionRemoveAllEventContext ctx;
+        ctx.event = buildEventContext(
+            Nullable!User.of(_selfUser),
+            lookupGuild(info.guildId),
+            Nullable!GuildMember.init,
+            lookupChannel(info.channelId),
+            cache.message(info.messageId)
+        );
+        ctx.channelId = info.channelId;
+        ctx.messageId = info.messageId;
+        ctx.guildId = info.guildId;
+        return ctx;
+    }
+
+    private MessageReactionRemoveEmojiEventContext buildMessageReactionRemoveEmojiEventContext(
+        GatewayMessageReactionInfo info
+    )
+    {
+        MessageReactionRemoveEmojiEventContext ctx;
+        GatewayMessageReactionRemoveAllInfo removeAllInfo;
+        removeAllInfo.channelId = info.channelId;
+        removeAllInfo.messageId = info.messageId;
+        removeAllInfo.guildId = info.guildId;
+        auto removeAll = buildMessageReactionRemoveAllEventContext(removeAllInfo);
+        ctx.event = removeAll.event;
+        ctx.channelId = info.channelId;
+        ctx.messageId = info.messageId;
+        ctx.guildId = info.guildId;
+        ctx.emojiName = info.emojiName;
         return ctx;
     }
 
@@ -1034,6 +1241,138 @@ final class Client
         return ctx;
     }
 
+    private TypingStartEventContext buildTypingStartEventContext(GatewayTypingStartInfo info)
+    {
+        TypingStartEventContext ctx;
+        auto user = cache.user(info.userId);
+        ctx.event = buildEventContext(
+            user,
+            lookupGuild(info.guildId),
+            Nullable!GuildMember.init,
+            lookupChannel(info.channelId)
+        );
+        ctx.channelId = info.channelId;
+        ctx.guildId = info.guildId;
+        ctx.userId = info.userId;
+        ctx.timestampUnix = info.timestampUnix;
+        return ctx;
+    }
+
+    private GuildRoleCreateEventContext buildGuildRoleCreateEventContext(GatewayGuildRoleInfo info)
+    {
+        GuildRoleCreateEventContext ctx;
+        ctx.event = buildEventContext(
+            Nullable!User.of(_selfUser),
+            lookupGuild(Nullable!Snowflake.of(info.guildId))
+        );
+        ctx.guildId = info.guildId;
+        ctx.roleData = info.role;
+        return ctx;
+    }
+
+    private GuildRoleUpdateEventContext buildGuildRoleUpdateEventContext(GatewayGuildRoleInfo info)
+    {
+        GuildRoleUpdateEventContext ctx;
+        auto built = buildGuildRoleCreateEventContext(info);
+        ctx.event = built.event;
+        ctx.guildId = built.guildId;
+        ctx.roleData = built.roleData;
+        return ctx;
+    }
+
+    private GuildRoleDeleteEventContext buildGuildRoleDeleteEventContext(
+        GatewayGuildRoleDeleteInfo info
+    )
+    {
+        GuildRoleDeleteEventContext ctx;
+        ctx.event = buildEventContext(
+            Nullable!User.of(_selfUser),
+            lookupGuild(Nullable!Snowflake.of(info.guildId))
+        );
+        ctx.guildId = info.guildId;
+        ctx.roleId = info.roleId;
+        return ctx;
+    }
+
+    private InviteCreateEventContext buildInviteCreateEventContext(GatewayInviteInfo info)
+    {
+        InviteCreateEventContext ctx;
+        ctx.event = buildEventContext(
+            Nullable!User.of(_selfUser),
+            lookupGuild(info.guildId),
+            Nullable!GuildMember.init,
+            lookupChannel(info.channelId)
+        );
+        ctx.code = info.code;
+        ctx.channelId = info.channelId;
+        ctx.guildId = info.guildId;
+        return ctx;
+    }
+
+    private InviteDeleteEventContext buildInviteDeleteEventContext(GatewayInviteInfo info)
+    {
+        InviteDeleteEventContext ctx;
+        auto built = buildInviteCreateEventContext(info);
+        ctx.event = built.event;
+        ctx.code = built.code;
+        ctx.channelId = built.channelId;
+        ctx.guildId = built.guildId;
+        return ctx;
+    }
+
+    private WebhooksUpdateEventContext buildWebhooksUpdateEventContext(
+        GatewayWebhooksUpdateInfo info
+    )
+    {
+        WebhooksUpdateEventContext ctx;
+        ctx.event = buildEventContext(
+            Nullable!User.of(_selfUser),
+            lookupGuild(info.guildId),
+            Nullable!GuildMember.init,
+            lookupChannel(info.channelId)
+        );
+        ctx.channelId = info.channelId;
+        ctx.guildId = info.guildId;
+        return ctx;
+    }
+
+    private ThreadCreateEventContext buildThreadCreateEventContext(Channel thread)
+    {
+        ThreadCreateEventContext ctx;
+        ctx.event = buildEventContext(
+            Nullable!User.of(_selfUser),
+            lookupGuild(thread.guildId),
+            Nullable!GuildMember.init,
+            nullableChannel(thread)
+        );
+        ctx.threadData = thread;
+        return ctx;
+    }
+
+    private ThreadUpdateEventContext buildThreadUpdateEventContext(Channel thread)
+    {
+        ThreadUpdateEventContext ctx;
+        auto built = buildThreadCreateEventContext(thread);
+        ctx.event = built.event;
+        ctx.threadData = built.threadData;
+        return ctx;
+    }
+
+    private ThreadDeleteEventContext buildThreadDeleteEventContext(GatewayThreadDeleteInfo info)
+    {
+        ThreadDeleteEventContext ctx;
+        ctx.event = buildEventContext(
+            Nullable!User.of(_selfUser),
+            lookupGuild(info.guildId),
+            Nullable!GuildMember.init,
+            lookupChannel(info.threadId)
+        );
+        ctx.threadId = info.threadId;
+        ctx.guildId = info.guildId;
+        ctx.parentId = info.parentId;
+        return ctx;
+    }
+
     private CommandExecutedEventContext buildCommandExecutedEventContext(
         CommandContext command,
         string commandName
@@ -1077,6 +1416,13 @@ final class Client
         if (guildId.isNull)
             return Nullable!Guild.init;
         return cache.guild(guildId.get);
+    }
+
+    private Nullable!Channel lookupChannel(Snowflake channelId)
+    {
+        if (channelId.value == 0)
+            return Nullable!Channel.init;
+        return cache.channel(channelId);
     }
 
     private Nullable!Channel nullableChannel(Channel channel)
@@ -1156,8 +1502,222 @@ final class Client
             logger.information("gateway", "RESUMED received for `" ~ _selfUser.username ~ "`.");
             _gateway.updatePresence(_status, _activity);
         };
+        _gateway.onGuildCreate = (Guild guild) {
+            if (guild.id.value != 0)
+                cache.store(guild);
+
+            GuildCreateEvent event;
+            event.guild = guild;
+            event.context = buildGuildCreateEventContext(guild);
+            emit!GuildCreateEvent(event);
+        };
+        _gateway.onGuildDelete = (UnavailableGuild guild) {
+            if (!guild.unavailable && guild.id.value != 0)
+                cache.evictGuild(guild.id);
+
+            GuildDeleteEvent event;
+            event.guild = guild;
+            event.context = buildGuildDeleteEventContext(guild);
+            emit!GuildDeleteEvent(event);
+        };
+        _gateway.onGuildMemberRemove = (GatewayGuildMemberRemoveInfo info) {
+            if (info.user.id.value != 0)
+                cache.store(info.user);
+
+            GuildMemberRemoveEvent event;
+            event.user = info.user;
+            event.guildId = info.guildId;
+            event.context = buildGuildMemberRemoveEventContext(info.user, info.guildId);
+            emit!GuildMemberRemoveEvent(event);
+        };
+        _gateway.onChannelCreate = (Channel channel) {
+            if (channel.id.value != 0)
+                cache.store(channel);
+
+            ChannelCreateEvent event;
+            event.channel = channel;
+            event.context = buildChannelCreateEventContext(channel);
+            emit!ChannelCreateEvent(event);
+        };
+        _gateway.onChannelUpdate = (Channel channel) {
+            if (channel.id.value != 0)
+                cache.store(channel);
+
+            ChannelUpdateEvent event;
+            event.channel = channel;
+            event.context = buildChannelUpdateEventContext(channel);
+            emit!ChannelUpdateEvent(event);
+        };
+        _gateway.onChannelDelete = (Channel channel) {
+            if (channel.id.value != 0)
+                cache.evictChannel(channel.id);
+
+            ChannelDeleteEvent event;
+            event.channel = channel;
+            event.context = buildChannelDeleteEventContext(channel);
+            emit!ChannelDeleteEvent(event);
+        };
+        _gateway.onChannelPinsUpdate = (GatewayChannelPinsUpdateInfo info) {
+            ChannelPinsUpdateEvent event;
+            event.channelId = info.channelId;
+            event.guildId = info.guildId;
+            event.lastPinTimestamp = info.lastPinTimestamp;
+            event.context = buildChannelPinsUpdateEventContext(info);
+            emit!ChannelPinsUpdateEvent(event);
+        };
         _gateway.onMessageCreate = (Message message) {
             enqueueMessage(message);
+        };
+        _gateway.onMessageUpdate = (Message message) {
+            if (message.id.value != 0)
+                cache.store(message);
+            if (message.author.id.value != 0)
+                cache.store(message.author);
+
+            MessageUpdateEvent event;
+            event.message = message;
+            event.context = buildMessageUpdateEventContext(message);
+            emit!MessageUpdateEvent(event);
+        };
+        _gateway.onMessageDelete = (GatewayMessageDeleteInfo info) {
+            auto cached = cache.message(info.messageId);
+            if (info.messageId.value != 0)
+                cache.evictMessage(info.messageId);
+
+            MessageDeleteEvent event;
+            event.messageId = info.messageId;
+            event.channelId = info.channelId;
+            event.guildId = info.guildId;
+            event.context = buildMessageDeleteEventContext(info, cached);
+            emit!MessageDeleteEvent(event);
+        };
+        _gateway.onMessageReactionAdd = (GatewayMessageReactionInfo info) {
+            MessageReactionAddEvent event;
+            event.userId = info.userId;
+            event.channelId = info.channelId;
+            event.messageId = info.messageId;
+            event.guildId = info.guildId;
+            event.emojiName = info.emojiName;
+            event.context = buildMessageReactionAddEventContext(info);
+            emit!MessageReactionAddEvent(event);
+        };
+        _gateway.onMessageReactionRemove = (GatewayMessageReactionInfo info) {
+            MessageReactionRemoveEvent event;
+            event.userId = info.userId;
+            event.channelId = info.channelId;
+            event.messageId = info.messageId;
+            event.guildId = info.guildId;
+            event.emojiName = info.emojiName;
+            event.context = buildMessageReactionRemoveEventContext(info);
+            emit!MessageReactionRemoveEvent(event);
+        };
+        _gateway.onMessageReactionRemoveAll = (GatewayMessageReactionRemoveAllInfo info) {
+            MessageReactionRemoveAllEvent event;
+            event.channelId = info.channelId;
+            event.messageId = info.messageId;
+            event.guildId = info.guildId;
+            event.context = buildMessageReactionRemoveAllEventContext(info);
+            emit!MessageReactionRemoveAllEvent(event);
+        };
+        _gateway.onMessageReactionRemoveEmoji = (GatewayMessageReactionInfo info) {
+            MessageReactionRemoveEmojiEvent event;
+            event.channelId = info.channelId;
+            event.messageId = info.messageId;
+            event.guildId = info.guildId;
+            event.emojiName = info.emojiName;
+            event.context = buildMessageReactionRemoveEmojiEventContext(info);
+            emit!MessageReactionRemoveEmojiEvent(event);
+        };
+        _gateway.onTypingStart = (GatewayTypingStartInfo info) {
+            TypingStartEvent event;
+            event.channelId = info.channelId;
+            event.guildId = info.guildId;
+            event.userId = info.userId;
+            event.timestampUnix = info.timestampUnix;
+            event.context = buildTypingStartEventContext(info);
+            emit!TypingStartEvent(event);
+        };
+        _gateway.onGuildRoleCreate = (GatewayGuildRoleInfo info) {
+            if (info.role.id.value != 0)
+                cache.store(info.role);
+
+            GuildRoleCreateEvent event;
+            event.guildId = info.guildId;
+            event.role = info.role;
+            event.context = buildGuildRoleCreateEventContext(info);
+            emit!GuildRoleCreateEvent(event);
+        };
+        _gateway.onGuildRoleUpdate = (GatewayGuildRoleInfo info) {
+            if (info.role.id.value != 0)
+                cache.store(info.role);
+
+            GuildRoleUpdateEvent event;
+            event.guildId = info.guildId;
+            event.role = info.role;
+            event.context = buildGuildRoleUpdateEventContext(info);
+            emit!GuildRoleUpdateEvent(event);
+        };
+        _gateway.onGuildRoleDelete = (GatewayGuildRoleDeleteInfo info) {
+            if (info.roleId.value != 0)
+                cache.evictRole(info.roleId);
+
+            GuildRoleDeleteEvent event;
+            event.guildId = info.guildId;
+            event.roleId = info.roleId;
+            event.context = buildGuildRoleDeleteEventContext(info);
+            emit!GuildRoleDeleteEvent(event);
+        };
+        _gateway.onInviteCreate = (GatewayInviteInfo info) {
+            InviteCreateEvent event;
+            event.code = info.code;
+            event.channelId = info.channelId;
+            event.guildId = info.guildId;
+            event.context = buildInviteCreateEventContext(info);
+            emit!InviteCreateEvent(event);
+        };
+        _gateway.onInviteDelete = (GatewayInviteInfo info) {
+            InviteDeleteEvent event;
+            event.code = info.code;
+            event.channelId = info.channelId;
+            event.guildId = info.guildId;
+            event.context = buildInviteDeleteEventContext(info);
+            emit!InviteDeleteEvent(event);
+        };
+        _gateway.onWebhooksUpdate = (GatewayWebhooksUpdateInfo info) {
+            WebhooksUpdateEvent event;
+            event.channelId = info.channelId;
+            event.guildId = info.guildId;
+            event.context = buildWebhooksUpdateEventContext(info);
+            emit!WebhooksUpdateEvent(event);
+        };
+        _gateway.onThreadCreate = (Channel thread) {
+            if (thread.id.value != 0)
+                cache.store(thread);
+
+            ThreadCreateEvent event;
+            event.thread = thread;
+            event.context = buildThreadCreateEventContext(thread);
+            emit!ThreadCreateEvent(event);
+        };
+        _gateway.onThreadUpdate = (Channel thread) {
+            if (thread.id.value != 0)
+                cache.store(thread);
+
+            ThreadUpdateEvent event;
+            event.thread = thread;
+            event.context = buildThreadUpdateEventContext(thread);
+            emit!ThreadUpdateEvent(event);
+        };
+        _gateway.onThreadDelete = (GatewayThreadDeleteInfo info) {
+            if (info.threadId.value != 0)
+                cache.evictChannel(info.threadId);
+
+            ThreadDeleteEvent event;
+            event.threadId = info.threadId;
+            event.guildId = info.guildId;
+            event.parentId = info.parentId;
+            event.context = buildThreadDeleteEventContext(info);
+            emit!ThreadDeleteEvent(event);
         };
         _gateway.onInteractionCreate = (Interaction interaction) {
             Channel channel;
@@ -2520,13 +3080,36 @@ private template isEventContextType(T)
     enum bool isEventContextType =
         is(T == ReadyEventContext) ||
         is(T == ResumedEventContext) ||
+        is(T == GuildCreateEventContext) ||
+        is(T == GuildDeleteEventContext) ||
+        is(T == GuildMemberRemoveEventContext) ||
         is(T == GuildMemberAddEventContext) ||
+        is(T == ChannelCreateEventContext) ||
+        is(T == ChannelUpdateEventContext) ||
+        is(T == ChannelDeleteEventContext) ||
+        is(T == ChannelPinsUpdateEventContext) ||
         is(T == MessageCreateEventContext) ||
+        is(T == MessageUpdateEventContext) ||
+        is(T == MessageDeleteEventContext) ||
+        is(T == MessageReactionAddEventContext) ||
+        is(T == MessageReactionRemoveEventContext) ||
+        is(T == MessageReactionRemoveAllEventContext) ||
+        is(T == MessageReactionRemoveEmojiEventContext) ||
         is(T == InteractionCreateEventContext) ||
         is(T == AutocompleteInteractionEventContext) ||
         is(T == MessageComponentEventContext) ||
         is(T == ModalSubmitEventContext) ||
         is(T == PresenceUpdateEventContext) ||
+        is(T == TypingStartEventContext) ||
+        is(T == GuildRoleCreateEventContext) ||
+        is(T == GuildRoleUpdateEventContext) ||
+        is(T == GuildRoleDeleteEventContext) ||
+        is(T == InviteCreateEventContext) ||
+        is(T == InviteDeleteEventContext) ||
+        is(T == WebhooksUpdateEventContext) ||
+        is(T == ThreadCreateEventContext) ||
+        is(T == ThreadUpdateEventContext) ||
+        is(T == ThreadDeleteEventContext) ||
         is(T == CommandExecutedEventContext) ||
         is(T == CommandFailedEventContext);
 }
@@ -2537,10 +3120,36 @@ private template EventTypeOfContext(T)
         alias EventTypeOfContext = ReadyEvent;
     else static if (is(T == ResumedEventContext))
         alias EventTypeOfContext = ResumedEvent;
+    else static if (is(T == GuildCreateEventContext))
+        alias EventTypeOfContext = GuildCreateEvent;
+    else static if (is(T == GuildDeleteEventContext))
+        alias EventTypeOfContext = GuildDeleteEvent;
+    else static if (is(T == GuildMemberRemoveEventContext))
+        alias EventTypeOfContext = GuildMemberRemoveEvent;
     else static if (is(T == GuildMemberAddEventContext))
         alias EventTypeOfContext = GuildMemberAddEvent;
+    else static if (is(T == ChannelCreateEventContext))
+        alias EventTypeOfContext = ChannelCreateEvent;
+    else static if (is(T == ChannelUpdateEventContext))
+        alias EventTypeOfContext = ChannelUpdateEvent;
+    else static if (is(T == ChannelDeleteEventContext))
+        alias EventTypeOfContext = ChannelDeleteEvent;
+    else static if (is(T == ChannelPinsUpdateEventContext))
+        alias EventTypeOfContext = ChannelPinsUpdateEvent;
     else static if (is(T == MessageCreateEventContext))
         alias EventTypeOfContext = MessageCreateEvent;
+    else static if (is(T == MessageUpdateEventContext))
+        alias EventTypeOfContext = MessageUpdateEvent;
+    else static if (is(T == MessageDeleteEventContext))
+        alias EventTypeOfContext = MessageDeleteEvent;
+    else static if (is(T == MessageReactionAddEventContext))
+        alias EventTypeOfContext = MessageReactionAddEvent;
+    else static if (is(T == MessageReactionRemoveEventContext))
+        alias EventTypeOfContext = MessageReactionRemoveEvent;
+    else static if (is(T == MessageReactionRemoveAllEventContext))
+        alias EventTypeOfContext = MessageReactionRemoveAllEvent;
+    else static if (is(T == MessageReactionRemoveEmojiEventContext))
+        alias EventTypeOfContext = MessageReactionRemoveEmojiEvent;
     else static if (is(T == InteractionCreateEventContext))
         alias EventTypeOfContext = InteractionCreateEvent;
     else static if (is(T == AutocompleteInteractionEventContext))
@@ -2551,6 +3160,26 @@ private template EventTypeOfContext(T)
         alias EventTypeOfContext = ModalSubmitEvent;
     else static if (is(T == PresenceUpdateEventContext))
         alias EventTypeOfContext = PresenceUpdateEvent;
+    else static if (is(T == TypingStartEventContext))
+        alias EventTypeOfContext = TypingStartEvent;
+    else static if (is(T == GuildRoleCreateEventContext))
+        alias EventTypeOfContext = GuildRoleCreateEvent;
+    else static if (is(T == GuildRoleUpdateEventContext))
+        alias EventTypeOfContext = GuildRoleUpdateEvent;
+    else static if (is(T == GuildRoleDeleteEventContext))
+        alias EventTypeOfContext = GuildRoleDeleteEvent;
+    else static if (is(T == InviteCreateEventContext))
+        alias EventTypeOfContext = InviteCreateEvent;
+    else static if (is(T == InviteDeleteEventContext))
+        alias EventTypeOfContext = InviteDeleteEvent;
+    else static if (is(T == WebhooksUpdateEventContext))
+        alias EventTypeOfContext = WebhooksUpdateEvent;
+    else static if (is(T == ThreadCreateEventContext))
+        alias EventTypeOfContext = ThreadCreateEvent;
+    else static if (is(T == ThreadUpdateEventContext))
+        alias EventTypeOfContext = ThreadUpdateEvent;
+    else static if (is(T == ThreadDeleteEventContext))
+        alias EventTypeOfContext = ThreadDeleteEvent;
     else static if (is(T == CommandExecutedEventContext))
         alias EventTypeOfContext = CommandExecutedEvent;
     else static if (is(T == CommandFailedEventContext))
@@ -2617,9 +3246,35 @@ private void invokeFreeEvent(alias handler, E)(E event)
             handler(event.context);
         else static if (is(E == ResumedEvent))
             handler(event.context);
+        else static if (is(E == GuildCreateEvent))
+            handler(event.context);
+        else static if (is(E == GuildDeleteEvent))
+            handler(event.context);
+        else static if (is(E == GuildMemberRemoveEvent))
+            handler(event.context);
         else static if (is(E == GuildMemberAddEvent))
             handler(event.context);
+        else static if (is(E == ChannelCreateEvent))
+            handler(event.context);
+        else static if (is(E == ChannelUpdateEvent))
+            handler(event.context);
+        else static if (is(E == ChannelDeleteEvent))
+            handler(event.context);
+        else static if (is(E == ChannelPinsUpdateEvent))
+            handler(event.context);
         else static if (is(E == MessageCreateEvent))
+            handler(event.context);
+        else static if (is(E == MessageUpdateEvent))
+            handler(event.context);
+        else static if (is(E == MessageDeleteEvent))
+            handler(event.context);
+        else static if (is(E == MessageReactionAddEvent))
+            handler(event.context);
+        else static if (is(E == MessageReactionRemoveEvent))
+            handler(event.context);
+        else static if (is(E == MessageReactionRemoveAllEvent))
+            handler(event.context);
+        else static if (is(E == MessageReactionRemoveEmojiEvent))
             handler(event.context);
         else static if (is(E == InteractionCreateEvent))
             handler(event.context);
@@ -2630,6 +3285,26 @@ private void invokeFreeEvent(alias handler, E)(E event)
         else static if (is(E == ModalSubmitEvent))
             handler(event.context);
         else static if (is(E == PresenceUpdateEvent))
+            handler(event.context);
+        else static if (is(E == TypingStartEvent))
+            handler(event.context);
+        else static if (is(E == GuildRoleCreateEvent))
+            handler(event.context);
+        else static if (is(E == GuildRoleUpdateEvent))
+            handler(event.context);
+        else static if (is(E == GuildRoleDeleteEvent))
+            handler(event.context);
+        else static if (is(E == InviteCreateEvent))
+            handler(event.context);
+        else static if (is(E == InviteDeleteEvent))
+            handler(event.context);
+        else static if (is(E == WebhooksUpdateEvent))
+            handler(event.context);
+        else static if (is(E == ThreadCreateEvent))
+            handler(event.context);
+        else static if (is(E == ThreadUpdateEvent))
+            handler(event.context);
+        else static if (is(E == ThreadDeleteEvent))
             handler(event.context);
         else static if (is(E == CommandExecutedEvent))
             handler(event.context);

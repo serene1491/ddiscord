@@ -12,7 +12,7 @@ import ddiscord.util.result : Result;
 import std.algorithm : canFind;
 import std.array : join;
 import std.conv : ConvException, to;
-import std.string : toStringz;
+import std.string : indexOf, toStringz;
 import std.traits : Parameters, ReturnType, isCallable;
 
 /// Capability flags for Lua host APIs.
@@ -207,8 +207,13 @@ private final class LuaVm
     private lua_State* _state;
     private LuaSandboxProfile _profile;
     private LuaCallableThunk[] _thunks;
+    private LuaCapability[string] _restrictedExports;
 
-    this(LuaSandboxProfile profile, LuaCallableDescriptor[] callables)
+    this(
+        LuaSandboxProfile profile,
+        LuaCallableDescriptor[] callables,
+        LuaExportDescriptor[] restrictedExports = null
+    )
     {
         _profile = profile;
         _state = luaL_newstate();
@@ -221,6 +226,9 @@ private final class LuaVm
                 "Verify that `liblua5.4` is installed and linkable on this system."
             ));
         }
+
+        foreach (descriptor; restrictedExports)
+            _restrictedExports[descriptor.exportName] = descriptor.permission;
 
         luaL_openlibs(_state);
         applySandbox();
@@ -274,7 +282,7 @@ private final class LuaVm
 
         auto status = luaPCall(_state, cast(int) args.length, 1, 0);
         if (status != LuaOk)
-            return Result!(LuaValue, ScriptError).err(scriptError(lastErrorMessage(), globalName));
+            return Result!(LuaValue, ScriptError).err(scriptError(enrichLuaError(lastErrorMessage()), globalName));
 
         auto result = valueFromStack(_state, -1);
         if (result.isErr)
@@ -297,11 +305,11 @@ private final class LuaVm
     private Result!(LuaValue, ScriptError) execute(int status, string chunkName)
     {
         if (status != LuaOk)
-            return Result!(LuaValue, ScriptError).err(scriptError(lastErrorMessage(), chunkName));
+            return Result!(LuaValue, ScriptError).err(scriptError(enrichLuaError(lastErrorMessage()), chunkName));
 
         status = luaPCall(_state, 0, 1, 0);
         if (status != LuaOk)
-            return Result!(LuaValue, ScriptError).err(scriptError(lastErrorMessage(), chunkName));
+            return Result!(LuaValue, ScriptError).err(scriptError(enrichLuaError(lastErrorMessage()), chunkName));
 
         scope(exit) luaPop(_state, 1);
         return valueFromStack(_state, -1);
@@ -355,6 +363,42 @@ private final class LuaVm
         luaPop(_state, 1);
         return message;
     }
+
+    private string enrichLuaError(string message)
+    {
+        if (_restrictedExports.length == 0)
+            return message;
+
+        auto missingGlobal = extractMissingGlobalName(message);
+        if (missingGlobal.length == 0)
+            return message;
+
+        auto requiredCapability = missingGlobal in _restrictedExports;
+        if (requiredCapability is null)
+            return message;
+
+        return message ~ " Hint: global `" ~ missingGlobal ~ "` requires capability `" ~
+            luaCapabilityName(*requiredCapability) ~ "` in the runtime permissions list.";
+    }
+
+    private string extractMissingGlobalName(string message)
+    {
+        enum marker = "attempt to call a nil value (global '";
+        auto markerStart = message.indexOf(marker);
+        if (markerStart == -1)
+            return "";
+
+        auto nameStart = cast(size_t) markerStart + marker.length;
+        if (nameStart >= message.length)
+            return "";
+
+        auto tail = message[nameStart .. $];
+        auto nameEnd = tail.indexOf("'");
+        if (nameEnd == -1)
+            return "";
+
+        return tail[0 .. cast(size_t) nameEnd];
+    }
 }
 
 /// Execution-time runtime handle.
@@ -363,6 +407,7 @@ struct LuaRuntime
     LuaSandboxProfile profile;
     LuaCapability[] permissions;
     LuaExportDescriptor[] exports;
+    LuaExportDescriptor[] restrictedExports;
     private LuaVm _vm;
 
     /// Evaluates a Lua snippet.
@@ -472,13 +517,16 @@ final class ScriptingEngine
     )
     {
         auto box = new BindingBox!T(binding);
-        auto callables = filterCallables(collectCallables!T(box), permissions);
+        auto collected = collectCallables!T(box);
+        auto callables = filterCallables(collected, permissions);
+        auto restricted = restrictedCallables(collected, permissions);
 
         LuaRuntime runtime;
         runtime.profile = profile;
         runtime.permissions = permissions.dup;
         runtime.exports = toExportDescriptors(callables);
-        runtime._vm = new LuaVm(profile, callables);
+        runtime.restrictedExports = toExportDescriptors(restricted);
+        runtime._vm = new LuaVm(profile, callables, runtime.restrictedExports);
         return runtime;
     }
 }
@@ -494,6 +542,26 @@ LuaCapability[] allLuaCapabilities()
         LuaCapability.Http,
         LuaCapability.LogWrite,
     ];
+}
+
+/// Returns the manifest-style name for a Lua capability.
+string luaCapabilityName(LuaCapability capability)
+{
+    final switch (capability)
+    {
+        case LuaCapability.ContextRead:
+            return "context.read";
+        case LuaCapability.DiscordReply:
+            return "discord.reply";
+        case LuaCapability.StateRead:
+            return "state.read";
+        case LuaCapability.StateWrite:
+            return "state.write";
+        case LuaCapability.Http:
+            return "http";
+        case LuaCapability.LogWrite:
+            return "log.write";
+    }
 }
 
 private final class BindingBox(T)
@@ -521,6 +589,23 @@ private LuaCallableDescriptor[] filterCallables(
             filtered ~= descriptor;
     }
     return filtered;
+}
+
+private LuaCallableDescriptor[] restrictedCallables(
+    LuaCallableDescriptor[] callables,
+    LuaCapability[] permissions
+)
+{
+    if (permissions.length == 0)
+        return null;
+
+    LuaCallableDescriptor[] restricted;
+    foreach (descriptor; callables)
+    {
+        if (!permissions.canFind(descriptor.permission))
+            restricted ~= descriptor;
+    }
+    return restricted;
 }
 
 private LuaExportDescriptor[] toExportDescriptors(LuaCallableDescriptor[] callables)
@@ -1031,6 +1116,28 @@ unittest
     assert(runtime.exports.length == 1);
     assert(runtime.hasExport("author"));
     assert(!runtime.hasExport("ping"));
+    assert(runtime.restrictedExports.length == 1);
+    assert(runtime.restrictedExports[0].exportName == "ping");
+}
+
+unittest
+{
+    struct SampleApi
+    {
+        @LuaExpose("state_set", LuaCapability.StateWrite)
+        void stateSet(string key, string value)
+        {
+            auto _ = key;
+            auto __ = value;
+        }
+    }
+
+    auto engine = new ScriptingEngine;
+    auto runtime = engine.open!SampleApi(SampleApi.init, permissions: [LuaCapability.ContextRead]);
+    auto result = runtime.eval("state_set('x', '1')");
+
+    assert(result.isErr);
+    assert(result.error.message.canFind("state.write"));
 }
 
 unittest

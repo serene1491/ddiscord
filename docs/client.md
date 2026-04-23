@@ -177,10 +177,19 @@ Useful events include:
 
 - `ReadyEvent`
 - `ResumedEvent`
+- `GuildCreateEvent`
+- `GuildDeleteEvent`
+- `GuildMemberRemoveEvent`
+- `ChannelCreateEvent`
+- `ChannelUpdateEvent`
+- `ChannelDeleteEvent`
 - `MessageCreateEvent`
+- `MessageUpdateEvent`
+- `MessageDeleteEvent`
 - `InteractionCreateEvent`
 - `GuildMemberAddEvent`
 - `PresenceUpdateEvent`
+- `TypingStartEvent`
 - `AutocompleteInteractionEvent`
 - `MessageComponentEvent`
 - `ModalSubmitEvent`

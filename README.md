@@ -238,6 +238,7 @@ void main()
 
 Out of the box, the client can surface things like unknown commands, missing arguments, invalid
 arguments, and handler failures. That behavior is also customizable through `client.errorBehavior`.
+For quick profiles, use `CommandErrorBehavior.nonVerbose()` or `CommandErrorBehavior.verbose()`.
 
 ## Library Status
 
@@ -300,6 +301,8 @@ The public naming is being tightened before `1.0.0`:
 - `client.errorBehavior` controls how command failures are surfaced back to users
 - events now have typed context companions such as `ReadyEventContext` and `MessageCreateEventContext`
 - gateway-driven `GuildMemberAddEvent` and `PresenceUpdateEvent` are now emitted with typed contexts
+- `GuildCreateEvent` and `GuildDeleteEvent` are now emitted from live gateway dispatches for cache/runtime sync flows
+- typed gateway coverage now also includes channel/message lifecycle, member removal, and typing-start dispatches
 - command outcome events now expose route-aware helpers like `prefix`, `slash`, `contextMenu`, and `hybrid`
 - `@Event` can register event handlers through `client.registerAllCommands!(...)`
 - `ClientConfig.logUnhandledGatewayDispatchEvents` can sample-log unknown dispatch names while coverage grows

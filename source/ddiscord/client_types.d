@@ -182,6 +182,32 @@ final class CommandErrorBehavior
     bool surfaceOtherErrors = true;
     bool delegate(CommandErrorContext) shouldSurface;
     MessageCreate delegate(CommandErrorContext) render;
+
+    /// Returns a low-noise profile that avoids user-facing failure spam.
+    static CommandErrorBehavior nonVerbose()
+    {
+        auto behavior = new CommandErrorBehavior;
+        behavior.surfaceUnknownCommand = false;
+        behavior.surfaceMissingCommandName = false;
+        behavior.surfaceArgumentErrors = false;
+        behavior.surfacePolicyErrors = false;
+        behavior.surfaceHandlerFailures = false;
+        behavior.surfaceOtherErrors = false;
+        return behavior;
+    }
+
+    /// Returns a profile that surfaces all known command failure kinds.
+    static CommandErrorBehavior verbose()
+    {
+        auto behavior = new CommandErrorBehavior;
+        behavior.surfaceUnknownCommand = true;
+        behavior.surfaceMissingCommandName = true;
+        behavior.surfaceArgumentErrors = true;
+        behavior.surfacePolicyErrors = true;
+        behavior.surfaceHandlerFailures = true;
+        behavior.surfaceOtherErrors = true;
+        return behavior;
+    }
 }
 
 struct RegistrationCandidate

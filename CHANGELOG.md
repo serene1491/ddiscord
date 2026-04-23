@@ -2,6 +2,31 @@
 
 All notable changes to `ddiscord` should be documented in this file.
 
+## [0.3.2] - In Development
+
+### Added
+
+- Gateway dispatch coverage for `GUILD_CREATE` and `GUILD_DELETE` with typed callbacks in `GatewayClient`.
+- Client-level emission of `GuildCreateEvent` and `GuildDeleteEvent` with typed event contexts.
+- Gateway dispatch coverage for `GUILD_MEMBER_REMOVE`, `CHANNEL_CREATE`, `CHANNEL_UPDATE`, `CHANNEL_DELETE`, `MESSAGE_UPDATE`, `MESSAGE_DELETE`, and `TYPING_START`.
+- Client-level emission of `GuildMemberRemoveEvent`, `ChannelCreateEvent`, `ChannelUpdateEvent`, `ChannelDeleteEvent`, `MessageUpdateEvent`, `MessageDeleteEvent`, and `TypingStartEvent` with typed contexts.
+- Gateway dispatch coverage for `CHANNEL_PINS_UPDATE`, `MESSAGE_REACTION_ADD`, `MESSAGE_REACTION_REMOVE`, `MESSAGE_REACTION_REMOVE_ALL`, `MESSAGE_REACTION_REMOVE_EMOJI`, `GUILD_ROLE_CREATE`, `GUILD_ROLE_UPDATE`, `GUILD_ROLE_DELETE`, `INVITE_CREATE`, `INVITE_DELETE`, `WEBHOOKS_UPDATE`, `THREAD_CREATE`, `THREAD_UPDATE`, and `THREAD_DELETE`.
+- Client-level emission/context support for the same event family (`ChannelPinsUpdateEvent`, reaction events, guild-role events, invite events, `WebhooksUpdateEvent`, and thread events).
+- Cache eviction APIs (`evictUser`, `evictChannel`, `evictGuild`, `evictRole`, `evictMessage`) for safer runtime consistency flows.
+- Presence model parsing helpers (`statusFromDiscord`, `activityTypeFromDiscord`) and activity JSON round-trip helpers.
+- Command error behavior presets `CommandErrorBehavior.nonVerbose()` and `CommandErrorBehavior.verbose()`.
+- Lua runtime capability-denial hints when scripts call globals filtered out by permissions.
+
+### Changed
+
+- Guild delete gateway handling now evicts guild cache entries when Discord indicates a true removal (`unavailable=false`).
+- Channel and message delete gateway handling now evict cache entries during runtime dispatch processing.
+- Gateway/event typing surface now covers startup lifecycle plus core guild/presence/member dispatches.
+
+### Fixed
+
+- On POSIX targets, the HTTP layer now ignores `SIGPIPE` so transient broken socket writes surface as normal transport errors instead of terminating the process (`exit code -13`).
+
 ## [0.3.1]
 
 ### Added

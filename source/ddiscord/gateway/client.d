@@ -15,11 +15,13 @@ import core.sync.mutex : Mutex;
 import core.thread : Thread;
 import core.time : Duration, MonoTime, dur;
 import ddiscord.logging : ILogger, LogLevel;
-import ddiscord.models.guild : UnavailableGuild;
+import ddiscord.models.channel : Channel;
+import ddiscord.models.guild : Guild, UnavailableGuild;
 import ddiscord.models.interaction : Interaction;
 import ddiscord.models.member : GuildMember;
 import ddiscord.models.message : Message;
 import ddiscord.models.presence : Activity, ActivityType, StatusType, statusFromDiscord;
+import ddiscord.models.role : Role;
 import ddiscord.models.user : User;
 import ddiscord.util.errors : DdiscordException, formatError;
 import ddiscord.util.optional : Nullable;
@@ -88,6 +90,93 @@ struct GatewayPresenceUpdateInfo
     Nullable!GuildMember member;
     StatusType status = StatusType.Offline;
     Activity activity;
+}
+
+/// Typed payload for `MESSAGE_DELETE`.
+struct GatewayMessageDeleteInfo
+{
+    Snowflake messageId;
+    Nullable!Snowflake channelId;
+    Nullable!Snowflake guildId;
+}
+
+/// Typed payload for `GUILD_MEMBER_REMOVE`.
+struct GatewayGuildMemberRemoveInfo
+{
+    User user;
+    Nullable!Snowflake guildId;
+}
+
+/// Typed payload for `TYPING_START`.
+struct GatewayTypingStartInfo
+{
+    Snowflake channelId;
+    Nullable!Snowflake guildId;
+    Snowflake userId;
+    long timestampUnix;
+}
+
+/// Typed payload for `CHANNEL_PINS_UPDATE`.
+struct GatewayChannelPinsUpdateInfo
+{
+    Snowflake channelId;
+    Nullable!Snowflake guildId;
+    string lastPinTimestamp;
+}
+
+/// Typed payload for reaction gateway events.
+struct GatewayMessageReactionInfo
+{
+    Snowflake userId;
+    Snowflake channelId;
+    Snowflake messageId;
+    Nullable!Snowflake guildId;
+    string emojiName;
+}
+
+/// Typed payload for `MESSAGE_REACTION_REMOVE_ALL`.
+struct GatewayMessageReactionRemoveAllInfo
+{
+    Snowflake channelId;
+    Snowflake messageId;
+    Nullable!Snowflake guildId;
+}
+
+/// Typed payload for guild role create/update gateway events.
+struct GatewayGuildRoleInfo
+{
+    Snowflake guildId;
+    Role role;
+}
+
+/// Typed payload for `GUILD_ROLE_DELETE`.
+struct GatewayGuildRoleDeleteInfo
+{
+    Snowflake guildId;
+    Snowflake roleId;
+}
+
+/// Typed payload for invite create/delete gateway events.
+struct GatewayInviteInfo
+{
+    string code;
+    Snowflake channelId;
+    Nullable!Snowflake guildId;
+}
+
+/// Typed payload for `WEBHOOKS_UPDATE`.
+struct GatewayWebhooksUpdateInfo
+{
+    Snowflake channelId;
+    Nullable!Snowflake guildId;
+}
+
+/// Typed payload for `THREAD_DELETE`.
+struct GatewayThreadDeleteInfo
+{
+    Snowflake threadId;
+    Nullable!Snowflake guildId;
+    Nullable!Snowflake parentId;
 }
 
 private struct GatewayEnvelope
@@ -254,8 +343,31 @@ final class GatewayClient
     GatewayClientConfig config;
     void delegate(GatewayReadyInfo) onReady;
     void delegate() onResumed;
+    void delegate(Guild) onGuildCreate;
+    void delegate(UnavailableGuild) onGuildDelete;
+    void delegate(GatewayGuildMemberRemoveInfo) onGuildMemberRemove;
     void delegate(string) onStatus;
+    void delegate(Channel) onChannelCreate;
+    void delegate(Channel) onChannelUpdate;
+    void delegate(Channel) onChannelDelete;
+    void delegate(GatewayChannelPinsUpdateInfo) onChannelPinsUpdate;
     void delegate(Message) onMessageCreate;
+    void delegate(Message) onMessageUpdate;
+    void delegate(GatewayMessageDeleteInfo) onMessageDelete;
+    void delegate(GatewayMessageReactionInfo) onMessageReactionAdd;
+    void delegate(GatewayMessageReactionInfo) onMessageReactionRemove;
+    void delegate(GatewayMessageReactionRemoveAllInfo) onMessageReactionRemoveAll;
+    void delegate(GatewayMessageReactionInfo) onMessageReactionRemoveEmoji;
+    void delegate(GatewayTypingStartInfo) onTypingStart;
+    void delegate(GatewayGuildRoleInfo) onGuildRoleCreate;
+    void delegate(GatewayGuildRoleInfo) onGuildRoleUpdate;
+    void delegate(GatewayGuildRoleDeleteInfo) onGuildRoleDelete;
+    void delegate(GatewayInviteInfo) onInviteCreate;
+    void delegate(GatewayInviteInfo) onInviteDelete;
+    void delegate(GatewayWebhooksUpdateInfo) onWebhooksUpdate;
+    void delegate(Channel) onThreadCreate;
+    void delegate(Channel) onThreadUpdate;
+    void delegate(GatewayThreadDeleteInfo) onThreadDelete;
     void delegate(Interaction) onInteractionCreate;
     void delegate(GatewayGuildMemberAddInfo) onGuildMemberAdd;
     void delegate(GatewayPresenceUpdateInfo) onPresenceUpdate;
@@ -579,10 +691,171 @@ final class GatewayClient
             return;
         }
 
+        if (envelope.eventName == "GUILD_CREATE")
+        {
+            if (onGuildCreate !is null)
+                onGuildCreate(Guild.fromJSON(envelope.data));
+            return;
+        }
+
+        if (envelope.eventName == "GUILD_DELETE")
+        {
+            if (onGuildDelete !is null)
+                onGuildDelete(UnavailableGuild.fromJSON(envelope.data));
+            return;
+        }
+
+        if (envelope.eventName == "GUILD_MEMBER_REMOVE")
+        {
+            if (onGuildMemberRemove !is null)
+                onGuildMemberRemove(parseGuildMemberRemove(envelope.data));
+            return;
+        }
+
+        if (envelope.eventName == "CHANNEL_CREATE")
+        {
+            if (onChannelCreate !is null)
+                onChannelCreate(Channel.fromJSON(envelope.data));
+            return;
+        }
+
+        if (envelope.eventName == "CHANNEL_UPDATE")
+        {
+            if (onChannelUpdate !is null)
+                onChannelUpdate(Channel.fromJSON(envelope.data));
+            return;
+        }
+
+        if (envelope.eventName == "CHANNEL_DELETE")
+        {
+            if (onChannelDelete !is null)
+                onChannelDelete(Channel.fromJSON(envelope.data));
+            return;
+        }
+
+        if (envelope.eventName == "CHANNEL_PINS_UPDATE")
+        {
+            if (onChannelPinsUpdate !is null)
+                onChannelPinsUpdate(parseChannelPinsUpdate(envelope.data));
+            return;
+        }
+
         if (envelope.eventName == "MESSAGE_CREATE")
         {
             if (onMessageCreate !is null)
                 onMessageCreate(Message.fromJSON(envelope.data));
+            return;
+        }
+
+        if (envelope.eventName == "MESSAGE_UPDATE")
+        {
+            if (onMessageUpdate !is null)
+                onMessageUpdate(Message.fromJSON(envelope.data));
+            return;
+        }
+
+        if (envelope.eventName == "MESSAGE_DELETE")
+        {
+            if (onMessageDelete !is null)
+                onMessageDelete(parseMessageDelete(envelope.data));
+            return;
+        }
+
+        if (envelope.eventName == "MESSAGE_REACTION_ADD")
+        {
+            if (onMessageReactionAdd !is null)
+                onMessageReactionAdd(parseMessageReaction(envelope.data));
+            return;
+        }
+
+        if (envelope.eventName == "MESSAGE_REACTION_REMOVE")
+        {
+            if (onMessageReactionRemove !is null)
+                onMessageReactionRemove(parseMessageReaction(envelope.data));
+            return;
+        }
+
+        if (envelope.eventName == "MESSAGE_REACTION_REMOVE_ALL")
+        {
+            if (onMessageReactionRemoveAll !is null)
+                onMessageReactionRemoveAll(parseMessageReactionRemoveAll(envelope.data));
+            return;
+        }
+
+        if (envelope.eventName == "MESSAGE_REACTION_REMOVE_EMOJI")
+        {
+            if (onMessageReactionRemoveEmoji !is null)
+                onMessageReactionRemoveEmoji(parseMessageReaction(envelope.data));
+            return;
+        }
+
+        if (envelope.eventName == "TYPING_START")
+        {
+            if (onTypingStart !is null)
+                onTypingStart(parseTypingStart(envelope.data));
+            return;
+        }
+
+        if (envelope.eventName == "GUILD_ROLE_CREATE")
+        {
+            if (onGuildRoleCreate !is null)
+                onGuildRoleCreate(parseGuildRole(envelope.data));
+            return;
+        }
+
+        if (envelope.eventName == "GUILD_ROLE_UPDATE")
+        {
+            if (onGuildRoleUpdate !is null)
+                onGuildRoleUpdate(parseGuildRole(envelope.data));
+            return;
+        }
+
+        if (envelope.eventName == "GUILD_ROLE_DELETE")
+        {
+            if (onGuildRoleDelete !is null)
+                onGuildRoleDelete(parseGuildRoleDelete(envelope.data));
+            return;
+        }
+
+        if (envelope.eventName == "INVITE_CREATE")
+        {
+            if (onInviteCreate !is null)
+                onInviteCreate(parseInvite(envelope.data));
+            return;
+        }
+
+        if (envelope.eventName == "INVITE_DELETE")
+        {
+            if (onInviteDelete !is null)
+                onInviteDelete(parseInvite(envelope.data));
+            return;
+        }
+
+        if (envelope.eventName == "WEBHOOKS_UPDATE")
+        {
+            if (onWebhooksUpdate !is null)
+                onWebhooksUpdate(parseWebhooksUpdate(envelope.data));
+            return;
+        }
+
+        if (envelope.eventName == "THREAD_CREATE")
+        {
+            if (onThreadCreate !is null)
+                onThreadCreate(Channel.fromJSON(envelope.data));
+            return;
+        }
+
+        if (envelope.eventName == "THREAD_UPDATE")
+        {
+            if (onThreadUpdate !is null)
+                onThreadUpdate(Channel.fromJSON(envelope.data));
+            return;
+        }
+
+        if (envelope.eventName == "THREAD_DELETE")
+        {
+            if (onThreadDelete !is null)
+                onThreadDelete(parseThreadDelete(envelope.data));
             return;
         }
 
@@ -987,6 +1260,218 @@ private GatewayPresenceUpdateInfo parsePresenceUpdate(JSONValue data)
     return info;
 }
 
+private GatewayMessageDeleteInfo parseMessageDelete(JSONValue data)
+{
+    GatewayMessageDeleteInfo info;
+
+    auto messageId = parseSnowflakeField(data, "id");
+    if (!messageId.isNull)
+        info.messageId = messageId.get;
+
+    info.channelId = parseSnowflakeField(data, "channel_id");
+    info.guildId = parseSnowflakeField(data, "guild_id");
+    return info;
+}
+
+private GatewayGuildMemberRemoveInfo parseGuildMemberRemove(JSONValue data)
+{
+    GatewayGuildMemberRemoveInfo info;
+
+    auto userValue = data.object.get("user", JSONValue.init);
+    if (userValue.type != JSONType.null_)
+        info.user = User.fromJSON(userValue);
+
+    info.guildId = parseSnowflakeField(data, "guild_id");
+    return info;
+}
+
+private GatewayTypingStartInfo parseTypingStart(JSONValue data)
+{
+    GatewayTypingStartInfo info;
+
+    auto channelId = parseSnowflakeField(data, "channel_id");
+    if (!channelId.isNull)
+        info.channelId = channelId.get;
+
+    auto userId = parseSnowflakeField(data, "user_id");
+    if (!userId.isNull)
+        info.userId = userId.get;
+
+    info.guildId = parseSnowflakeField(data, "guild_id");
+
+    auto timestampValue = data.object.get("timestamp", JSONValue.init);
+    if (timestampValue.type != JSONType.null_)
+    {
+        if (timestampValue.type == JSONType.string)
+        {
+            try
+                info.timestampUnix = timestampValue.str.to!long;
+            catch (ConvException)
+            {
+            }
+        }
+        else if (timestampValue.type == JSONType.integer || timestampValue.type == JSONType.uinteger)
+        {
+            info.timestampUnix = cast(long) timestampValue.integer;
+        }
+    }
+
+    return info;
+}
+
+private GatewayChannelPinsUpdateInfo parseChannelPinsUpdate(JSONValue data)
+{
+    GatewayChannelPinsUpdateInfo info;
+
+    auto channelId = parseSnowflakeField(data, "channel_id");
+    if (!channelId.isNull)
+        info.channelId = channelId.get;
+
+    info.guildId = parseSnowflakeField(data, "guild_id");
+
+    auto lastPinTimestampValue = data.object.get("last_pin_timestamp", JSONValue.init);
+    if (lastPinTimestampValue.type != JSONType.null_)
+        info.lastPinTimestamp = lastPinTimestampValue.str;
+
+    return info;
+}
+
+private GatewayMessageReactionInfo parseMessageReaction(JSONValue data)
+{
+    GatewayMessageReactionInfo info;
+
+    auto userId = parseSnowflakeField(data, "user_id");
+    if (!userId.isNull)
+        info.userId = userId.get;
+
+    auto channelId = parseSnowflakeField(data, "channel_id");
+    if (!channelId.isNull)
+        info.channelId = channelId.get;
+
+    auto messageId = parseSnowflakeField(data, "message_id");
+    if (!messageId.isNull)
+        info.messageId = messageId.get;
+
+    info.guildId = parseSnowflakeField(data, "guild_id");
+
+    auto emojiValue = data.object.get("emoji", JSONValue.init);
+    if (emojiValue.type != JSONType.null_)
+    {
+        auto nameValue = emojiValue.object.get("name", JSONValue.init);
+        if (nameValue.type != JSONType.null_)
+            info.emojiName = nameValue.str;
+    }
+
+    return info;
+}
+
+private GatewayMessageReactionRemoveAllInfo parseMessageReactionRemoveAll(JSONValue data)
+{
+    GatewayMessageReactionRemoveAllInfo info;
+
+    auto channelId = parseSnowflakeField(data, "channel_id");
+    if (!channelId.isNull)
+        info.channelId = channelId.get;
+
+    auto messageId = parseSnowflakeField(data, "message_id");
+    if (!messageId.isNull)
+        info.messageId = messageId.get;
+
+    info.guildId = parseSnowflakeField(data, "guild_id");
+    return info;
+}
+
+private GatewayGuildRoleInfo parseGuildRole(JSONValue data)
+{
+    GatewayGuildRoleInfo info;
+
+    auto guildId = parseSnowflakeField(data, "guild_id");
+    if (!guildId.isNull)
+        info.guildId = guildId.get;
+
+    auto roleValue = data.object.get("role", JSONValue.init);
+    if (roleValue.type != JSONType.null_)
+        info.role = Role.fromJSON(roleValue);
+
+    return info;
+}
+
+private GatewayGuildRoleDeleteInfo parseGuildRoleDelete(JSONValue data)
+{
+    GatewayGuildRoleDeleteInfo info;
+
+    auto guildId = parseSnowflakeField(data, "guild_id");
+    if (!guildId.isNull)
+        info.guildId = guildId.get;
+
+    auto roleId = parseSnowflakeField(data, "role_id");
+    if (!roleId.isNull)
+        info.roleId = roleId.get;
+
+    return info;
+}
+
+private GatewayInviteInfo parseInvite(JSONValue data)
+{
+    GatewayInviteInfo info;
+
+    auto codeValue = data.object.get("code", JSONValue.init);
+    if (codeValue.type != JSONType.null_)
+        info.code = codeValue.str;
+
+    auto channelId = parseSnowflakeField(data, "channel_id");
+    if (!channelId.isNull)
+        info.channelId = channelId.get;
+
+    info.guildId = parseSnowflakeField(data, "guild_id");
+    return info;
+}
+
+private GatewayWebhooksUpdateInfo parseWebhooksUpdate(JSONValue data)
+{
+    GatewayWebhooksUpdateInfo info;
+
+    auto channelId = parseSnowflakeField(data, "channel_id");
+    if (!channelId.isNull)
+        info.channelId = channelId.get;
+
+    info.guildId = parseSnowflakeField(data, "guild_id");
+    return info;
+}
+
+private GatewayThreadDeleteInfo parseThreadDelete(JSONValue data)
+{
+    GatewayThreadDeleteInfo info;
+
+    auto threadId = parseSnowflakeField(data, "id");
+    if (!threadId.isNull)
+        info.threadId = threadId.get;
+
+    info.guildId = parseSnowflakeField(data, "guild_id");
+    info.parentId = parseSnowflakeField(data, "parent_id");
+    return info;
+}
+
+private Nullable!Snowflake parseSnowflakeField(JSONValue data, string key)
+{
+    auto value = data.object.get(key, JSONValue.init);
+    if (value.type == JSONType.null_)
+        return Nullable!Snowflake.init;
+
+    try
+    {
+        if (value.type == JSONType.string)
+            return Nullable!Snowflake.of(Snowflake(value.str.to!ulong));
+        if (value.type == JSONType.integer || value.type == JSONType.uinteger)
+            return Nullable!Snowflake.of(Snowflake(cast(ulong) value.integer));
+    }
+    catch (ConvException)
+    {
+    }
+
+    return Nullable!Snowflake.init;
+}
+
 private Duration firstHeartbeatDelay(Duration heartbeatInterval)
 {
     if (heartbeatInterval <= Duration.zero)
@@ -1117,6 +1602,207 @@ unittest
 
 unittest
 {
+    auto client = new GatewayClient(GatewayClientConfig("token", 0, "wss://gateway.discord.gg"));
+
+    Guild capturedGuild;
+    UnavailableGuild deletedGuild;
+    size_t createCalls;
+    size_t deleteCalls;
+    client.onGuildCreate = (Guild guild) {
+        capturedGuild = guild;
+        createCalls++;
+    };
+    client.onGuildDelete = (UnavailableGuild guild) {
+        deletedGuild = guild;
+        deleteCalls++;
+    };
+
+    GatewayEnvelope guildCreate;
+    guildCreate.opcode = GatewayOpcode.Dispatch;
+    guildCreate.eventName = "GUILD_CREATE";
+    guildCreate.data = JSONValue(["id": JSONValue("10"), "name": JSONValue("home"), "owner_id": JSONValue("7")]);
+    client.handleDispatch(guildCreate);
+
+    GatewayEnvelope guildDelete;
+    guildDelete.opcode = GatewayOpcode.Dispatch;
+    guildDelete.eventName = "GUILD_DELETE";
+    guildDelete.data = JSONValue(["id": JSONValue("10"), "unavailable": JSONValue(true)]);
+    client.handleDispatch(guildDelete);
+
+    assert(createCalls == 1);
+    assert(capturedGuild.id == Snowflake(10));
+    assert(capturedGuild.name == "home");
+    assert(deleteCalls == 1);
+    assert(deletedGuild.id == Snowflake(10));
+    assert(deletedGuild.unavailable);
+}
+
+unittest
+{
+    auto client = new GatewayClient(GatewayClientConfig("token", 0, "wss://gateway.discord.gg"));
+
+    size_t channelCreates;
+    size_t channelUpdates;
+    size_t channelDeletes;
+    size_t messageUpdates;
+    size_t messageDeletes;
+    size_t pinsUpdates;
+    size_t reactionAdds;
+    size_t reactionRemoves;
+    size_t reactionRemoveAll;
+    size_t reactionRemoveEmoji;
+    size_t memberRemoves;
+    size_t typingStarts;
+    size_t roleCreates;
+    size_t roleUpdates;
+    size_t roleDeletes;
+    size_t inviteCreates;
+    size_t inviteDeletes;
+    size_t webhooksUpdates;
+    size_t threadCreates;
+    size_t threadUpdates;
+    size_t threadDeletes;
+
+    client.onChannelCreate = (Channel channel) {
+        auto _ = channel;
+        channelCreates++;
+    };
+    client.onChannelUpdate = (Channel channel) {
+        auto _ = channel;
+        channelUpdates++;
+    };
+    client.onChannelDelete = (Channel channel) {
+        auto _ = channel;
+        channelDeletes++;
+    };
+    client.onMessageUpdate = (Message message) {
+        auto _ = message;
+        messageUpdates++;
+    };
+    client.onMessageDelete = (GatewayMessageDeleteInfo info) {
+        auto _ = info;
+        messageDeletes++;
+    };
+    client.onChannelPinsUpdate = (GatewayChannelPinsUpdateInfo info) {
+        auto _ = info;
+        pinsUpdates++;
+    };
+    client.onMessageReactionAdd = (GatewayMessageReactionInfo info) {
+        auto _ = info;
+        reactionAdds++;
+    };
+    client.onMessageReactionRemove = (GatewayMessageReactionInfo info) {
+        auto _ = info;
+        reactionRemoves++;
+    };
+    client.onMessageReactionRemoveAll = (GatewayMessageReactionRemoveAllInfo info) {
+        auto _ = info;
+        reactionRemoveAll++;
+    };
+    client.onMessageReactionRemoveEmoji = (GatewayMessageReactionInfo info) {
+        auto _ = info;
+        reactionRemoveEmoji++;
+    };
+    client.onGuildMemberRemove = (GatewayGuildMemberRemoveInfo info) {
+        auto _ = info;
+        memberRemoves++;
+    };
+    client.onTypingStart = (GatewayTypingStartInfo info) {
+        auto _ = info;
+        typingStarts++;
+    };
+    client.onGuildRoleCreate = (GatewayGuildRoleInfo info) {
+        auto _ = info;
+        roleCreates++;
+    };
+    client.onGuildRoleUpdate = (GatewayGuildRoleInfo info) {
+        auto _ = info;
+        roleUpdates++;
+    };
+    client.onGuildRoleDelete = (GatewayGuildRoleDeleteInfo info) {
+        auto _ = info;
+        roleDeletes++;
+    };
+    client.onInviteCreate = (GatewayInviteInfo info) {
+        auto _ = info;
+        inviteCreates++;
+    };
+    client.onInviteDelete = (GatewayInviteInfo info) {
+        auto _ = info;
+        inviteDeletes++;
+    };
+    client.onWebhooksUpdate = (GatewayWebhooksUpdateInfo info) {
+        auto _ = info;
+        webhooksUpdates++;
+    };
+    client.onThreadCreate = (Channel channel) {
+        auto _ = channel;
+        threadCreates++;
+    };
+    client.onThreadUpdate = (Channel channel) {
+        auto _ = channel;
+        threadUpdates++;
+    };
+    client.onThreadDelete = (GatewayThreadDeleteInfo info) {
+        auto _ = info;
+        threadDeletes++;
+    };
+
+    auto makeEnvelope = (string eventName, JSONValue payload) {
+        GatewayEnvelope envelope;
+        envelope.opcode = GatewayOpcode.Dispatch;
+        envelope.eventName = eventName;
+        envelope.data = payload;
+        return envelope;
+    };
+
+    client.handleDispatch(makeEnvelope("CHANNEL_CREATE", JSONValue(["id": JSONValue("1"), "name": JSONValue("a"), "type": JSONValue(0L)])));
+    client.handleDispatch(makeEnvelope("CHANNEL_UPDATE", JSONValue(["id": JSONValue("1"), "name": JSONValue("b"), "type": JSONValue(0L)])));
+    client.handleDispatch(makeEnvelope("CHANNEL_DELETE", JSONValue(["id": JSONValue("1"), "name": JSONValue("c"), "type": JSONValue(0L)])));
+    client.handleDispatch(makeEnvelope("MESSAGE_UPDATE", JSONValue(["id": JSONValue("2"), "channel_id": JSONValue("1"), "author": JSONValue(["id": JSONValue("9"), "username": JSONValue("u")])])));
+    client.handleDispatch(makeEnvelope("MESSAGE_DELETE", JSONValue(["id": JSONValue("2"), "channel_id": JSONValue("1"), "guild_id": JSONValue("7")])));
+    client.handleDispatch(makeEnvelope("CHANNEL_PINS_UPDATE", JSONValue(["channel_id": JSONValue("1"), "guild_id": JSONValue("7"), "last_pin_timestamp": JSONValue("2026-04-23T00:00:00.000000+00:00")])));
+    client.handleDispatch(makeEnvelope("MESSAGE_REACTION_ADD", JSONValue(["user_id": JSONValue("9"), "channel_id": JSONValue("1"), "message_id": JSONValue("2"), "guild_id": JSONValue("7"), "emoji": JSONValue(["name": JSONValue("fire")])])));
+    client.handleDispatch(makeEnvelope("MESSAGE_REACTION_REMOVE", JSONValue(["user_id": JSONValue("9"), "channel_id": JSONValue("1"), "message_id": JSONValue("2"), "guild_id": JSONValue("7"), "emoji": JSONValue(["name": JSONValue("fire")])])));
+    client.handleDispatch(makeEnvelope("MESSAGE_REACTION_REMOVE_ALL", JSONValue(["channel_id": JSONValue("1"), "message_id": JSONValue("2"), "guild_id": JSONValue("7")])));
+    client.handleDispatch(makeEnvelope("MESSAGE_REACTION_REMOVE_EMOJI", JSONValue(["channel_id": JSONValue("1"), "message_id": JSONValue("2"), "guild_id": JSONValue("7"), "emoji": JSONValue(["name": JSONValue("fire")])])));
+    client.handleDispatch(makeEnvelope("GUILD_MEMBER_REMOVE", JSONValue(["guild_id": JSONValue("7"), "user": JSONValue(["id": JSONValue("9"), "username": JSONValue("u")])])));
+    client.handleDispatch(makeEnvelope("TYPING_START", JSONValue(["channel_id": JSONValue("1"), "guild_id": JSONValue("7"), "user_id": JSONValue("9"), "timestamp": JSONValue(123L)])));
+    client.handleDispatch(makeEnvelope("GUILD_ROLE_CREATE", JSONValue(["guild_id": JSONValue("7"), "role": JSONValue(["id": JSONValue("55"), "name": JSONValue("mod"), "permissions": JSONValue("0")])])));
+    client.handleDispatch(makeEnvelope("GUILD_ROLE_UPDATE", JSONValue(["guild_id": JSONValue("7"), "role": JSONValue(["id": JSONValue("55"), "name": JSONValue("admin"), "permissions": JSONValue("0")])])));
+    client.handleDispatch(makeEnvelope("GUILD_ROLE_DELETE", JSONValue(["guild_id": JSONValue("7"), "role_id": JSONValue("55")])));
+    client.handleDispatch(makeEnvelope("INVITE_CREATE", JSONValue(["code": JSONValue("abc"), "channel_id": JSONValue("1"), "guild_id": JSONValue("7")])));
+    client.handleDispatch(makeEnvelope("INVITE_DELETE", JSONValue(["code": JSONValue("abc"), "channel_id": JSONValue("1"), "guild_id": JSONValue("7")])));
+    client.handleDispatch(makeEnvelope("WEBHOOKS_UPDATE", JSONValue(["channel_id": JSONValue("1"), "guild_id": JSONValue("7")])));
+    client.handleDispatch(makeEnvelope("THREAD_CREATE", JSONValue(["id": JSONValue("88"), "name": JSONValue("thread-a"), "type": JSONValue(11L), "guild_id": JSONValue("7")])));
+    client.handleDispatch(makeEnvelope("THREAD_UPDATE", JSONValue(["id": JSONValue("88"), "name": JSONValue("thread-b"), "type": JSONValue(11L), "guild_id": JSONValue("7")])));
+    client.handleDispatch(makeEnvelope("THREAD_DELETE", JSONValue(["id": JSONValue("88"), "guild_id": JSONValue("7"), "parent_id": JSONValue("1")])));
+
+    assert(channelCreates == 1);
+    assert(channelUpdates == 1);
+    assert(channelDeletes == 1);
+    assert(messageUpdates == 1);
+    assert(messageDeletes == 1);
+    assert(pinsUpdates == 1);
+    assert(reactionAdds == 1);
+    assert(reactionRemoves == 1);
+    assert(reactionRemoveAll == 1);
+    assert(reactionRemoveEmoji == 1);
+    assert(memberRemoves == 1);
+    assert(typingStarts == 1);
+    assert(roleCreates == 1);
+    assert(roleUpdates == 1);
+    assert(roleDeletes == 1);
+    assert(inviteCreates == 1);
+    assert(inviteDeletes == 1);
+    assert(webhooksUpdates == 1);
+    assert(threadCreates == 1);
+    assert(threadUpdates == 1);
+    assert(threadDeletes == 1);
+}
+
+unittest
+{
     JSONValue payload;
     payload["guild_id"] = "42";
     payload["member_count"] = 123;
@@ -1185,12 +1871,12 @@ unittest
 
     GatewayEnvelope envelope;
     envelope.opcode = GatewayOpcode.Dispatch;
-    envelope.eventName = "THREAD_CREATE";
+    envelope.eventName = "THREAD_LIST_SYNC";
     client.handleDispatch(envelope);
     client.handleDispatch(envelope);
 
     assert(logger.entries.length >= 2);
-    assert(logger.entries[0].canFind("THREAD_CREATE"));
+    assert(logger.entries[0].canFind("THREAD_LIST_SYNC"));
     assert(logger.entries[$ - 1].canFind("(2 observed)"));
 }
 

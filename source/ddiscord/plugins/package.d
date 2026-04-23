@@ -313,10 +313,11 @@ final class PluginRegistry
             auto evalResult = runtime.evalFile(descriptor.resolvedEntrypoint);
             if (evalResult.isErr)
             {
+                auto location = scriptLocationLabel(descriptor, evalResult.error.line);
                 auto message = formatError(
                     "plugins",
                     "A Lua plugin failed during file evaluation.",
-                    "Plugin `" ~ descriptor.pluginName ~ "` raised: " ~ evalResult.error.message,
+                    "Plugin `" ~ descriptor.pluginName ~ "` raised at `" ~ location ~ "`: " ~ evalResult.error.message,
                     "Fix the script syntax/runtime error; the plugin stayed disabled and the bot kept running."
                 );
                 loaded.lastError = Nullable!string.of(message);
@@ -439,10 +440,12 @@ final class PluginRegistry
         auto result = loaded.runtime.call(hookName);
         if (result.isErr)
         {
+            auto location = scriptLocationLabel(loaded.descriptor, result.error.line);
             auto message = formatError(
                 "plugins",
                 "A Lua plugin failed during lifecycle execution.",
-                "Plugin `" ~ loaded.descriptor.pluginName ~ "` hook `" ~ hookName ~ "` raised: " ~ result.error.message,
+                "Plugin `" ~ loaded.descriptor.pluginName ~ "` hook `" ~ hookName ~ "` failed at `" ~
+                    location ~ "`: " ~ result.error.message,
                 "Fix the script hook or remove it; the failing plugin was isolated."
             );
             loaded.lastError = Nullable!string.of(message);
@@ -454,6 +457,17 @@ final class PluginRegistry
 
         loaded.lifecycleHooks ~= hookName;
         return true;
+    }
+
+    private string scriptLocationLabel(PluginDescriptor descriptor, size_t line)
+    {
+        auto path = descriptor.entrypoint.length != 0 ? descriptor.entrypoint : descriptor.resolvedEntrypoint;
+        if (path.length == 0)
+            path = "<unknown>";
+
+        if (line == 0)
+            return path;
+        return path ~ ":" ~ line.to!string;
     }
 
     private void loadManifest(string manifestPath, string rootDirectory)
