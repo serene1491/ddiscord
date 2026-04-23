@@ -1,0 +1,16 @@
+{
+    "name": "ddiscord-rest-ops-bot",
+    "description": "REST operations example bot (reactions, moderation, threads, webhooks)",
+    "targetType": "executable",
+    "targetName": "rest-ops-bot",
+    "targetPath": ".",
+    "dependencies": {
+        "ddiscord": {
+            "path": "../.."
+        }
+    },
+    "sourcePaths": [
+        "source"
+    ],
+    "mainSourceFile": "source/app.d"
+}

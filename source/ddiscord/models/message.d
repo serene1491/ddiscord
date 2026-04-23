@@ -12,7 +12,8 @@ import ddiscord.models.channel : Channel;
 import ddiscord.models.embed : Embed;
 import ddiscord.models.member : GuildMember;
 import ddiscord.models.user : User;
-import ddiscord.util.limits : DiscordMaxEmbedsPerMessage, DiscordMaxMessageLength;
+import ddiscord.util.limits : DiscordMaxAttachmentsPerMessage, DiscordMaxEmbedsPerMessage,
+    DiscordMaxMessageLength;
 import ddiscord.util.optional : Nullable;
 import ddiscord.util.result : Result;
 import ddiscord.util.snowflake : Snowflake;
@@ -271,12 +272,22 @@ struct ReferencedMessage
     }
 }
 
+/// Binary file attachment payload for message creation.
+struct MessageAttachmentCreate
+{
+    string filename;
+    ubyte[] data;
+    string contentType = "application/octet-stream";
+    Nullable!string description;
+}
+
 /// Minimal message payload.
 struct MessageCreate
 {
     string content;
     Embed[] embeds;
     JSONValue[] components;
+    MessageAttachmentCreate[] files;
     MessageFlags flags = MessageFlags.None;
     Nullable!MessageReference messageReference;
     Nullable!AllowedMentions allowedMentions;
@@ -320,13 +331,47 @@ struct MessageCreate
         return this;
     }
 
+    MessageCreate attach(
+        string filename,
+        ubyte[] data,
+        string contentType = "application/octet-stream",
+        string description = ""
+    )
+    {
+        MessageAttachmentCreate attachment;
+        attachment.filename = filename;
+        attachment.data = data.dup;
+        if (contentType.length != 0)
+            attachment.contentType = contentType;
+        if (description.length != 0)
+            attachment.description = Nullable!string.of(description);
+        files ~= attachment;
+        return this;
+    }
+
+    MessageCreate attachBytes(
+        string filename,
+        const(ubyte)[] data,
+        string contentType = "application/octet-stream",
+        string description = ""
+    )
+    {
+        return attach(filename, cast(ubyte[]) data.dup, contentType, description);
+    }
+
+    /// Returns whether the payload includes one or more binary attachments.
+    bool hasAttachments() const @property
+    {
+        return files.length != 0;
+    }
+
     /// Validates the message payload before a REST call.
     Result!(bool, string) validate() const
     {
-        if (content.length == 0 && embeds.length == 0 && components.length == 0)
+        if (content.length == 0 && embeds.length == 0 && components.length == 0 && files.length == 0)
         {
             return Result!(bool, string).err(
-                "Discord message payloads must contain content, embeds, or components."
+                "Discord message payloads must contain content, embeds, components, or attachments."
             );
         }
 
@@ -344,6 +389,24 @@ struct MessageCreate
                 "A single Discord message can contain at most 10 embeds. " ~
                 "Current embed count: " ~ embeds.length.to!string ~ "."
             );
+        }
+
+        if (files.length > DiscordMaxAttachmentsPerMessage)
+        {
+            return Result!(bool, string).err(
+                "A single Discord message can contain at most 10 attachments. " ~
+                "Current attachment count: " ~ files.length.to!string ~ "."
+            );
+        }
+
+        foreach (index, file; files)
+        {
+            if (file.filename.length == 0)
+            {
+                return Result!(bool, string).err(
+                    "Attachment #" ~ (index + 1).to!string ~ " is missing a filename."
+                );
+            }
         }
 
         if (
@@ -384,6 +447,23 @@ struct MessageCreate
             foreach (component; components)
                 componentValues ~= component;
             json["components"] = componentValues;
+        }
+
+        if (files.length != 0)
+        {
+            JSONValue[] attachmentValues;
+            foreach (index, file; files)
+            {
+                JSONValue attachment;
+                attachment["id"] = index.to!string;
+                attachment["filename"] = file.filename;
+                if (file.contentType.length != 0)
+                    attachment["content_type"] = file.contentType;
+                if (!file.description.isNull)
+                    attachment["description"] = file.description.get;
+                attachmentValues ~= attachment;
+            }
+            json["attachments"] = attachmentValues;
         }
 
         if (!messageReference.isNull)
@@ -594,4 +674,21 @@ unittest
 
     auto allowedMentions = json.object.get("allowed_mentions", JSONValue.init);
     assert(allowedMentions.object.get("replied_user", JSONValue.init).boolean);
+}
+
+unittest
+{
+    MessageCreate payload;
+    payload = payload.attachBytes("hello.txt", cast(const(ubyte)[]) "hello");
+
+    auto validation = payload.validate();
+    assert(validation.isOk);
+    assert(payload.hasAttachments);
+
+    auto json = payload.toJSON();
+    auto attachments = json.object.get("attachments", JSONValue.init);
+    assert(attachments.type == JSONType.array);
+    assert(attachments.array.length == 1);
+    assert(attachments.array[0].object.get("id", JSONValue.init).str == "0");
+    assert(attachments.array[0].object.get("filename", JSONValue.init).str == "hello.txt");
 }

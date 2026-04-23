@@ -15,6 +15,7 @@
 - `help-bot/`: built-in help customization, categories, hidden commands, and user-facing error behavior
 - `filter-bot/`: module auto-registration with category filters
 - `lua-scripting-bot/`: Dorm + SQLite-backed saved Lua scripts with slash management and prefix execution
+- `rest-ops-bot/`: reactions, moderation (with audit reasons), threads, webhook execution, and message lifecycle/pin/crosspost REST usage
 
 Most examples now use module-local registration helpers such as `client.registerCommands();` or
 `client.registerAllCommands();`, so the console `main()` stays short even as commands grow.
@@ -35,6 +36,7 @@ Each example builds its executable into its own directory:
 - `examples/help-bot/help-bot`
 - `examples/filter-bot/filter-bot`
 - `examples/lua-scripting-bot/lua-scripting-bot`
+- `examples/rest-ops-bot/rest-ops-bot`
 
 ## Run
 
@@ -51,6 +53,7 @@ cd examples/test-bot && dub run
 cd examples/help-bot && dub run
 cd examples/filter-bot && dub run
 cd examples/lua-scripting-bot && dub run
+cd examples/rest-ops-bot && dub run
 ```
 
 The consoles load shared environment values from `examples/.env` and `examples/.env.local`.

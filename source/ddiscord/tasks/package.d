@@ -14,7 +14,7 @@ import ddiscord.util.optional : Nullable;
 import ddiscord.util.result : Result;
 import std.datetime : Clock, SysTime;
 import std.exception : enforce;
-import std.string : startsWith;
+import std.string : startsWith, strip;
 import std.conv : to;
 
 /// Lightweight awaitable task wrapper.
@@ -120,6 +120,10 @@ final class TaskScheduler
     /// Registers a delayed task.
     void schedule(string label, Duration delay, void delegate() callback)
     {
+        enforce(label.strip.length != 0, "Task label must not be empty.");
+        enforce(delay >= Duration.zero, "Scheduled task delay must be >= 0.");
+        enforce(callback !is null, "Scheduled task callback must not be null.");
+
         ScheduledTask task;
         task.label = label;
         task.dueAt = Clock.currTime + delay;
@@ -131,6 +135,10 @@ final class TaskScheduler
     /// Registers a recurring task.
     void every(string label, Duration interval, void delegate() callback)
     {
+        enforce(label.strip.length != 0, "Task label must not be empty.");
+        enforce(interval > Duration.zero, "Recurring task interval must be > 0.");
+        enforce(callback !is null, "Recurring task callback must not be null.");
+
         ScheduledTask task;
         task.label = label;
         task.dueAt = Clock.currTime + interval;
@@ -148,6 +156,7 @@ final class TaskScheduler
         auto secondsValue = expression["@every:".length .. $];
         enforce(secondsValue.length > 1 && secondsValue[$ - 1] == 's', "Expected seconds suffix in cron expression.");
         auto seconds = secondsValue[0 .. $ - 1].to!long;
+        enforce(seconds > 0, "Cron interval must be > 0 seconds.");
         every(label, dur!"seconds"(seconds), callback);
     }
 
@@ -217,11 +226,11 @@ final class TaskScheduler
                 {
                     task.callback();
                 }
-                catch (Exception error)
+                catch (Throwable error)
                 {
                     auto message = formatError(
                         "tasks",
-                        "A scheduled task raised an exception.",
+                        "A scheduled task raised an unhandled error.",
                         "Task `" ~ label ~ "` failed with: " ~ error.msg,
                         "Inspect the callback implementation; the scheduler kept running."
                     );
@@ -289,8 +298,29 @@ unittest
 
 unittest
 {
+    import std.exception : assertThrown;
+
+    auto scheduler = new TaskScheduler;
+    assertThrown!Exception(scheduler.every("tick", Duration.zero, { }));
+    assertThrown!Exception(scheduler.every("tick", dur!"seconds"(-1), { }));
+    assertThrown!Exception(scheduler.schedule("once", dur!"seconds"(-1), { }));
+    assertThrown!Exception(scheduler.schedule("", dur!"seconds"(1), { }));
+    assertThrown!Exception(scheduler.cron("tick", "@every:0s", { }));
+}
+
+unittest
+{
     auto scheduler = new TaskScheduler;
     scheduler.schedule("broken", dur!"seconds"(1), { throw new Exception("boom"); });
+    auto later = Clock.currTime + dur!"seconds"(2);
+    assert(scheduler.runUntil(later) == 1);
+    assert(scheduler.taskErrors.length == 1);
+}
+
+unittest
+{
+    auto scheduler = new TaskScheduler;
+    scheduler.schedule("broken-error", dur!"seconds"(1), { throw new Error("fatal"); });
     auto later = Clock.currTime + dur!"seconds"(2);
     assert(scheduler.runUntil(later) == 1);
     assert(scheduler.taskErrors.length == 1);

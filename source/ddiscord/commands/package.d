@@ -14,6 +14,7 @@ import ddiscord.core.http.client : HttpError, HttpResponse, HttpTransport;
 import ddiscord.context.autocomplete : AutocompleteContext;
 import ddiscord.context.command : CommandContext, CommandSource, ContextMenuCommandContext,
     HybridCommandContext, PrefixCommandContext, SlashCommandContext;
+import ddiscord.models.guild : Guild;
 import ddiscord.models.application_command : ApplicationCommandDefinition, ApplicationCommandOption,
     ApplicationCommandOptionType, ApplicationCommandType;
 import ddiscord.models.channel : Channel;
@@ -28,6 +29,7 @@ import ddiscord.util.result : Result;
 import ddiscord.util.snowflake : Snowflake;
 import ddiscord.models.role : Permissions;
 import ddiscord.services : ServiceContainer;
+import std.algorithm : canFind;
 import std.ascii : isUpper, toLower;
 import std.array : array, join;
 import std.conv : to;
@@ -44,6 +46,61 @@ private struct RateLimitWindowState
     uint used;
 }
 
+/// Built-in middleware that allows execution only in guild contexts.
+CommandMiddleware guildOnlyMiddleware()
+{
+    return (CommandContext ctx) {
+        if (!commandHasGuildScope(ctx))
+        {
+            return Result!(bool, string).err(formatError(
+                "commands",
+                "This command can only be used inside guild channels.",
+                "",
+                "Run this command in a server channel instead of direct messages."
+            ));
+        }
+
+        return Result!(bool, string).ok(true);
+    };
+}
+
+/// Built-in middleware that allows execution only in direct-message contexts.
+CommandMiddleware directMessageOnlyMiddleware()
+{
+    return (CommandContext ctx) {
+        if (commandHasGuildScope(ctx))
+        {
+            return Result!(bool, string).err(formatError(
+                "commands",
+                "This command can only be used in direct messages.",
+                "",
+                "Run this command in a DM conversation with the bot."
+            ));
+        }
+
+        return Result!(bool, string).ok(true);
+    };
+}
+
+/// Built-in middleware that enforces owner-only execution.
+CommandMiddleware ownerOnlyMiddleware()
+{
+    return (CommandContext ctx) {
+        auto settings = ctx.services.get!CommandExecutionSettings();
+        if (settings.ownerId.isNull || settings.ownerId.get != ctx.user.id)
+        {
+            return Result!(bool, string).err(formatError(
+                "commands",
+                "This command is restricted to the configured bot owner.",
+                "Invoker `" ~ ctx.user.id.toString ~ "` does not match the configured owner.",
+                "Set `ClientConfig.ownerId` or remove the owner-only restriction."
+            ));
+        }
+
+        return Result!(bool, string).ok(true);
+    };
+}
+
 /// Registry that collects UDA-decorated handlers.
 final class CommandRegistry
 {
@@ -51,6 +108,8 @@ final class CommandRegistry
     private CommandDescriptor[] _descriptors;
     private RateLimitWindowState[string] _rateLimits;
     private Mutex _rateLimitMutex;
+    private CommandMiddleware[] _globalMiddlewares;
+    private CommandMiddleware[string] _namedMiddlewares;
 
     this(ServiceContainer services)
     {
@@ -71,6 +130,23 @@ final class CommandRegistry
         if (descriptor.displayName.length == 0)
             return;
         _descriptors ~= descriptor;
+    }
+
+    /// Registers a middleware that runs before every command.
+    void useMiddleware(CommandMiddleware middleware)
+    {
+        if (middleware is null)
+            return;
+        _globalMiddlewares ~= middleware;
+    }
+
+    /// Registers a reusable named middleware for `@UseMiddleware`.
+    void registerMiddleware(string name, CommandMiddleware middleware)
+    {
+        auto normalized = name.strip;
+        if (normalized.length == 0 || middleware is null)
+            return;
+        _namedMiddlewares[normalized] = middleware;
     }
 
     /// Removes descriptors matching the predicate.
@@ -208,6 +284,10 @@ final class CommandRegistry
         if (!policyError.isNull)
             return Result!(CommandExecution, string).err(policyError.get);
 
+        auto middlewareError = runMiddlewares(descriptor, ctx);
+        if (!middlewareError.isNull)
+            return Result!(CommandExecution, string).err(middlewareError.get);
+
         enforce(descriptor.prefixExecutor !is null, "Prefix executor was not registered for " ~ descriptor.displayName);
         return descriptor.prefixExecutor(ctx, parsed.args);
     }
@@ -237,6 +317,10 @@ final class CommandRegistry
         auto policyError = validatePolicy(resolved, ctx);
         if (!policyError.isNull)
             return Result!(CommandExecution, string).err(policyError.get);
+
+        auto middlewareError = runMiddlewares(resolved, ctx);
+        if (!middlewareError.isNull)
+            return Result!(CommandExecution, string).err(middlewareError.get);
 
         enforce(resolved.slashExecutor !is null, "Slash executor was not registered for " ~ resolved.displayName);
         return resolved.slashExecutor(ctx, options);
@@ -360,6 +444,26 @@ final class CommandRegistry
             }
         }
 
+        if (descriptor.policy.guildOnly && !commandHasGuildScope(ctx))
+        {
+            return Nullable!string.of(formatError(
+                "commands",
+                "This command can only run inside guild channels.",
+                "",
+                "Move this command to a server channel or remove `@GuildOnly`."
+            ));
+        }
+
+        if (descriptor.policy.directMessageOnly && commandHasGuildScope(ctx))
+        {
+            return Nullable!string.of(formatError(
+                "commands",
+                "This command can only run in direct messages.",
+                "",
+                "Run this command via DM or remove `@DirectMessageOnly`."
+            ));
+        }
+
         if (descriptor.policy.requiredPermissions != 0)
         {
             if ((ctx.permissions & descriptor.policy.requiredPermissions) != descriptor.policy.requiredPermissions)
@@ -415,6 +519,58 @@ final class CommandRegistry
         return Nullable!string.init;
     }
 
+    private Nullable!string runMiddlewares(CommandDescriptor descriptor, CommandContext ctx)
+    {
+        foreach (index, middleware; _globalMiddlewares)
+        {
+            auto result = middleware(ctx);
+            if (result.isErr)
+                return Nullable!string.of(result.error);
+            if (!result.value)
+            {
+                return Nullable!string.of(formatError(
+                    "commands",
+                    "A global command middleware blocked this invocation.",
+                    "Middleware index `" ~ index.to!string ~ "` returned `false`.",
+                    "Return `Result.ok(true)` to allow execution or `Result.err(...)` with an explicit failure reason."
+                ));
+            }
+        }
+
+        foreach (name; descriptor.middlewareNames)
+        {
+            auto normalized = name.strip;
+            if (normalized.length == 0)
+                continue;
+
+            auto middlewarePtr = normalized in _namedMiddlewares;
+            if (middlewarePtr is null)
+            {
+                return Nullable!string.of(formatError(
+                    "commands",
+                    "The command references a middleware name that was not registered.",
+                    "Missing middleware `" ~ normalized ~ "` for command `" ~ descriptor.displayName ~ "`.",
+                    "Call `client.registerMiddleware(\"" ~ normalized ~ "\", ...)` before executing this command."
+                ));
+            }
+
+            auto result = (*middlewarePtr)(ctx);
+            if (result.isErr)
+                return Nullable!string.of(result.error);
+            if (!result.value)
+            {
+                return Nullable!string.of(formatError(
+                    "commands",
+                    "A command middleware blocked this invocation.",
+                    "Middleware `" ~ normalized ~ "` returned `false` for `" ~ descriptor.displayName ~ "`.",
+                    "Return `Result.ok(true)` to allow execution or `Result.err(...)` with an explicit failure reason."
+                ));
+            }
+        }
+
+        return Nullable!string.init;
+    }
+
     private string rateLimitKey(CommandDescriptor descriptor, CommandContext ctx)
     {
         final switch (descriptor.policy.rateLimitBucket)
@@ -431,6 +587,20 @@ final class CommandRegistry
                 return descriptor.displayName ~ ":global";
         }
     }
+}
+
+private bool commandHasGuildScope(CommandContext ctx)
+{
+    if (!ctx.currentGuild.isNull)
+        return true;
+
+    if (!ctx.message.isNull && !ctx.message.get.guildId.isNull)
+        return true;
+
+    if (!ctx.interaction.isNull && !ctx.interaction.get.guildId.isNull)
+        return true;
+
+    return false;
 }
 
 private void registerHandlers(handlers...)(CommandRegistry registry)
@@ -492,9 +662,23 @@ private CommandDescriptor describeHandler(alias fn)()
         {
             descriptor.policy.ownerOnly = true;
         }
+        else static if (AttrIs!(attr, GuildOnly))
+        {
+            descriptor.policy.guildOnly = true;
+        }
+        else static if (AttrIs!(attr, DirectMessageOnly))
+        {
+            descriptor.policy.directMessageOnly = true;
+        }
         else static if (is(typeof(attr) == RequirePermissions))
         {
             descriptor.policy.requiredPermissions = attr.permissions;
+        }
+        else static if (is(typeof(attr) == UseMiddleware))
+        {
+            auto middlewareName = attr.name.strip;
+            if (middlewareName.length != 0)
+                descriptor.middlewareNames ~= middlewareName;
         }
         else static if (is(typeof(attr) == RateLimit))
         {
@@ -1767,4 +1951,106 @@ unittest
     assert(definitions[0].type == ApplicationCommandType.ChatInput);
     assert(definitions[0].options.length == 1);
     assert(definitions[1].type == ApplicationCommandType.Message);
+}
+
+unittest
+{
+    @Command("mod-only", routes: CommandRoute.Prefix)
+    @UseMiddleware("must-be-guild")
+    void modOnly(CommandContext ctx)
+    {
+        ctx.send("ok").await();
+    }
+
+    auto services = new ServiceContainer;
+    auto registry = new CommandRegistry(services);
+    auto rest = unittestRestClient();
+    registerHandlers!(modOnly)(registry);
+    registry.registerMiddleware("must-be-guild", guildOnlyMiddleware());
+
+    CommandContext dmCtx;
+    dmCtx.rest = rest;
+    dmCtx.services = services;
+    dmCtx.currentGuild = Nullable!Guild.init;
+    auto denied = registry.executePrefix(dmCtx, "!", "!mod-only");
+    assert(denied.isErr);
+    assert(denied.error.canFind("guild channels"));
+
+    CommandContext guildCtx;
+    guildCtx.rest = rest;
+    guildCtx.services = services;
+    Guild guild;
+    guild.id = Snowflake(55);
+    guildCtx.currentGuild = Nullable!Guild.of(guild);
+    auto allowed = registry.executePrefix(guildCtx, "!", "!mod-only");
+    assert(allowed.isOk);
+}
+
+unittest
+{
+    @Command("global-mid", routes: CommandRoute.Prefix)
+    void globalMid(CommandContext ctx)
+    {
+        ctx.send("ok").await();
+    }
+
+    auto services = new ServiceContainer;
+    auto registry = new CommandRegistry(services);
+    auto rest = unittestRestClient();
+    registerHandlers!(globalMid)(registry);
+    registry.useMiddleware((CommandContext ctx) {
+        auto _ = ctx;
+        return Result!(bool, string).err("blocked by global middleware");
+    });
+
+    CommandContext ctx;
+    ctx.rest = rest;
+    ctx.services = services;
+
+    auto blocked = registry.executePrefix(ctx, "!", "!global-mid");
+    assert(blocked.isErr);
+    assert(blocked.error.canFind("blocked by global middleware"));
+}
+
+unittest
+{
+    @Command("guild", routes: CommandRoute.Prefix)
+    @GuildOnly
+    void guildCommand(CommandContext ctx)
+    {
+        ctx.send("ok").await();
+    }
+
+    @Command("dm", routes: CommandRoute.Prefix)
+    @DirectMessageOnly
+    void dmCommand(CommandContext ctx)
+    {
+        ctx.send("ok").await();
+    }
+
+    auto services = new ServiceContainer;
+    auto registry = new CommandRegistry(services);
+    auto rest = unittestRestClient();
+    registerHandlers!(guildCommand, dmCommand)(registry);
+
+    CommandContext dmCtx;
+    dmCtx.rest = rest;
+    dmCtx.services = services;
+    auto guildDenied = registry.executePrefix(dmCtx, "!", "!guild");
+    assert(guildDenied.isErr);
+
+    CommandContext guildCtx;
+    guildCtx.rest = rest;
+    guildCtx.services = services;
+    Guild guild;
+    guild.id = Snowflake(1);
+    guildCtx.currentGuild = Nullable!Guild.of(guild);
+
+    auto guildAllowed = registry.executePrefix(guildCtx, "!", "!guild");
+    assert(guildAllowed.isOk);
+
+    auto dmDenied = registry.executePrefix(guildCtx, "!", "!dm");
+    assert(dmDenied.isErr);
+    auto dmAllowed = registry.executePrefix(dmCtx, "!", "!dm");
+    assert(dmAllowed.isOk);
 }

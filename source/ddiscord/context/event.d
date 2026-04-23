@@ -118,6 +118,24 @@ struct GuildMemberAddEventContext
     GuildMember memberData;
 }
 
+/// Guild-ban add event context.
+struct GuildBanAddEventContext
+{
+    EventContext event;
+    alias event this;
+    Snowflake guildId;
+    User userData;
+}
+
+/// Guild-ban remove event context.
+struct GuildBanRemoveEventContext
+{
+    EventContext event;
+    alias event this;
+    Snowflake guildId;
+    User userData;
+}
+
 /// Channel-create event context.
 struct ChannelCreateEventContext
 {

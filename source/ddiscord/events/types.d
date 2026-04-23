@@ -10,14 +10,15 @@ import ddiscord.context.event : AutocompleteInteractionEventContext, ChannelCrea
     ChannelDeleteEventContext, ChannelPinsUpdateEventContext, ChannelUpdateEventContext,
     CommandExecutedEventContext, CommandFailedEventContext, GuildCreateEventContext,
     GuildDeleteEventContext, GuildMemberAddEventContext, GuildMemberRemoveEventContext,
-    GuildRoleCreateEventContext, GuildRoleDeleteEventContext, GuildRoleUpdateEventContext,
-    InteractionCreateEventContext, InviteCreateEventContext, InviteDeleteEventContext,
-    MessageComponentEventContext, MessageCreateEventContext, MessageDeleteEventContext,
-    MessageReactionAddEventContext, MessageReactionRemoveAllEventContext,
-    MessageReactionRemoveEmojiEventContext, MessageReactionRemoveEventContext,
-    MessageUpdateEventContext, ModalSubmitEventContext, PresenceUpdateEventContext,
-    ReadyEventContext, ResumedEventContext, ThreadCreateEventContext, ThreadDeleteEventContext,
-    ThreadUpdateEventContext, TypingStartEventContext, WebhooksUpdateEventContext;
+    GuildBanAddEventContext, GuildBanRemoveEventContext, GuildRoleCreateEventContext,
+    GuildRoleDeleteEventContext, GuildRoleUpdateEventContext, InteractionCreateEventContext,
+    InviteCreateEventContext, InviteDeleteEventContext, MessageComponentEventContext,
+    MessageCreateEventContext, MessageDeleteEventContext, MessageReactionAddEventContext,
+    MessageReactionRemoveAllEventContext, MessageReactionRemoveEmojiEventContext,
+    MessageReactionRemoveEventContext, MessageUpdateEventContext, ModalSubmitEventContext,
+    PresenceUpdateEventContext, ReadyEventContext, ResumedEventContext,
+    ThreadCreateEventContext, ThreadDeleteEventContext, ThreadUpdateEventContext,
+    TypingStartEventContext, WebhooksUpdateEventContext;
 import ddiscord.models.guild : Guild, UnavailableGuild;
 import ddiscord.models.interaction : Interaction;
 import ddiscord.models.member : GuildMember;
@@ -80,6 +81,22 @@ struct GuildMemberAddEvent
 
     GuildSnapshot guild;
     GuildMemberAddEventContext context;
+}
+
+/// Guild ban add event.
+struct GuildBanAddEvent
+{
+    Snowflake guildId;
+    User user;
+    GuildBanAddEventContext context;
+}
+
+/// Guild ban remove event.
+struct GuildBanRemoveEvent
+{
+    Snowflake guildId;
+    User user;
+    GuildBanRemoveEventContext context;
 }
 
 /// Message create event.

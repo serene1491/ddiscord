@@ -39,7 +39,7 @@ void main()
         writeln("Logged in as ", event.selfUser.username);
     });
 
-    client.registerAllCommands!handlePing();
+    client.registerAllCommands();
     client.run();
     client.wait();
 }
@@ -63,7 +63,7 @@ cd examples/basic-bot && dub run
 
 1. `loadEnv` reads `.env` values.
 2. `ClientConfig` defines token, intents, and prefix.
-3. `registerAllCommands!handlePing()` extracts UDA metadata and builds the command manifest.
+3. `registerAllCommands()` scans the current module, extracts UDA metadata, and builds the command manifest.
 4. `run()` authenticates over REST, discovers the gateway, syncs commands, loads plugins, and starts the live session.
 5. `wait()` keeps the process alive.
 

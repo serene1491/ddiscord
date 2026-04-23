@@ -9,19 +9,26 @@ This library is also used in personal projects, so changes may be frequent and o
 ## Key Features
 
 - UDA-first command API for prefix, slash, and hybrid commands
+- Command middleware pipeline with global and named `@UseMiddleware(...)` hooks
 - Real Discord REST and gateway connectivity
 - Typed events, typed models, and typed command inputs
 - Interaction helpers for replies, follow-ups, modals, autocomplete, and deferred responses
+- Message-focused command helpers (`ctx.react`, `ctx.pin`, `ctx.crosspost`, `ctx.messageRef`)
+- Multipart attachment uploads across message and interaction response flows
+- Message lifecycle helpers (create/edit/delete/bulk delete/crosspost/pin flows) and reaction endpoints
+- Guild moderation, thread management, and webhook execution REST surfaces
 - Components V2 coverage with runnable examples
 - State, cache, rate limiting, services, tasks, and Lua/plugin support
 - Production-minded runtime controls (dispatch backpressure, error surfacing, and telemetry)
   with built-in queue health and real uptime tracking
+- Runtime safety guardrails for large bots (worker-loop crash isolation, stricter REST validation, and configurable retry controls)
+- Input hardening for production REST usage (safer token routing, emoji validation, and audit-log reason sanitization)
 
 ## Philosophy
 
 `ddiscord` is being built as a production runtime for D bots: typed APIs, explicit failure
 handling, bounded backpressure, and modular internals that scale past small toy projects.
-More detail is in [`docs/philosophy.md`](docs/philosophy.md).
+More detail is in [`manual/philosophy.md`](manual/philosophy.md).
 
 ## Installing
 
@@ -150,7 +157,7 @@ void handleReady(ReadyEventContext ctx)
 context type, such as `ReadyEventContext`.
 
 `@Event` is the event-side UDA entrypoint, matching the same registration style used for commands.
-Each shipped event now has its own context companion so follow-up work stays fluent without
+Each shipped event has its own context companion so follow-up work stays fluent without
 throwing away the smaller payload structs. Those contexts expose `rest`, `cache`, `services`,
 `state`, `logger`, and current cached entities like `ctx.user`, `ctx.guild`, `ctx.channel`,
 `ctx.message`, or `ctx.interaction` when they are available.
@@ -181,7 +188,7 @@ void handleWhere(HybridCommandContext ctx)
 
 ## Auto Registration
 
-The simplest path is now module-local registration:
+The simplest path is module-local registration:
 
 ```d
 client.registerCommands();
@@ -207,7 +214,7 @@ values.
 
 ## Built-in Help and Error Surfacing
 
-The client now ships a built-in `help` command by default. It uses embeds or Components V2,
+The client ships a built-in `help` command by default. It uses embeds or Components V2,
 supports pagination, and can be fully customized by swapping how entries and pages are rendered.
 
 ```d
@@ -244,13 +251,13 @@ For quick profiles, use `CommandErrorBehavior.nonVerbose()` or `CommandErrorBeha
 
 | Area | Status | Notes |
 | --- | --- | --- |
-| REST core | usable | real HTTP transport, command sync, messages, users, apps, and interaction callbacks |
+| REST core | usable | real HTTP transport, command sync, message lifecycle + multipart attachments, reactions, moderation, threads, webhooks, users, apps, and interaction callbacks |
 | Gateway | usable | live sessions, heartbeat, resume/reconnect basics, typed dispatch integration |
 | Commands | active | prefix, slash, hybrid, permissions, rate limits, and service-backed handlers |
-| Components and modals | growing | buttons, selects, modals, and Components V2 are present and evolving |
+| Components and modals | usable | buttons, selects, modals, and Components V2 builders |
 | State, cache, tasks | available | cache store, scoped state, and scheduled tasks are already shipped |
-| Lua and plugins | experimental | useful today, but still changing quickly |
-| Voice / calls | early | only surface-level groundwork for now |
+| Lua and plugins | active | file-based plugins, capability-gated host APIs, and runtime sandbox controls |
+| Voice / calls | early | surface-level groundwork only |
 
 ## Examples
 
@@ -266,17 +273,18 @@ For quick profiles, use `CommandErrorBehavior.nonVerbose()` or `CommandErrorBeha
 - [`examples/help-bot`](examples/help-bot/source/app.d): built-in help customization and error behavior
 - [`examples/filter-bot`](examples/filter-bot/source/app.d): module auto-registration filters in practice
 - [`examples/lua-scripting-bot`](examples/lua-scripting-bot/source/app.d): persisted user scripts with SQLite + Dorm
+- [`examples/rest-ops-bot`](examples/rest-ops-bot/source/app.d): reactions, moderation, threads, webhooks, and message lifecycle operations
 
 ## Documentation
 
-- [`docs/client.md`](docs/client.md) for the runtime/client guide
-- [`docs/philosophy.md`](docs/philosophy.md) for project direction and engineering principles
+- [`manual/client.md`](manual/client.md) for the runtime/client guide
+- [`manual/philosophy.md`](manual/philosophy.md) for project direction and engineering principles
 - [`examples/README.md`](examples/README.md) for the runnable consoles
 - [`CHANGELOG.md`](CHANGELOG.md) for release notes in progress
 
 ## Lua and Plugins Notes
 
-Lua host APIs now include:
+Lua host APIs include:
 
 - state helpers: `state_get`, `state_set`, `state_has`, `state_del`
 - plugin-scoped logging helpers: `log_info`, `log_warn`, `log_error`
@@ -299,12 +307,12 @@ The public naming is being tightened before `1.0.0`:
 - built-in `help` is enabled by default and can render through embeds or Components V2
 - `@CommandCategory` and `@HideFromHelp` shape the default help output
 - `client.errorBehavior` controls how command failures are surfaced back to users
-- events now have typed context companions such as `ReadyEventContext` and `MessageCreateEventContext`
-- gateway-driven `GuildMemberAddEvent` and `PresenceUpdateEvent` are now emitted with typed contexts
-- `GuildCreateEvent` and `GuildDeleteEvent` are now emitted from live gateway dispatches for cache/runtime sync flows
-- typed gateway coverage now also includes channel/message lifecycle, member removal, and typing-start dispatches
-- command outcome events now expose route-aware helpers like `prefix`, `slash`, `contextMenu`, and `hybrid`
-- `@Event` can register event handlers through `client.registerAllCommands!(...)`
-- `ClientConfig.logUnhandledGatewayDispatchEvents` can sample-log unknown dispatch names while coverage grows
+- events have typed context companions such as `ReadyEventContext` and `MessageCreateEventContext`
+- gateway-driven `GuildMemberAddEvent` and `PresenceUpdateEvent` are emitted with typed contexts
+- `GuildCreateEvent` and `GuildDeleteEvent` are emitted from live gateway dispatches for cache/runtime sync flows
+- typed gateway coverage includes channel/message lifecycle, member removal, and typing-start dispatches
+- command outcome events expose route-aware helpers like `prefix`, `slash`, `contextMenu`, and `hybrid`
+- `@Event` handlers can be wired through `client.registerAllCommands()`
+- `ClientConfig.logUnhandledGatewayDispatchEvents` can sample-log unknown dispatch names without typed coverage
 
 That means pre-`1.0.0` consistency wins over keeping older aliases around.

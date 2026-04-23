@@ -46,7 +46,12 @@ void secure(CommandContext ctx)
 }
 ```
 
-`@RequirePermissions(...)` works for slash commands directly from the interaction payload and, for prefix commands, the client now resolves permissions from guild, member, role, and channel overwrite data when needed.
+`@RequirePermissions(...)` works for slash commands directly from the interaction payload and, for prefix commands, the client resolves permissions from guild, member, role, and channel overwrite data when needed.
+
+Compatibility aliases are also available:
+
+- `@RequirePermission(...)` as singular alias of `@RequirePermissions(...)`
+- `@CooldownRate(...)` as alias of `@RateLimit(...)`
 
 `@RequireOwner` checks `ClientConfig.ownerId`. If owner-only commands are registered without an owner ID, startup logs a warning and those commands deny every invoker until `ownerId` is configured.
 
@@ -61,12 +66,39 @@ void dashboard(CommandContext ctx)
 }
 ```
 
+Additional UDA policies are also available:
+
+- `@GuildOnly` for server-only commands
+- `@DirectMessageOnly` for DM-only commands
+- `@UseMiddleware("name")` for named middleware hooks
+
+Example:
+
+```d
+@Command("cleanup", routes: CommandRoute.Prefix)
+@GuildOnly
+@UseMiddleware("owner_only")
+void cleanup(CommandContext ctx)
+{
+    ctx.reply("cleanup started").await();
+}
+```
+
+Register named and global middleware in the client:
+
+```d
+client.registerMiddleware("must-be-guild", guildOnlyMiddleware());
+client.useMiddleware((CommandContext ctx) {
+    return Result!(bool, string).ok(true); // allow
+});
+```
+
 ## Registration
 
 Free functions:
 
 ```d
-client.registerAllCommands!(ping, info, roll);
+client.registerAllCommands();
 ```
 
 Stateful groups:
@@ -85,22 +117,33 @@ struct AdminCommands
 client.registerAllCommands!AdminCommands();
 ```
 
-If you want explicit registration paths, `registerCommands!`, `registerCommandGroup!`, and `registerPlugin!` still exist. `registerAllCommands!` is the recommended convenience API because it accepts handlers, command groups, and Lua plugin descriptor types in one place.
+If you want explicit registration paths, `registerCommands!`, `registerCommandGroup!`, and `registerPlugin!` still exist. `registerAllCommands!` is useful when you want a specific compile-time registration list.
 
 ## What `CommandContext` gives you
 
 - `ctx.reply(...)`
 - `ctx.defer(...)`
 - `ctx.followup(...)`
-- `ctx.editOriginal(...)`
+- `ctx.edit(...)`
 - `ctx.showModal(...)`
+- `ctx.sendFile(...)`
+- `ctx.followupFile(...)`
+- `ctx.editFile(...)`
+- `ctx.messageRef` (bound message helper with `react`, `unreact`, `pin`, `unpin`, `crosspost`, `edit`, `deleteMessage`)
+- `ctx.react(...)`
+- `ctx.unreact(...)`
+- `ctx.pin(...)`
+- `ctx.unpin(...)`
+- `ctx.crosspost(...)`
+- `ctx.editMessage(...)`
+- `ctx.deleteMessage(...)`
 - `ctx.user`
 - `ctx.channel`
 - `ctx.cache`
 - `ctx.state`
 - `ctx.services`
 
-If the command came from an interaction, `reply` sends the initial interaction response. After `defer()`, use `followup()` or `editOriginal()`.
+If the command came from an interaction, `reply` sends the initial interaction response. After `defer()`, use `followup()` or `edit()`.
 
 Slash and context-menu commands can also open a modal:
 

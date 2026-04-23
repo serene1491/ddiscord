@@ -107,6 +107,13 @@ struct GatewayGuildMemberRemoveInfo
     Nullable!Snowflake guildId;
 }
 
+/// Typed payload for `GUILD_BAN_ADD` and `GUILD_BAN_REMOVE`.
+struct GatewayGuildBanInfo
+{
+    Snowflake guildId;
+    User user;
+}
+
 /// Typed payload for `TYPING_START`.
 struct GatewayTypingStartInfo
 {
@@ -346,6 +353,8 @@ final class GatewayClient
     void delegate(Guild) onGuildCreate;
     void delegate(UnavailableGuild) onGuildDelete;
     void delegate(GatewayGuildMemberRemoveInfo) onGuildMemberRemove;
+    void delegate(GatewayGuildBanInfo) onGuildBanAdd;
+    void delegate(GatewayGuildBanInfo) onGuildBanRemove;
     void delegate(string) onStatus;
     void delegate(Channel) onChannelCreate;
     void delegate(Channel) onChannelUpdate;
@@ -709,6 +718,20 @@ final class GatewayClient
         {
             if (onGuildMemberRemove !is null)
                 onGuildMemberRemove(parseGuildMemberRemove(envelope.data));
+            return;
+        }
+
+        if (envelope.eventName == "GUILD_BAN_ADD")
+        {
+            if (onGuildBanAdd !is null)
+                onGuildBanAdd(parseGuildBan(envelope.data));
+            return;
+        }
+
+        if (envelope.eventName == "GUILD_BAN_REMOVE")
+        {
+            if (onGuildBanRemove !is null)
+                onGuildBanRemove(parseGuildBan(envelope.data));
             return;
         }
 
@@ -1285,6 +1308,21 @@ private GatewayGuildMemberRemoveInfo parseGuildMemberRemove(JSONValue data)
     return info;
 }
 
+private GatewayGuildBanInfo parseGuildBan(JSONValue data)
+{
+    GatewayGuildBanInfo info;
+
+    auto guildId = parseSnowflakeField(data, "guild_id");
+    if (!guildId.isNull)
+        info.guildId = guildId.get;
+
+    auto userValue = data.object.get("user", JSONValue.init);
+    if (userValue.type != JSONType.null_)
+        info.user = User.fromJSON(userValue);
+
+    return info;
+}
+
 private GatewayTypingStartInfo parseTypingStart(JSONValue data)
 {
     GatewayTypingStartInfo info;
@@ -1652,6 +1690,8 @@ unittest
     size_t reactionRemoveAll;
     size_t reactionRemoveEmoji;
     size_t memberRemoves;
+    size_t guildBanAdds;
+    size_t guildBanRemoves;
     size_t typingStarts;
     size_t roleCreates;
     size_t roleUpdates;
@@ -1706,6 +1746,14 @@ unittest
     client.onGuildMemberRemove = (GatewayGuildMemberRemoveInfo info) {
         auto _ = info;
         memberRemoves++;
+    };
+    client.onGuildBanAdd = (GatewayGuildBanInfo info) {
+        auto _ = info;
+        guildBanAdds++;
+    };
+    client.onGuildBanRemove = (GatewayGuildBanInfo info) {
+        auto _ = info;
+        guildBanRemoves++;
     };
     client.onTypingStart = (GatewayTypingStartInfo info) {
         auto _ = info;
@@ -1767,6 +1815,8 @@ unittest
     client.handleDispatch(makeEnvelope("MESSAGE_REACTION_REMOVE_ALL", JSONValue(["channel_id": JSONValue("1"), "message_id": JSONValue("2"), "guild_id": JSONValue("7")])));
     client.handleDispatch(makeEnvelope("MESSAGE_REACTION_REMOVE_EMOJI", JSONValue(["channel_id": JSONValue("1"), "message_id": JSONValue("2"), "guild_id": JSONValue("7"), "emoji": JSONValue(["name": JSONValue("fire")])])));
     client.handleDispatch(makeEnvelope("GUILD_MEMBER_REMOVE", JSONValue(["guild_id": JSONValue("7"), "user": JSONValue(["id": JSONValue("9"), "username": JSONValue("u")])])));
+    client.handleDispatch(makeEnvelope("GUILD_BAN_ADD", JSONValue(["guild_id": JSONValue("7"), "user": JSONValue(["id": JSONValue("9"), "username": JSONValue("u")])])));
+    client.handleDispatch(makeEnvelope("GUILD_BAN_REMOVE", JSONValue(["guild_id": JSONValue("7"), "user": JSONValue(["id": JSONValue("9"), "username": JSONValue("u")])])));
     client.handleDispatch(makeEnvelope("TYPING_START", JSONValue(["channel_id": JSONValue("1"), "guild_id": JSONValue("7"), "user_id": JSONValue("9"), "timestamp": JSONValue(123L)])));
     client.handleDispatch(makeEnvelope("GUILD_ROLE_CREATE", JSONValue(["guild_id": JSONValue("7"), "role": JSONValue(["id": JSONValue("55"), "name": JSONValue("mod"), "permissions": JSONValue("0")])])));
     client.handleDispatch(makeEnvelope("GUILD_ROLE_UPDATE", JSONValue(["guild_id": JSONValue("7"), "role": JSONValue(["id": JSONValue("55"), "name": JSONValue("admin"), "permissions": JSONValue("0")])])));
@@ -1789,6 +1839,8 @@ unittest
     assert(reactionRemoveAll == 1);
     assert(reactionRemoveEmoji == 1);
     assert(memberRemoves == 1);
+    assert(guildBanAdds == 1);
+    assert(guildBanRemoves == 1);
     assert(typingStarts == 1);
     assert(roleCreates == 1);
     assert(roleUpdates == 1);
@@ -1821,6 +1873,21 @@ unittest
     assert(info.memberCount == 123);
     assert(!info.member.user.isNull);
     assert(info.member.user.get.username == "alice");
+}
+
+unittest
+{
+    JSONValue payload;
+    payload["guild_id"] = "77";
+    payload["user"] = JSONValue([
+        "id": JSONValue("11"),
+        "username": JSONValue("banned-user")
+    ]);
+
+    auto info = parseGuildBan(payload);
+    assert(info.guildId == Snowflake(77));
+    assert(info.user.id == Snowflake(11));
+    assert(info.user.username == "banned-user");
 }
 
 unittest

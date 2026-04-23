@@ -2,19 +2,39 @@
 
 All notable changes to `ddiscord` should be documented in this file.
 
-## [0.3.2] - In Development
+## [0.3.2]
 
 ### Added
 
+- Multipart form-data helper module (`ddiscord.core.http.multipart`) for binary upload payloads.
+- Message attachment payload support via `MessageCreate.attach(...)` / `attachBytes(...)`.
+- REST support for multipart attachments in channel messages and interaction responses.
+- Command-context file helpers: `sendFile(...)`, `followupFile(...)`, and `editFile(...)`.
+- Message lifecycle REST endpoints: `messages.edit(...)`, `messages.delete(...)`, and `messages.bulkDelete(...)`.
+- Message utility REST endpoints: `messages.crosspost(...)`, `messages.pin(...)`, `messages.unpin(...)`, and `messages.pins(...)`.
+- Command-context message-operation helpers: `ctx.messageRef`, `ctx.react(...)`, `ctx.unreact(...)`, `ctx.pin(...)`, `ctx.unpin(...)`, `ctx.crosspost(...)`, `ctx.editMessage(...)`, and `ctx.deleteMessage(...)`.
+- Reaction REST endpoints: `reactions.add(...)`, `reactions.removeSelf(...)`, `reactions.removeUser(...)`, `reactions.clear(...)`, and `reactions.clearEmoji(...)`.
+- Guild moderation REST endpoints: `guilds.timeoutMember(...)`, `guilds.clearMemberTimeout(...)`, `guilds.kick(...)`, `guilds.ban(...)`, and `guilds.unban(...)`.
+- Optional audit-log reason support on moderation endpoints (`timeoutMember`, `clearMemberTimeout`, `kick`, `ban`, and `unban`).
+- Thread REST endpoints: `threads.createFromMessage(...)`, `threads.create(...)`, `threads.join(...)`, `threads.leave(...)`, and `threads.archive(...)`.
+- Webhook execution REST endpoint: `webhooks.execute(...)` with support for `thread_id`.
+- New runnable console example: `examples/rest-ops-bot`.
+- REST retry controls for `429` handling (`autoRetryRateLimits`, `maxRateLimitRetries`) in `RestClientConfig`.
+- Rate-limit parser now handles case-insensitive global headers/scope values (`TRUE` / `GLOBAL`).
 - Gateway dispatch coverage for `GUILD_CREATE` and `GUILD_DELETE` with typed callbacks in `GatewayClient`.
 - Client-level emission of `GuildCreateEvent` and `GuildDeleteEvent` with typed event contexts.
 - Gateway dispatch coverage for `GUILD_MEMBER_REMOVE`, `CHANNEL_CREATE`, `CHANNEL_UPDATE`, `CHANNEL_DELETE`, `MESSAGE_UPDATE`, `MESSAGE_DELETE`, and `TYPING_START`.
 - Client-level emission of `GuildMemberRemoveEvent`, `ChannelCreateEvent`, `ChannelUpdateEvent`, `ChannelDeleteEvent`, `MessageUpdateEvent`, `MessageDeleteEvent`, and `TypingStartEvent` with typed contexts.
 - Gateway dispatch coverage for `CHANNEL_PINS_UPDATE`, `MESSAGE_REACTION_ADD`, `MESSAGE_REACTION_REMOVE`, `MESSAGE_REACTION_REMOVE_ALL`, `MESSAGE_REACTION_REMOVE_EMOJI`, `GUILD_ROLE_CREATE`, `GUILD_ROLE_UPDATE`, `GUILD_ROLE_DELETE`, `INVITE_CREATE`, `INVITE_DELETE`, `WEBHOOKS_UPDATE`, `THREAD_CREATE`, `THREAD_UPDATE`, and `THREAD_DELETE`.
 - Client-level emission/context support for the same event family (`ChannelPinsUpdateEvent`, reaction events, guild-role events, invite events, `WebhooksUpdateEvent`, and thread events).
+- Gateway dispatch coverage for `GUILD_BAN_ADD` and `GUILD_BAN_REMOVE` with typed callbacks in `GatewayClient`.
+- Client-level emission/context support for `GuildBanAddEvent` and `GuildBanRemoveEvent`.
 - Cache eviction APIs (`evictUser`, `evictChannel`, `evictGuild`, `evictRole`, `evictMessage`) for safer runtime consistency flows.
 - Presence model parsing helpers (`statusFromDiscord`, `activityTypeFromDiscord`) and activity JSON round-trip helpers.
 - Command error behavior presets `CommandErrorBehavior.nonVerbose()` and `CommandErrorBehavior.verbose()`.
+- New command UDAs: `@UseMiddleware("name")`, `@GuildOnly`, `@DirectMessageOnly`, and `@BotModule("name")`.
+- Command-policy aliases for API ergonomics: `@RequirePermission(...)` and `@CooldownRate(...)`.
+- Command middleware runtime hooks: `client.useMiddleware(...)` and `client.registerMiddleware(...)`, including built-in names `guild_only`, `dm_only`, and `owner_only`.
 - Lua runtime capability-denial hints when scripts call globals filtered out by permissions.
 
 ### Changed
@@ -22,6 +42,12 @@ All notable changes to `ddiscord` should be documented in this file.
 - Guild delete gateway handling now evicts guild cache entries when Discord indicates a true removal (`unavailable=false`).
 - Channel and message delete gateway handling now evict cache entries during runtime dispatch processing.
 - Gateway/event typing surface now covers startup lifecycle plus core guild/presence/member dispatches.
+- Task scheduler now validates invalid timing inputs earlier (non-empty label, non-negative delay, positive recurring/cron intervals, non-null callback).
+- Scheduler callbacks now isolate `Throwable` failures so the scheduler keeps running even when callbacks throw beyond `Exception`.
+- Dispatch and task worker loops now isolate unhandled `Throwable` errors and log them instead of terminating worker threads.
+- REST guardrails now validate moderation/thread arguments earlier (timeout range, ban delete window, thread type/name, auto-archive durations) for safer runtime behavior.
+- REST route hardening now validates empty reaction emojis and rejects empty webhook/interaction tokens before sending requests.
+- Audit-log reason headers are now sanitized and URL-encoded before sending `X-Audit-Log-Reason`.
 
 ### Fixed
 
@@ -55,7 +81,7 @@ All notable changes to `ddiscord` should be documented in this file.
 - `ILogger` and `NullLogger` in `ddiscord.logging` for pluggable logging integrations.
 - Dispatch queue backpressure controls in `ClientConfig` (`maxDispatchQueueSize`, `dropOldestDispatchOnOverflow`, `dispatchOverflowLogEvery`).
 - `client.dispatchQueueHealth` runtime telemetry for queued/peak/dropped dispatch tracking.
-- Production philosophy document at `docs/philosophy.md`.
+- Philosophy document at `manual/philosophy.md`.
 - Real `client.uptime` tracking with elapsed milliseconds and human-readable formatting.
 - Lua plugin host API additions: `state_has`, `state_del`, `log_info`, `log_warn`, `log_error`.
 - Lua plugin context exports: `plugin_version`, `plugin_api_version`, `plugin_entrypoint`, and `plugin_sandbox`.

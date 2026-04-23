@@ -15,45 +15,48 @@ import core.sync.mutex : Mutex;
 import core.thread : Thread;
 import core.time : MonoTime, dur;
 import ddiscord.cache : CacheStore;
+import ddiscord.client_errors : buildFailurePayload, classifyCommandFailure, shouldSurfaceFailure;
 import ddiscord.client_filters : matchesRegistrationFilter;
 import ddiscord.client_queue : DispatchQueuePushOutcome, compactQueue, pushBounded, queueDepth;
 import ddiscord.client_runtime : UptimeSample, snowflakeLatencyMilliseconds;
 import ddiscord.client_text : attemptedPrefixCommandName;
 import ddiscord.client_types : HelpRequest, RegistrationCandidate;
 import ddiscord.commands : Command, CommandCategory, CommandDescriptor, CommandExecution,
-    CommandExecutionSettings, CommandOptionDescriptor, CommandRegistry, CommandRoute,
-    HideFromHelp, HybridCommand, MessageCommand, ParsedCommand, RequireOwner,
-    RequirePermissions, UserCommand;
+    CommandExecutionSettings, CommandMiddleware, CommandOptionDescriptor, CommandRegistry,
+    CommandRoute, HideFromHelp, HybridCommand, MessageCommand, ParsedCommand, RequireOwner,
+    RequirePermissions, UserCommand, directMessageOnlyMiddleware, guildOnlyMiddleware,
+    ownerOnlyMiddleware;
 import ddiscord.context.command : CommandContext, CommandSource;
 import ddiscord.context.event : AutocompleteInteractionEventContext, CommandExecutedEventContext,
     ChannelCreateEventContext, ChannelDeleteEventContext, ChannelPinsUpdateEventContext,
     ChannelUpdateEventContext, CommandFailedEventContext, EventContext, GuildCreateEventContext,
     GuildDeleteEventContext, GuildMemberAddEventContext, GuildMemberRemoveEventContext,
-    GuildRoleCreateEventContext, GuildRoleDeleteEventContext, GuildRoleUpdateEventContext,
-    InteractionCreateEventContext, InviteCreateEventContext, InviteDeleteEventContext,
-    MessageComponentEventContext, MessageCreateEventContext, MessageDeleteEventContext,
-    MessageReactionAddEventContext, MessageReactionRemoveAllEventContext,
-    MessageReactionRemoveEmojiEventContext, MessageReactionRemoveEventContext,
-    MessageUpdateEventContext, ModalSubmitEventContext, PresenceUpdateEventContext,
-    ReadyEventContext, ResumedEventContext, ThreadCreateEventContext, ThreadDeleteEventContext,
-    ThreadUpdateEventContext, TypingStartEventContext, WebhooksUpdateEventContext;
+    GuildBanAddEventContext, GuildBanRemoveEventContext, GuildRoleCreateEventContext,
+    GuildRoleDeleteEventContext, GuildRoleUpdateEventContext, InteractionCreateEventContext,
+    InviteCreateEventContext, InviteDeleteEventContext, MessageComponentEventContext,
+    MessageCreateEventContext, MessageDeleteEventContext, MessageReactionAddEventContext,
+    MessageReactionRemoveAllEventContext, MessageReactionRemoveEmojiEventContext,
+    MessageReactionRemoveEventContext, MessageUpdateEventContext, ModalSubmitEventContext,
+    PresenceUpdateEventContext, ReadyEventContext, ResumedEventContext,
+    ThreadCreateEventContext, ThreadDeleteEventContext, ThreadUpdateEventContext,
+    TypingStartEventContext, WebhooksUpdateEventContext;
 import ddiscord.events.dispatcher : Event, EventDispatcher;
 import ddiscord.events.types : AutocompleteInteractionEvent, CommandExecutedEvent,
     ChannelCreateEvent, ChannelDeleteEvent, ChannelPinsUpdateEvent, ChannelUpdateEvent,
     CommandFailedEvent, GuildCreateEvent, GuildDeleteEvent, GuildMemberAddEvent,
-    GuildMemberRemoveEvent, GuildRoleCreateEvent, GuildRoleDeleteEvent, GuildRoleUpdateEvent,
-    InteractionCreateEvent, InviteCreateEvent, InviteDeleteEvent, MessageComponentEvent,
-    MessageCreateEvent, MessageDeleteEvent, MessageReactionAddEvent,
-    MessageReactionRemoveAllEvent, MessageReactionRemoveEmojiEvent, MessageReactionRemoveEvent,
-    MessageUpdateEvent, ModalSubmitEvent, PresenceUpdateEvent, ReadyEvent, ResumedEvent,
-    ThreadCreateEvent, ThreadDeleteEvent, ThreadUpdateEvent, TypingStartEvent,
-    WebhooksUpdateEvent;
+    GuildMemberRemoveEvent, GuildBanAddEvent, GuildBanRemoveEvent, GuildRoleCreateEvent,
+    GuildRoleDeleteEvent, GuildRoleUpdateEvent, InteractionCreateEvent, InviteCreateEvent,
+    InviteDeleteEvent, MessageComponentEvent, MessageCreateEvent, MessageDeleteEvent,
+    MessageReactionAddEvent, MessageReactionRemoveAllEvent, MessageReactionRemoveEmojiEvent,
+    MessageReactionRemoveEvent, MessageUpdateEvent, ModalSubmitEvent, PresenceUpdateEvent,
+    ReadyEvent, ResumedEvent, ThreadCreateEvent, ThreadDeleteEvent, ThreadUpdateEvent,
+    TypingStartEvent, WebhooksUpdateEvent;
 import ddiscord.gateway.client : GatewayClient, GatewayClientConfig, GatewayGuildMemberAddInfo,
-    GatewayGuildMemberRemoveInfo, GatewayGuildRoleDeleteInfo, GatewayGuildRoleInfo,
-    GatewayInviteInfo, GatewayMessageDeleteInfo, GatewayMessageReactionInfo,
-    GatewayMessageReactionRemoveAllInfo, GatewayPresenceUpdateInfo, GatewayReadyInfo,
-    GatewayThreadDeleteInfo, GatewayTypingStartInfo, GatewayWebhooksUpdateInfo,
-    GatewayChannelPinsUpdateInfo;
+    GatewayGuildMemberRemoveInfo, GatewayGuildBanInfo, GatewayGuildRoleDeleteInfo,
+    GatewayGuildRoleInfo, GatewayInviteInfo, GatewayMessageDeleteInfo,
+    GatewayMessageReactionInfo, GatewayMessageReactionRemoveAllInfo,
+    GatewayPresenceUpdateInfo, GatewayReadyInfo, GatewayThreadDeleteInfo,
+    GatewayTypingStartInfo, GatewayWebhooksUpdateInfo, GatewayChannelPinsUpdateInfo;
 import ddiscord.gateway.intents : GatewayIntent;
 import ddiscord.help.navigation : BuiltInHelpCustomIdPrefix, BuiltInHelpDefaultPageSize,
     BuiltInHelpNoopCustomId, buildPersistentHelpCustomId, parsePersistentHelpCustomId;
@@ -74,7 +77,8 @@ import ddiscord.permissions : computeEffectivePermissions;
 import ddiscord.core.http.client : HttpError, HttpErrorKind, HttpResponse, HttpTransport;
 import ddiscord.rest : ApplicationCommandsEndpoints, ApplicationsEndpoints, ChannelsEndpoints,
     GatewayBotInfo, GatewayEndpoints, GuildsEndpoints, InteractionsEndpoints, MessagesEndpoints,
-    RestClient, RestClientConfig, UsersEndpoints;
+    ReactionsEndpoints, RestClient, RestClientConfig, ThreadsEndpoints, UsersEndpoints,
+    WebhooksEndpoints;
 import ddiscord.scripting : LuaCapability, LuaRuntime, LuaSandboxProfile, ScriptingEngine;
 import ddiscord.services : ServiceContainer;
 import ddiscord.state : StateStore;
@@ -86,7 +90,7 @@ import ddiscord.util.snowflake : Snowflake;
 import std.algorithm : canFind, sort;
 import std.ascii : toLower;
 import std.conv : ConvException, to;
-import std.string : indexOf, startsWith, strip;
+import std.string : startsWith, strip;
 import std.traits : Parameters, fullyQualifiedName, isCallable;
 
 /// Client configuration.
@@ -203,6 +207,7 @@ final class Client
         services.add!CommandHelpBehavior(new CommandHelpBehavior);
         services.add!CommandErrorBehavior(new CommandErrorBehavior);
         syncCommandExecutionSettings();
+        registerBuiltInCommandMiddlewares();
         _selfUser.bot = true;
         _selfUser.username = "ddiscord";
         events.on!MessageComponentEvent((event) {
@@ -281,15 +286,29 @@ final class Client
         events.emit!E(event);
     }
 
+    /// Registers a middleware that runs before every command execution.
+    void useMiddleware(CommandMiddleware middleware)
+    {
+        commands.useMiddleware(middleware);
+    }
+
+    /// Registers a named middleware usable through `@UseMiddleware("name")`.
+    void registerMiddleware(string name, CommandMiddleware middleware)
+    {
+        commands.registerMiddleware(name, middleware);
+    }
+
     /// Returns dispatch-loop queue telemetry for production monitoring.
     DispatchQueueHealth dispatchQueueHealth() @property
     {
         DispatchQueueHealth health;
         synchronized (_dispatchMutex)
+        {
             health.queued = queueDepth(_dispatchQueue, _dispatchQueueHead);
-        health.peakQueued = _peakDispatchQueueDepth;
-        health.maxQueued = config.maxDispatchQueueSize;
-        health.droppedTotal = _droppedDispatchItems;
+            health.peakQueued = _peakDispatchQueueDepth;
+            health.maxQueued = config.maxDispatchQueueSize;
+            health.droppedTotal = _droppedDispatchItems;
+        }
         return health;
     }
 
@@ -348,6 +367,24 @@ final class Client
     ChannelsEndpoints channels() @property
     {
         return rest.channels;
+    }
+
+    /// Direct shortcut to reaction REST endpoints.
+    ReactionsEndpoints reactions() @property
+    {
+        return rest.reactions;
+    }
+
+    /// Direct shortcut to thread REST endpoints.
+    ThreadsEndpoints threads() @property
+    {
+        return rest.threads;
+    }
+
+    /// Direct shortcut to webhook REST endpoints.
+    WebhooksEndpoints webhooks() @property
+    {
+        return rest.webhooks;
     }
 
     /// Direct shortcut to interaction REST endpoints.
@@ -972,6 +1009,28 @@ final class Client
         return ctx;
     }
 
+    private GuildBanAddEventContext buildGuildBanAddEventContext(GatewayGuildBanInfo info)
+    {
+        GuildBanAddEventContext ctx;
+        ctx.event = buildEventContext(
+            Nullable!User.of(info.user),
+            lookupGuild(Nullable!Snowflake.of(info.guildId))
+        );
+        ctx.guildId = info.guildId;
+        ctx.userData = info.user;
+        return ctx;
+    }
+
+    private GuildBanRemoveEventContext buildGuildBanRemoveEventContext(GatewayGuildBanInfo info)
+    {
+        GuildBanRemoveEventContext ctx;
+        auto built = buildGuildBanAddEventContext(info);
+        ctx.event = built.event;
+        ctx.guildId = built.guildId;
+        ctx.userData = built.userData;
+        return ctx;
+    }
+
     private ChannelCreateEventContext buildChannelCreateEventContext(Channel channel)
     {
         ChannelCreateEventContext ctx;
@@ -1530,6 +1589,26 @@ final class Client
             event.context = buildGuildMemberRemoveEventContext(info.user, info.guildId);
             emit!GuildMemberRemoveEvent(event);
         };
+        _gateway.onGuildBanAdd = (GatewayGuildBanInfo info) {
+            if (info.user.id.value != 0)
+                cache.store(info.user);
+
+            GuildBanAddEvent event;
+            event.guildId = info.guildId;
+            event.user = info.user;
+            event.context = buildGuildBanAddEventContext(info);
+            emit!GuildBanAddEvent(event);
+        };
+        _gateway.onGuildBanRemove = (GatewayGuildBanInfo info) {
+            if (info.user.id.value != 0)
+                cache.store(info.user);
+
+            GuildBanRemoveEvent event;
+            event.guildId = info.guildId;
+            event.user = info.user;
+            event.context = buildGuildBanRemoveEventContext(info);
+            emit!GuildBanRemoveEvent(event);
+        };
         _gateway.onChannelCreate = (Channel channel) {
             if (channel.id.value != 0)
                 cache.store(channel);
@@ -1819,14 +1898,29 @@ final class Client
                 if (!hasItem)
                     continue;
 
-                final switch (item.kind)
+                try
                 {
-                    case DispatchItem.Kind.Message:
-                        auto _ = receiveMessage(item.message, item.permissions);
-                        break;
-                    case DispatchItem.Kind.Interaction:
-                        auto _ = receiveInteraction(item.interaction, item.channel, item.permissions);
-                        break;
+                    final switch (item.kind)
+                    {
+                        case DispatchItem.Kind.Message:
+                            auto _ = receiveMessage(item.message, item.permissions);
+                            break;
+                        case DispatchItem.Kind.Interaction:
+                            auto _ = receiveInteraction(item.interaction, item.channel, item.permissions);
+                            break;
+                    }
+                }
+                catch (Throwable error)
+                {
+                    logger.error(
+                        "client",
+                        formatError(
+                            "client",
+                            "Dispatch worker encountered an unhandled error.",
+                            error.msg,
+                            "The worker remained online; inspect command/event handlers for unsafe exceptions."
+                        )
+                    );
                 }
             }
         });
@@ -1943,7 +2037,22 @@ final class Client
         _taskThread = new Thread({
             while (_taskLoopRunning)
             {
-                tasks.runDue();
+                try
+                {
+                    tasks.runDue();
+                }
+                catch (Throwable error)
+                {
+                    logger.error(
+                        "tasks",
+                        formatError(
+                            "tasks",
+                            "Task loop encountered an unhandled error.",
+                            error.msg,
+                            "The scheduler loop remained online; inspect task callbacks and scheduler state."
+                        )
+                    );
+                }
                 Thread.sleep(dur!"msecs"(250));
             }
         });
@@ -2398,7 +2507,7 @@ final class Client
         context.error = error;
         context.command = ctx;
 
-        auto payload = buildFailurePayload(context);
+        auto payload = buildFailurePayload(errorBehavior, config.prefix, context);
         auto sent = ctx.rest.messages.create(ctx.channel.id, payload).awaitResult();
         if (sent.isErr)
         {
@@ -2421,10 +2530,10 @@ final class Client
         context.error = error;
         context.command = ctx;
 
-        if (!shouldSurfaceFailure(context))
+        if (!shouldSurfaceFailure(errorBehavior, context))
             return;
 
-        auto task = ctx.send(buildFailurePayload(context), true);
+        auto task = ctx.send(buildFailurePayload(errorBehavior, config.prefix, context), true);
         auto sent = task.awaitResult();
         if (sent.isErr)
         {
@@ -2527,43 +2636,6 @@ final class Client
         return Result!(ulong, string).ok(permissions);
     }
 
-    private CommandErrorKind classifyCommandFailure(string error)
-    {
-        if (error.canFind("requested prefix command is not registered") ||
-            error.canFind("requested interaction command is not registered"))
-        {
-            return CommandErrorKind.UnknownCommand;
-        }
-
-        if (error.canFind("No command name was provided after the prefix"))
-            return CommandErrorKind.MissingCommandName;
-        if (error.canFind("required prefix-command argument was not provided") ||
-            error.canFind("required slash-command option was not provided"))
-        {
-            return CommandErrorKind.MissingArgument;
-        }
-
-        if (error.canFind("could not be converted to the expected type") ||
-            error.canFind("received an invalid value"))
-        {
-            return CommandErrorKind.InvalidArgument;
-        }
-
-        if (error.canFind("Too many prefix arguments were provided"))
-            return CommandErrorKind.TooManyArguments;
-        if (error.canFind("restricted to the configured bot owner") ||
-            error.canFind("permission requirements") ||
-            error.canFind("temporarily rate limited"))
-        {
-            return CommandErrorKind.PolicyDenied;
-        }
-
-        if (error.canFind("handler raised an exception"))
-            return CommandErrorKind.HandlerFailure;
-
-        return CommandErrorKind.Unknown;
-    }
-
     private bool shouldSurfacePrefixFailure(string error, string commandName, CommandContext ctx)
     {
         CommandErrorContext context;
@@ -2572,148 +2644,7 @@ final class Client
         context.commandName = commandName;
         context.error = error;
         context.command = ctx;
-        return shouldSurfaceFailure(context);
-    }
-
-    private bool shouldSurfaceFailure(CommandErrorContext context)
-    {
-        auto behavior = errorBehavior;
-        if (!behavior.enabled)
-            return false;
-        if (behavior.shouldSurface !is null)
-            return behavior.shouldSurface(context);
-
-        final switch (context.kind)
-        {
-            case CommandErrorKind.UnknownCommand:
-                return behavior.surfaceUnknownCommand;
-            case CommandErrorKind.MissingCommandName:
-                return behavior.surfaceMissingCommandName;
-            case CommandErrorKind.MissingArgument:
-            case CommandErrorKind.InvalidArgument:
-            case CommandErrorKind.TooManyArguments:
-                return behavior.surfaceArgumentErrors;
-            case CommandErrorKind.PolicyDenied:
-                return behavior.surfacePolicyErrors;
-            case CommandErrorKind.HandlerFailure:
-                return behavior.surfaceHandlerFailures;
-            case CommandErrorKind.Unknown:
-                return behavior.surfaceOtherErrors;
-        }
-    }
-
-    private MessageCreate buildFailurePayload(CommandErrorContext context)
-    {
-        auto behavior = errorBehavior;
-        if (behavior.render !is null)
-            return behavior.render(context);
-
-        string[] lines;
-        lines ~= userFacingFailureSummary(context);
-
-        auto detail = userFacingFailureDetail(context);
-        if (detail.length != 0)
-            lines ~= detail;
-
-        auto hint = userFacingFailureHint(context);
-        if (hint.length != 0)
-            lines ~= hint;
-
-        return MessageCreate(joinLines(lines));
-    }
-
-    private string userFacingFailureSummary(CommandErrorContext context)
-    {
-        final switch (context.kind)
-        {
-            case CommandErrorKind.UnknownCommand:
-                return "Command `" ~ context.commandName ~ "` was not found.";
-            case CommandErrorKind.MissingCommandName:
-                return "A command name is required after the prefix.";
-            case CommandErrorKind.MissingArgument:
-                return "Some required arguments are missing.";
-            case CommandErrorKind.InvalidArgument:
-                return "One or more arguments are invalid.";
-            case CommandErrorKind.TooManyArguments:
-                return "Too many arguments were provided.";
-            case CommandErrorKind.PolicyDenied:
-                return "This command cannot run with the current policy restrictions.";
-            case CommandErrorKind.HandlerFailure:
-                return "The command failed while it was running.";
-            case CommandErrorKind.Unknown:
-                return "The command could not be completed.";
-        }
-    }
-
-    private string userFacingFailureDetail(CommandErrorContext context)
-    {
-        static string detailPrefix = "Detail: ";
-        static string hintPrefix = "Hint: ";
-
-        auto detailStart = context.error.indexOf(detailPrefix);
-        if (detailStart == -1)
-            return "";
-
-        detailStart += cast(ptrdiff_t) detailPrefix.length;
-        auto detail = context.error[detailStart .. $];
-        auto hintStart = detail.indexOf(hintPrefix);
-        if (hintStart != -1)
-            detail = detail[0 .. hintStart];
-
-        // Keep user-facing failures concise instead of dumping the full internal error.
-        detail = detail.strip;
-        if (detail.length == 0)
-            return "";
-        if (detail.length > 220)
-            detail = detail[0 .. 220] ~ "...";
-        return detail;
-    }
-
-    private string userFacingFailureHint(CommandErrorContext context)
-    {
-        auto commandText = context.commandName.length == 0 ? "<command>" : context.commandName;
-
-        final switch (context.kind)
-        {
-            case CommandErrorKind.UnknownCommand:
-                return "Use `" ~ config.prefix ~ "help` to list available commands.";
-            case CommandErrorKind.MissingCommandName:
-                return "Try `" ~ config.prefix ~ "help` to see what is available.";
-            case CommandErrorKind.MissingArgument:
-            case CommandErrorKind.InvalidArgument:
-            case CommandErrorKind.TooManyArguments:
-                if (context.route == "prefix")
-                    return "Use `" ~ config.prefix ~ "help " ~ commandText ~ "` for usage examples.";
-                return "Use `/help " ~ commandText ~ "` for usage examples.";
-            case CommandErrorKind.PolicyDenied:
-                if (context.error.canFind("owner"))
-                    return "This command is restricted to the configured bot owner.";
-                if (context.error.canFind("permission"))
-                    return "You do not have the required permissions to run this command.";
-                if (context.error.canFind("rate limit"))
-                    return "This command is on cooldown. Try again in a moment.";
-                return "";
-            case CommandErrorKind.HandlerFailure:
-                return "The failure was logged on the bot side for debugging.";
-            case CommandErrorKind.Unknown:
-                return "Try again in a moment. If it keeps failing, inspect the bot logs.";
-        }
-    }
-
-    private string joinLines(string[] lines)
-    {
-        string joined;
-
-        foreach (index, line; lines)
-        {
-            if (line.length == 0)
-                continue;
-            if (joined.length != 0)
-                joined ~= "\n";
-            joined ~= line;
-        }
-
-        return joined;
+        return shouldSurfaceFailure(errorBehavior, context);
     }
 
     private void registerModuleMembers(
@@ -2846,6 +2777,13 @@ final class Client
         CommandExecutionSettings settings;
         settings.ownerId = config.ownerId;
         services.add!CommandExecutionSettings(settings);
+    }
+
+    private void registerBuiltInCommandMiddlewares()
+    {
+        commands.registerMiddleware("guild_only", guildOnlyMiddleware());
+        commands.registerMiddleware("dm_only", directMessageOnlyMiddleware());
+        commands.registerMiddleware("owner_only", ownerOnlyMiddleware());
     }
 
     private void logOwnerConfiguration()
@@ -3084,6 +3022,8 @@ private template isEventContextType(T)
         is(T == GuildDeleteEventContext) ||
         is(T == GuildMemberRemoveEventContext) ||
         is(T == GuildMemberAddEventContext) ||
+        is(T == GuildBanAddEventContext) ||
+        is(T == GuildBanRemoveEventContext) ||
         is(T == ChannelCreateEventContext) ||
         is(T == ChannelUpdateEventContext) ||
         is(T == ChannelDeleteEventContext) ||
@@ -3128,6 +3068,10 @@ private template EventTypeOfContext(T)
         alias EventTypeOfContext = GuildMemberRemoveEvent;
     else static if (is(T == GuildMemberAddEventContext))
         alias EventTypeOfContext = GuildMemberAddEvent;
+    else static if (is(T == GuildBanAddEventContext))
+        alias EventTypeOfContext = GuildBanAddEvent;
+    else static if (is(T == GuildBanRemoveEventContext))
+        alias EventTypeOfContext = GuildBanRemoveEvent;
     else static if (is(T == ChannelCreateEventContext))
         alias EventTypeOfContext = ChannelCreateEvent;
     else static if (is(T == ChannelUpdateEventContext))
@@ -3253,6 +3197,10 @@ private void invokeFreeEvent(alias handler, E)(E event)
         else static if (is(E == GuildMemberRemoveEvent))
             handler(event.context);
         else static if (is(E == GuildMemberAddEvent))
+            handler(event.context);
+        else static if (is(E == GuildBanAddEvent))
+            handler(event.context);
+        else static if (is(E == GuildBanRemoveEvent))
             handler(event.context);
         else static if (is(E == ChannelCreateEvent))
             handler(event.context);
@@ -3795,6 +3743,9 @@ unittest
     assert(client.apps is client.rest.applications);
     assert(client.applications is client.rest.applications);
     assert(client.channels is client.rest.channels);
+    assert(client.reactions is client.rest.reactions);
+    assert(client.threads is client.rest.threads);
+    assert(client.webhooks is client.rest.webhooks);
     assert(client.guilds is client.rest.guilds);
     assert(client.interactions is client.rest.interactions);
     assert(client.slash is client.rest.applicationCommands);

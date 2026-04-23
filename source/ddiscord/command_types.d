@@ -15,6 +15,9 @@ import ddiscord.util.optional : Nullable;
 import ddiscord.util.result : Result;
 import ddiscord.util.snowflake : Snowflake;
 
+/// Command middleware callback.
+alias CommandMiddleware = Result!(bool, string) delegate(CommandContext);
+
 /// Marks a command handler.
 struct Command
 {
@@ -137,6 +140,38 @@ struct HideFromHelp
 {
 }
 
+/// Attaches a named middleware to a command.
+struct UseMiddleware
+{
+    string name;
+
+    this(string name)
+    {
+        this.name = name;
+    }
+}
+
+/// Restricts command execution to guild contexts.
+struct GuildOnly
+{
+}
+
+/// Restricts command execution to direct-message contexts.
+struct DirectMessageOnly
+{
+}
+
+/// Marks a command module for future module-level auto-discovery.
+struct BotModule
+{
+    string name;
+
+    this(string name)
+    {
+        this.name = name;
+    }
+}
+
 /// Marks a command that requires bot ownership.
 struct RequireOwner
 {
@@ -152,6 +187,9 @@ struct RequirePermissions
         this.permissions = permissions;
     }
 }
+
+/// Singular alias for `RequirePermissions`.
+alias RequirePermission = RequirePermissions;
 
 /// Rate limit bucket selector.
 enum RateLimitBucket
@@ -177,6 +215,9 @@ struct RateLimit
     }
 }
 
+/// Alias for `RateLimit` with the same payload semantics.
+alias CooldownRate = RateLimit;
+
 /// Attribute attaching an autocomplete handler symbol.
 struct Autocomplete(alias handler)
 {
@@ -199,6 +240,7 @@ struct CommandDescriptor
     string category;
     bool hiddenFromHelp;
     bool builtin;
+    string[] middlewareNames;
     string[] parameterNames;
     string[] parameterTypes;
     CommandOptionDescriptor[] options;
@@ -223,6 +265,8 @@ struct CommandOptionDescriptor
 struct CommandPolicyDescriptor
 {
     bool ownerOnly;
+    bool guildOnly;
+    bool directMessageOnly;
     ulong requiredPermissions;
     bool hasRateLimit;
     uint rateLimitCount;

@@ -1,6 +1,6 @@
 # Permissions Guide
 
-`ddiscord` now exposes a public permission calculator so command checks and custom moderation logic can share the same rules.
+`ddiscord` exposes a public permission calculator so command checks and custom moderation logic can share the same rules.
 
 ## What it covers
 
@@ -26,7 +26,7 @@ if (!hasPermission(effective, cast(ulong) Permissions.ManageMessages))
 
 ## Prefix commands
 
-For prefix commands using `@RequirePermissions(...)`, the client now resolves permissions from:
+For prefix commands using `@RequirePermissions(...)`, the client resolves permissions from:
 
 1. cached member permissions when available
 2. guild member data

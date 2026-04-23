@@ -1,6 +1,6 @@
 # Interactions Guide
 
-The library currently supports the main interaction reply flow:
+The library supports the main interaction reply flow:
 
 - initial slash responses
 - deferred responses
@@ -29,9 +29,29 @@ Use this when the command needs longer work:
 void report(CommandContext ctx)
 {
     ctx.defer(ephemeral: true).await();
-    ctx.editOriginal("Building your report...").await();
+    ctx.edit("Building your report...").await();
     ctx.followup("Done.").await();
 }
+```
+
+## Sending attachments
+
+You can attach files through `MessageCreate` or directly from `CommandContext`.
+
+```d
+auto payload = MessageCreate("Execution log")
+    .attachBytes("latest.log", cast(const(ubyte)[]) logBytes, "text/plain");
+
+ctx.send(payload).await();
+```
+
+```d
+ctx.sendFile(
+    "report.json",
+    cast(const(ubyte)[]) reportJson,
+    "Attached report",
+    "application/json"
+).await();
 ```
 
 ## Components V2 payloads
@@ -53,7 +73,7 @@ payload = payload.addComponent(container);
 ctx.reply(payload).await();
 ```
 
-When using the current V2 component builders (`Container`, `Section`, `Separator`, `TextDisplay`, `Thumbnail`), the library now sets `MessageFlags.IsComponentsV2` automatically.
+When using the V2 component builders (`Container`, `Section`, `Separator`, `TextDisplay`, `Thumbnail`), the library sets `MessageFlags.IsComponentsV2` automatically.
 
 ## Modal response
 
@@ -71,7 +91,7 @@ void report(CommandContext ctx)
 
 ## Low-level interaction events
 
-Non-command interactions are now surfaced as dedicated typed events instead of being mixed into slash execution:
+Non-command interactions are surfaced as dedicated typed events instead of being mixed into slash execution:
 
 - `AutocompleteInteractionEvent`
 - `MessageComponentEvent`
@@ -97,4 +117,4 @@ The transport pieces are present in the library:
 - `AutocompleteChoice`
 - interaction autocomplete response support in the REST surface
 
-Autocomplete is still a lower-level interaction capability rather than a polished high-level command binder, but it no longer falls through into normal slash-command execution.
+Autocomplete remains a lower-level interaction capability rather than a high-level command binder, and it does not fall through into normal slash-command execution.

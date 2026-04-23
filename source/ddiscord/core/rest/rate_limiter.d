@@ -119,7 +119,9 @@ final class RestRateLimiter
 
             auto retryAfter = parseRetryAfter(headers, body);
             auto scopeName = getHeader(headers, "x-ratelimit-scope").getOr("");
-            auto isGlobal = getHeader(headers, "x-ratelimit-global").getOr("") == "true" || scopeName == "global";
+            auto globalHeader = getHeader(headers, "x-ratelimit-global").getOr("");
+            auto isGlobal = equalsIgnoreCase(globalHeader, "true") ||
+                equalsIgnoreCase(scopeName, "global");
 
             if (retryAfter.isNull && isGlobal)
                 retryAfter = Nullable!Duration.of(dur!"seconds"(60));
@@ -338,6 +340,27 @@ private string normalizeHeader(string value)
     return builder.data;
 }
 
+private bool equalsIgnoreCase(string left, string right)
+{
+    if (left.length != right.length)
+        return false;
+
+    foreach (index, ch; left)
+    {
+        if (normalizeAscii(ch) != normalizeAscii(right[index]))
+            return false;
+    }
+
+    return true;
+}
+
+private char normalizeAscii(char value)
+{
+    if (value >= 'A' && value <= 'Z')
+        return cast(char) (value + 32);
+    return value;
+}
+
 unittest
 {
     auto limiter = new RestRateLimiter;
@@ -360,6 +383,19 @@ unittest
     headers["X-RateLimit-Scope"] = "global";
 
     auto outcome = limiter.update("GET:/users/@me", 429, headers, `{"message":"You are being rate limited.","retry_after":1.5,"global":true}`);
+    assert(outcome.shouldRetry);
+    assert(outcome.global);
+}
+
+unittest
+{
+    auto limiter = new RestRateLimiter;
+    string[string] headers;
+    headers["Retry-After"] = "1";
+    headers["X-RateLimit-Global"] = "TRUE";
+    headers["X-RateLimit-Scope"] = "GLOBAL";
+
+    auto outcome = limiter.update("GET:/users/@me", 429, headers);
     assert(outcome.shouldRetry);
     assert(outcome.global);
 }

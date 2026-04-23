@@ -18,6 +18,9 @@ enum DiscordMaxMessageLength = 2_000;
 /// Maximum embeds per message.
 enum DiscordMaxEmbedsPerMessage = 10;
 
+/// Maximum file attachments per message payload.
+enum DiscordMaxAttachmentsPerMessage = 10;
+
 /// Maximum embed fields.
 enum DiscordMaxEmbedFields = 25;
 
