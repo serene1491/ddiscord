@@ -35,7 +35,7 @@ final class LuaScriptApi
     @LuaExpose("reply", LuaCapability.DiscordReply)
     void reply(string content)
     {
-        ctx.reply(content).await();
+        ctx.send(content).await();
         replied = true;
     }
 
@@ -89,15 +89,15 @@ void saveScript(
     auto reserved = validateReservedName(name);
     if (!reserved.isNull)
     {
-        ctx.reply(reserved.get, ephemeral: true).await();
+        ctx.send(reserved.get, ephemeral: true).await();
         return;
     }
 
     auto created = store.create(scopeValue, name, source, ctx.user.id, ctx.messageGuildId);
     if (created.isErr)
-        ctx.reply(created.error, ephemeral: true).await();
+        ctx.send(created.error, ephemeral: true).await();
     else
-        ctx.reply("Saved `" ~ created.value.name ~ "` as a " ~ created.value.scopeType ~ " script.", ephemeral: true)
+        ctx.send("Saved `" ~ created.value.name ~ "` as a " ~ created.value.scopeType ~ " script.", ephemeral: true)
                 .await();
 }
 
@@ -111,11 +111,11 @@ void showScript(
     auto shown = requireScriptStore(ctx.services).show(scopeValue, name, ctx.user.id, ctx.messageGuildId);
     if (shown.isErr)
     {
-        ctx.reply(shown.error, ephemeral: true).await();
+        ctx.send(shown.error, ephemeral: true).await();
         return;
     }
 
-    ctx.reply(formatScriptPreview(shown.value), ephemeral: true).await();
+    ctx.send(formatScriptPreview(shown.value), ephemeral: true).await();
 }
 
 @Command("update-script", description: "Update an owned Lua script", routes: CommandRoute.Slash)
@@ -128,9 +128,9 @@ void updateScript(
 {
     auto updated = requireScriptStore(ctx.services).update(scopeValue, name, source, ctx.user.id, ctx.messageGuildId);
     if (updated.isErr)
-        ctx.reply(updated.error, ephemeral: true).await();
+        ctx.send(updated.error, ephemeral: true).await();
     else
-        ctx.reply("Updated `" ~ updated.value.name ~ "`.", ephemeral: true).await();
+        ctx.send("Updated `" ~ updated.value.name ~ "`.", ephemeral: true).await();
 }
 
 @Command("delete-script", description: "Delete an owned Lua script", routes: CommandRoute.Slash)
@@ -142,9 +142,9 @@ void deleteScript(
 {
     auto removed = requireScriptStore(ctx.services).remove(scopeValue, name, ctx.user.id, ctx.messageGuildId);
     if (removed.isErr)
-        ctx.reply(removed.error, ephemeral: true).await();
+        ctx.send(removed.error, ephemeral: true).await();
     else
-        ctx.reply("Deleted `" ~ name.strip ~ "`.", ephemeral: true).await();
+        ctx.send("Deleted `" ~ name.strip ~ "`.", ephemeral: true).await();
 }
 
 @Command("list-scripts", description: "List scripts you can run", routes: CommandRoute.Slash)
@@ -153,13 +153,13 @@ void listScripts(CommandContext ctx)
     auto listed = requireScriptStore(ctx.services).listAvailable(ctx.user.id, ctx.messageGuildId);
     if (listed.isErr)
     {
-        ctx.reply(listed.error, ephemeral: true).await();
+        ctx.send(listed.error, ephemeral: true).await();
         return;
     }
 
     if (listed.value.length == 0)
     {
-        ctx.reply("No scripts are available yet.", ephemeral: true).await();
+        ctx.send("No scripts are available yet.", ephemeral: true).await();
         return;
     }
 
@@ -167,7 +167,7 @@ void listScripts(CommandContext ctx)
     foreach (script; listed.value)
         lines ~= "`" ~ script.name ~ "` (" ~ script.scopeType ~ ")";
 
-    ctx.reply("Available scripts:\n" ~ lines.join("\n"), ephemeral: true).await();
+    ctx.send("Available scripts:\n" ~ lines.join("\n"), ephemeral: true).await();
 }
 
 @HybridCommand("run", "Run a saved Lua script")
@@ -183,11 +183,11 @@ void runScript(
     {
         auto listed = store.listAvailable(ctx.user.id, ctx.messageGuildId);
         if (listed.isErr)
-            ctx.reply(listed.error, ctx.source == CommandSource.Slash).await();
+            ctx.send(listed.error, ctx.source == CommandSource.Slash).await();
         else if (listed.value.length == 0)
-            ctx.reply("No scripts are available yet.", ctx.source == CommandSource.Slash).await();
+            ctx.send("No scripts are available yet.", ctx.source == CommandSource.Slash).await();
         else
-            ctx.reply("Try one of: " ~ listed.value.map!(script => "`" ~ script.name ~ "`")
+            ctx.send("Try one of: " ~ listed.value.map!(script => "`" ~ script.name ~ "`")
                                                    .join(", "), ctx.source == CommandSource.Slash).await();
         return;
     }
@@ -195,13 +195,13 @@ void runScript(
     auto script = store.findRunnable(requestedName, ctx.user.id, ctx.messageGuildId);
     if (script.isErr)
     {
-        ctx.reply(script.error, ctx.source == CommandSource.Slash).await();
+        ctx.send(script.error, ctx.source == CommandSource.Slash).await();
         return;
     }
 
     auto executed = executeScript(ctx, script.value, splitArgs(args));
     if (executed.isErr)
-        ctx.reply(executed.error, ctx.source == CommandSource.Slash).await();
+        ctx.send(executed.error, ctx.source == CommandSource.Slash).await();
 }
 
 void main()
@@ -226,7 +226,7 @@ void main()
         runSavedPrefixScript(client, event);
     });
 
-    client.registerAllCommands!(saveScript, showScript, updateScript, deleteScript, listScripts, runScript);
+    client.registerCommands();
     client.setPresence(StatusType.Online, Activity(ActivityType.Playing, "Your scripts"));
     client.run();
     writeln("[lua] synced commands: ", client.commands.applicationCommands.length);
@@ -258,7 +258,7 @@ private void runSavedPrefixScript(Client client, MessageCreateEvent event)
 
     auto executed = executeScript(ctx, script.value, splitArgs(invocation.args));
     if (executed.isErr)
-        ctx.reply(executed.error).await();
+        ctx.send(executed.error).await();
 }
 
 private Result!(bool, string) executeScript(CommandContext ctx, SavedScript script, string[] argv)
@@ -277,9 +277,9 @@ private Result!(bool, string) executeScript(CommandContext ctx, SavedScript scri
 
     auto output = result.value.strip;
     if (!api.replied && output.length != 0 && output != "nil")
-        ctx.reply(output).await();
+        ctx.send(output).await();
     else if (!api.replied && output == "nil")
-        ctx.reply("`" ~ script.name ~ "` completed.", ctx.source == CommandSource.Slash).await();
+        ctx.send("`" ~ script.name ~ "` completed.", ctx.source == CommandSource.Slash).await();
 
     return Result!(bool, string).ok(true);
 }

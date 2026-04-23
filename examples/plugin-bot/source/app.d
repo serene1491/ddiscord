@@ -12,7 +12,7 @@ struct EvalLuaApi
     @LuaExpose("send", LuaCapability.DiscordReply)
     void send(string content)
     {
-        ctx.reply(content).await();
+        ctx.send(content).await();
     }
 
     @LuaExpose("author", LuaCapability.ContextRead)
@@ -36,7 +36,7 @@ void pluginStatus(CommandContext ctx)
 {
     auto status = ctx.state.global.getOr!string("plugin:counter:status", "not loaded");
     auto loadCount = ctx.state.global.getOr!string("plugin:counter:load_count", "0");
-    ctx.reply("counter plugin => status=" ~ status ~ ", loads=" ~ loadCount).await();
+    ctx.send("counter plugin => status=" ~ status ~ ", loads=" ~ loadCount).await();
 }
 
 struct EvalCommands
@@ -54,9 +54,9 @@ struct EvalCommands
 
         auto result = runtime.eval(code);
         if (result.isOk)
-            ctx.reply("lua => " ~ result.value).await();
+            ctx.send("lua => " ~ result.value).await();
         else
-            ctx.reply("lua error => " ~ result.error.message).await();
+            ctx.send("lua error => " ~ result.error.message).await();
     }
 }
 
@@ -84,7 +84,7 @@ void main()
         writeln("[plugin] ready as ", event.selfUser.username);
     });
 
-    client.registerAllCommands!(pluginStatus, EvalCommands, CounterPlugin);
+    client.registerAllCommands();
     client.setPresence(StatusType.Online, Activity(ActivityType.Listening, "Lua plugins"));
     client.run();
     writeln("[plugin] discovered plugins: ", client.plugins.registeredNames);

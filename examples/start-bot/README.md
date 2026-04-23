@@ -1,11 +1,15 @@
 # Basic Bot
 
-This console shows the minimum runnable `ddiscord` setup:
+This console shows the minimum runnable `ddiscord` setup.
 
-- one prefix command
-- one slash command
-- one hybrid command
-- a live gateway session
+For a normal D project, install the library directly with:
+
+```sh
+dub add ddiscord
+```
+
+This example directory exists when you want a runnable repository checkout instead of adding the
+dependency to an existing project.
 
 ## Run
 
@@ -13,12 +17,3 @@ This console shows the minimum runnable `ddiscord` setup:
 cd examples/start-bot
 dub run
 ```
-
-It loads the shared environment from `../.env` and `../.env.local`.
-
-Try these commands after startup:
-
-- `!ping`
-- `!roll`
-- `/info`
-- `/roll`

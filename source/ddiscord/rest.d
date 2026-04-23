@@ -80,6 +80,8 @@ enum InteractionCallbackType : int
 {
     ChannelMessageWithSource = 4,
     DeferredChannelMessageWithSource = 5,
+    DeferredUpdateMessage = 6,
+    UpdateMessage = 7,
     ApplicationCommandAutocompleteResult = 8,
     Modal = 9,
 }
@@ -500,6 +502,7 @@ private final class RealDiscordRest
     {
         if (
             callbackType == InteractionCallbackType.ChannelMessageWithSource ||
+            callbackType == InteractionCallbackType.UpdateMessage ||
             callbackType == InteractionCallbackType.ApplicationCommandAutocompleteResult
         )
         {
@@ -519,6 +522,7 @@ private final class RealDiscordRest
         if (
             callbackType == InteractionCallbackType.ChannelMessageWithSource ||
             callbackType == InteractionCallbackType.DeferredChannelMessageWithSource ||
+            callbackType == InteractionCallbackType.UpdateMessage ||
             callbackType == InteractionCallbackType.ApplicationCommandAutocompleteResult
         )
             body["data"] = payload.toJSON();
@@ -1065,7 +1069,7 @@ final class InteractionsEndpoints
     }
 
     /// Sends the initial interaction response.
-    Task!void respondMessage(Snowflake interactionId, string interactionToken, MessageCreate payload)
+    Task!void send(Snowflake interactionId, string interactionToken, MessageCreate payload)
     {
         if (_real.isNull)
             return Task!void.failure(formatError("rest", "Cannot respond to an interaction because the REST transport is not configured.", "", "Configure a bot token or inject a transport before replying to interactions."));
@@ -1082,14 +1086,8 @@ final class InteractionsEndpoints
         return Task!void.success();
     }
 
-    /// Short alias for `respondMessage`.
-    Task!void reply(Snowflake interactionId, string interactionToken, MessageCreate payload)
-    {
-        return respondMessage(interactionId, interactionToken, payload);
-    }
-
     /// Sends autocomplete choices for an interaction.
-    Task!void respondAutocomplete(
+    Task!void autocomplete(
         Snowflake interactionId,
         string interactionToken,
         AutocompleteChoice[] choices
@@ -1106,7 +1104,7 @@ final class InteractionsEndpoints
     }
 
     /// Responds to an interaction by opening a modal.
-    Task!void respondModal(Snowflake interactionId, string interactionToken, Modal modal)
+    Task!void modal(Snowflake interactionId, string interactionToken, Modal modal)
     {
         if (_real.isNull)
         {
@@ -1126,7 +1124,7 @@ final class InteractionsEndpoints
     }
 
     /// Sends a deferred interaction acknowledgement.
-    Task!void deferMessage(Snowflake interactionId, string interactionToken, bool ephemeral = false)
+    Task!void defer(Snowflake interactionId, string interactionToken, bool ephemeral = false)
     {
         MessageCreate payload;
         if (ephemeral)
@@ -1147,14 +1145,26 @@ final class InteractionsEndpoints
         return Task!void.success();
     }
 
-    /// Short alias for `deferMessage`.
-    Task!void defer(Snowflake interactionId, string interactionToken, bool ephemeral = false)
+    /// Updates the source message for a component interaction.
+    Task!void update(Snowflake interactionId, string interactionToken, MessageCreate payload)
     {
-        return deferMessage(interactionId, interactionToken, ephemeral);
+        if (_real.isNull)
+            return Task!void.failure(formatError("rest", "Cannot update an interaction message because the REST transport is not configured.", "", "Configure a bot token or inject a transport before updating component interaction messages."));
+
+        auto sent = _real.get.respondToInteraction(
+            interactionId,
+            interactionToken,
+            InteractionCallbackType.UpdateMessage,
+            payload
+        );
+        if (sent.isErr)
+            return Task!void.failure(sent.error);
+
+        return Task!void.success();
     }
 
     /// Sends a follow-up message after the initial interaction acknowledgement.
-    Task!Message followupMessage(string interactionToken, MessageCreate payload)
+    Task!Message followup(string interactionToken, MessageCreate payload)
     {
         if (_real.isNull)
             return Task!Message.failure(formatError("rest", "Cannot send an interaction follow-up because the REST transport is not configured.", "", "Configure a bot token or inject a transport before sending follow-up messages."));
@@ -1167,14 +1177,8 @@ final class InteractionsEndpoints
         return Task!Message.success(created.value);
     }
 
-    /// Short alias for `followupMessage`.
-    Task!Message followup(string interactionToken, MessageCreate payload)
-    {
-        return followupMessage(interactionToken, payload);
-    }
-
     /// Edits the original interaction response.
-    Task!Message editOriginalMessage(string interactionToken, MessageCreate payload)
+    Task!Message edit(string interactionToken, MessageCreate payload)
     {
         if (_real.isNull)
             return Task!Message.failure(formatError("rest", "Cannot edit the original interaction response because the REST transport is not configured.", "", "Configure a bot token or inject a transport before editing interaction responses."));
@@ -1187,11 +1191,6 @@ final class InteractionsEndpoints
         return Task!Message.success(edited.value);
     }
 
-    /// Short alias for `editOriginalMessage`.
-    Task!Message editOriginal(string interactionToken, MessageCreate payload)
-    {
-        return editOriginalMessage(interactionToken, payload);
-    }
 }
 
 /// REST client surface.
@@ -1306,7 +1305,7 @@ unittest
     auto rest = new RestClient(config);
     auto modal = Modal("bug_modal", "Bug Report")
         .addTextInput(TextInput("summary", "Summary"));
-    auto result = rest.interactions.respondModal(Snowflake(9), "abc", modal).awaitResult();
+    auto result = rest.interactions.modal(Snowflake(9), "abc", modal).awaitResult();
 
     assert(result.isOk);
     assert(captured.url.canFind("/interactions/9/abc/callback"));
@@ -1315,6 +1314,31 @@ unittest
     assert(body.canFind(`"custom_id":"bug_modal"`));
     assert(body.canFind(`"title":"Bug Report"`));
     assert(body.canFind(`"custom_id":"summary"`));
+}
+
+unittest
+{
+    HttpRequest captured;
+    HttpTransport transport = (request) {
+        captured = request;
+        HttpResponse response;
+        response.statusCode = 204;
+        return Result!(HttpResponse, HttpError).ok(response);
+    };
+
+    RestClientConfig config;
+    config.token = "token";
+    config.transport = Nullable!HttpTransport.of(transport);
+
+    auto rest = new RestClient(config);
+    auto payload = MessageCreate("updated");
+    auto result = rest.interactions.update(Snowflake(10), "component-token", payload).awaitResult();
+
+    assert(result.isOk);
+    assert(captured.url.canFind("/interactions/10/component-token/callback"));
+    auto body = cast(string) captured.body;
+    assert(body.canFind(`"type":7`));
+    assert(body.canFind(`"content":"updated"`));
 }
 
 unittest

@@ -6,26 +6,40 @@
  */
 module ddiscord.client;
 
+public import ddiscord.client_types : CommandErrorBehavior, CommandErrorContext, CommandErrorKind,
+    CommandHelpBehavior, CommandHelpEntry, CommandHelpPage, CommandRegistrationFilter;
+
 import core.sync.condition : Condition;
 import core.sync.mutex : Mutex;
 import core.thread : Thread;
 import core.time : MonoTime, dur;
 import ddiscord.cache : CacheStore;
-import ddiscord.commands : Command, CommandExecution, CommandExecutionSettings, CommandRegistry,
-    CommandRoute, ParsedCommand, RequireOwner, RequirePermissions;
+import ddiscord.client_types : HelpRequest, RegistrationCandidate;
+import ddiscord.commands : Command, CommandCategory, CommandDescriptor, CommandExecution,
+    CommandExecutionSettings, CommandOptionDescriptor, CommandRegistry, CommandRoute,
+    HideFromHelp, HybridCommand, MessageCommand, ParsedCommand, RequireOwner,
+    RequirePermissions, UserCommand;
 import ddiscord.context.command : CommandContext, CommandSource;
-import ddiscord.events.dispatcher : EventDispatcher;
+import ddiscord.context.event : AutocompleteInteractionEventContext, CommandExecutedEventContext,
+    CommandFailedEventContext, EventContext, GuildMemberAddEventContext,
+    InteractionCreateEventContext,
+    MessageComponentEventContext, MessageCreateEventContext, ModalSubmitEventContext,
+    PresenceUpdateEventContext, ReadyEventContext, ResumedEventContext;
+import ddiscord.events.dispatcher : Event, EventDispatcher;
 import ddiscord.events.types : AutocompleteInteractionEvent, CommandExecutedEvent,
-    CommandFailedEvent, InteractionCreateEvent, MessageComponentEvent, MessageCreateEvent,
-    ModalSubmitEvent, PresenceUpdateEvent, ReadyEvent, ResumedEvent;
+    CommandFailedEvent, GuildMemberAddEvent, InteractionCreateEvent, MessageComponentEvent,
+    MessageCreateEvent, ModalSubmitEvent, PresenceUpdateEvent, ReadyEvent, ResumedEvent;
 import ddiscord.gateway.client : GatewayClient, GatewayClientConfig, GatewayReadyInfo;
 import ddiscord.gateway.intents : GatewayIntent;
+import ddiscord.help.navigation : BuiltInHelpCustomIdPrefix, BuiltInHelpDefaultPageSize,
+    BuiltInHelpNoopCustomId, buildPersistentHelpCustomId, parsePersistentHelpCustomId;
+import ddiscord.help.rendering : defaultComponentsHelpPage, defaultEmbeddedHelpPage;
 import ddiscord.logging : LogLevel, Logger;
 import ddiscord.models.application_command : ApplicationCommandDefinition, ApplicationCommandOption,
-    ApplicationCommandOptionType, InteractionType;
+    ApplicationCommandOptionType, ApplicationCommandType, InteractionType;
 import ddiscord.models.channel : Channel;
 import ddiscord.models.guild : Guild;
-import ddiscord.models.interaction : Interaction;
+import ddiscord.models.interaction : Interaction, InteractionOption;
 import ddiscord.models.member : GuildMember;
 import ddiscord.models.message : Message, MessageCreate;
 import ddiscord.models.presence : Activity, StatusType;
@@ -48,8 +62,8 @@ import ddiscord.util.snowflake : Snowflake;
 import std.algorithm : canFind, sort;
 import std.conv : to;
 import std.datetime : Clock;
-import std.string : startsWith;
-import std.traits : isCallable;
+import std.string : indexOf, startsWith, strip;
+import std.traits : Parameters, fullyQualifiedName, isCallable;
 
 /// Client configuration.
 struct ClientConfig
@@ -121,6 +135,7 @@ final class Client
     private Condition _dispatchAvailable;
     private DispatchItem[] _dispatchQueue;
     private size_t _dispatchQueueHead;
+    private ulong _nextHelpQueryTokenId;
 
     this(ClientConfig config)
     {
@@ -154,9 +169,14 @@ final class Client
         services.add!StateStore(state);
         services.add!Logger(logger);
         services.add!ScriptingEngine(new ScriptingEngine);
+        services.add!CommandHelpBehavior(new CommandHelpBehavior);
+        services.add!CommandErrorBehavior(new CommandErrorBehavior);
         syncCommandExecutionSettings();
         _selfUser.bot = true;
         _selfUser.username = "ddiscord";
+        events.on!MessageComponentEvent((event) {
+            handleBuiltInComponent(event);
+        });
     }
 
     /// Starts the client.
@@ -239,6 +259,7 @@ final class Client
         PresenceUpdateEvent event;
         event.status = status;
         event.activity = activity;
+        event.context = buildPresenceUpdateEventContext(status, activity);
         emit!PresenceUpdateEvent(event);
     }
 
@@ -296,6 +317,18 @@ final class Client
         return rest.applicationCommands;
     }
 
+    /// Configures the built-in help command behavior.
+    CommandHelpBehavior helpBehavior() @property
+    {
+        return services.get!CommandHelpBehavior();
+    }
+
+    /// Configures how command failures are surfaced back to users.
+    CommandErrorBehavior errorBehavior() @property
+    {
+        return services.get!CommandErrorBehavior();
+    }
+
     /// Builds a command context for an incoming prefix message.
     CommandContext prefixContext(
         string content,
@@ -317,6 +350,8 @@ final class Client
         message.author = invoker;
         message.channelId = channel.id;
         ctx.message = Nullable!Message.of(message);
+        if (!message.guildId.isNull)
+            ctx.currentGuild = lookupGuild(message.guildId);
 
         return ctx;
     }
@@ -334,6 +369,9 @@ final class Client
         ctx.state = state;
         ctx.invoker = interaction.user;
         ctx.currentChannel = channel;
+        if (!interaction.guildId.isNull)
+            ctx.currentGuild = lookupGuild(interaction.guildId);
+        ctx.currentMember = interaction.member;
         ctx.interaction = Nullable!Interaction.of(interaction);
         return ctx;
     }
@@ -355,6 +393,7 @@ final class Client
     /// Syncs slash and context-menu definitions to Discord REST.
     ApplicationCommandDefinition[] syncCommands()
     {
+        syncBuiltInCommandSystems();
         auto synced = rest.applicationCommands.sync(commands.applicationCommands).await();
         logger.information("client", "Synchronized " ~ synced.length.to!string ~ " application command(s) with Discord.");
         return synced;
@@ -363,6 +402,7 @@ final class Client
     /// Syncs commands only if the remote manifest differs from the generated one.
     ApplicationCommandDefinition[] syncCommandsIfChanged()
     {
+        syncBuiltInCommandSystems();
         auto local = commands.applicationCommands;
         auto remoteResult = rest.applicationCommands.list().awaitResult();
         if (remoteResult.isErr)
@@ -383,6 +423,21 @@ final class Client
     void registerCommands(handlers...)()
     {
         commands.registerAll!handlers(0);
+        syncBuiltInCommandSystems();
+    }
+
+    /// Registers every command declared in the calling module, with optional filters.
+    void registerCommands(string moduleName = __MODULE__)(CommandRegistrationFilter filter = CommandRegistrationFilter.init)
+    {
+        registerModuleMembers!(moduleName, true, false, false)(filter);
+        syncBuiltInCommandSystems();
+    }
+
+    /// Registers free event handlers declared with `@Event`.
+    void registerEvents(handlers...)()
+    {
+        static foreach (handler; handlers)
+            registerFreeEvent!handler();
     }
 
     /// Registers mixed command handlers, command groups, and plugin types.
@@ -392,11 +447,15 @@ final class Client
         {
             static if (isCallable!symbol)
             {
-                registerCommands!symbol();
+                static if (hasEventAttr!symbol)
+                    registerEvents!symbol();
+                else
+                    registerCommands!symbol();
             }
             else static if (IsTypeSymbol!symbol)
             {
                 registerCommandGroup!symbol();
+                registerEventGroup!symbol();
                 static if (HasLuaPluginAttr!symbol)
                     registerPlugin!symbol();
             }
@@ -405,18 +464,35 @@ final class Client
                 static assert(false, "registerAllCommands only accepts callable handlers or types.");
             }
         }
+
+        syncBuiltInCommandSystems();
+    }
+
+    /// Registers every supported symbol declared in the calling module, with optional filters.
+    void registerAllCommands(string moduleName = __MODULE__)(CommandRegistrationFilter filter = CommandRegistrationFilter.init)
+    {
+        registerModuleMembers!(moduleName, true, true, true)(filter);
+        syncBuiltInCommandSystems();
     }
 
     /// Registers a stateful command group.
     void registerCommandGroup(T)()
     {
         commands.register!T();
+        syncBuiltInCommandSystems();
+    }
+
+    /// Registers `@Event` methods from a stateful group type.
+    void registerEventGroup(T)()
+    {
+        registerEventMembers!T();
     }
 
     /// Registers a plugin descriptor type.
     void registerPlugin(T)()
     {
         plugins.register!T();
+        syncBuiltInCommandSystems();
     }
 
     /// Opens a scripting runtime using the registered scripting engine.
@@ -434,6 +510,7 @@ final class Client
     {
         auto startedAt = MonoTime.currTime;
         syncCommandExecutionSettings();
+        syncBuiltInCommandSystems();
 
         if (_selfUser.id.value != 0 && message.author.id == _selfUser.id)
         {
@@ -465,12 +542,16 @@ final class Client
 
         Channel channel;
         channel.id = message.channelId;
+        auto cachedChannel = cache.channel(channel.id);
+        if (!cachedChannel.isNull)
+            channel = cachedChannel.get;
         cache.store(channel);
         cache.store(message);
         state.global.set("lastMessageContent", message.content);
 
         MessageCreateEvent event;
         event.message = message;
+        event.context = buildMessageCreateEventContext(message, channel);
         emit!MessageCreateEvent(event);
 
         if (!message.content.startsWith(config.prefix))
@@ -483,16 +564,20 @@ final class Client
         auto parsed = commands.parsePrefix(config.prefix, message.content);
         if (parsed.isErr)
         {
-            if (isIgnorablePrefixFailure(parsed.error))
-            {
-                logger.debugMessage("commands", "Ignored prefix message `" ~ message.content ~ "` because no registered command matched.");
-                CommandExecution ignored;
-                ignored.replyCount = rest.messages.history.length;
-                return Result!(CommandExecution, string).ok(ignored);
-            }
+            auto ctx = prefixContext(message.content, message.author, channel);
+            ctx.permissions = permissions;
+            ctx.message = Nullable!Message.of(message);
+            ctx.currentGuild = lookupGuild(message.guildId);
+            ctx.currentMember = message.member;
+            ctx.receiveLatencyMilliseconds = snowflakeLatencyMilliseconds(message.id);
 
-            logger.error("commands", parsed.error);
-            return Result!(CommandExecution, string).err(parsed.error);
+            auto attemptedName = attemptedPrefixCommandName(message.content);
+            auto result = Result!(CommandExecution, string).err(parsed.error);
+            if (shouldSurfacePrefixFailure(parsed.error, attemptedName, ctx))
+                surfacePrefixFailure(ctx, attemptedName, parsed.error);
+            emitCommandOutcome(result, attemptedName, ctx, message, message.author);
+            logCommandOutcome("prefix", message.author, result, (MonoTime.currTime - startedAt).total!"msecs");
+            return result;
         }
 
         auto descriptor = parsed.value.descriptor.get;
@@ -519,13 +604,15 @@ final class Client
         auto ctx = prefixContext(message.content, message.author, channel);
         ctx.permissions = effectivePermissions;
         ctx.message = Nullable!Message.of(message);
+        ctx.currentGuild = lookupGuild(message.guildId);
+        ctx.currentMember = message.member;
         ctx.receiveLatencyMilliseconds = snowflakeLatencyMilliseconds(message.id);
 
         auto result = commands.executeParsedPrefix(ctx, parsed.value);
         auto durationMs = (MonoTime.currTime - startedAt).total!"msecs";
-        if (result.isErr && shouldSurfacePrefixFailure(result.error))
+        if (result.isErr && shouldSurfacePrefixFailure(result.error, descriptor.displayName, ctx))
             surfacePrefixFailure(ctx, descriptor.displayName, result.error);
-        emitCommandOutcome(result, descriptor.displayName, message, message.author);
+        emitCommandOutcome(result, descriptor.displayName, ctx, message, message.author);
         logCommandOutcome("prefix", message.author, result, durationMs);
         return result;
     }
@@ -539,6 +626,7 @@ final class Client
     {
         auto startedAt = MonoTime.currTime;
         syncCommandExecutionSettings();
+        syncBuiltInCommandSystems();
 
         if (interaction.user.id.value != 0)
             cache.store(interaction.user);
@@ -563,12 +651,14 @@ final class Client
 
         InteractionCreateEvent event;
         event.interaction = interaction;
+        event.context = buildInteractionCreateEventContext(interaction, channel);
         emit!InteractionCreateEvent(event);
 
         if (interaction.type == InteractionType.ApplicationCommandAutocomplete)
         {
             AutocompleteInteractionEvent autocompleteEvent;
             autocompleteEvent.interaction = interaction;
+            autocompleteEvent.context = buildAutocompleteInteractionEventContext(interaction, channel);
             emit!AutocompleteInteractionEvent(autocompleteEvent);
             CommandExecution ignored;
             return Result!(CommandExecution, string).ok(ignored);
@@ -578,6 +668,7 @@ final class Client
         {
             MessageComponentEvent componentEvent;
             componentEvent.interaction = interaction;
+            componentEvent.context = buildMessageComponentEventContext(interaction, channel);
             emit!MessageComponentEvent(componentEvent);
             CommandExecution ignored;
             return Result!(CommandExecution, string).ok(ignored);
@@ -587,6 +678,7 @@ final class Client
         {
             ModalSubmitEvent modalEvent;
             modalEvent.interaction = interaction;
+            modalEvent.context = buildModalSubmitEventContext(interaction, channel);
             emit!ModalSubmitEvent(modalEvent);
             CommandExecution ignored;
             return Result!(CommandExecution, string).ok(ignored);
@@ -609,7 +701,7 @@ final class Client
 
         if (result.isErr)
             surfaceInteractionFailure(ctx, interaction.commandName, result.error);
-        emitCommandOutcome(result, interaction.commandName, sourceMessage, interaction.user);
+        emitCommandOutcome(result, interaction.commandName, ctx, sourceMessage, interaction.user);
         logCommandOutcome("interaction", interaction.user, result, durationMs);
         return result;
     }
@@ -705,6 +797,7 @@ final class Client
     private void emitCommandOutcome(
         Result!(CommandExecution, string) result,
         string attemptedName,
+        CommandContext ctx,
         Message sourceMessage,
         User user
     )
@@ -716,6 +809,7 @@ final class Client
             event.sourceMessage = sourceMessage;
             event.user = user;
             event.replyCount = result.value.replyCount;
+            event.context = buildCommandExecutedEventContext(ctx, result.value.commandName);
             emit!CommandExecutedEvent(event);
         }
         else
@@ -725,8 +819,223 @@ final class Client
             event.sourceMessage = sourceMessage;
             event.user = user;
             event.error = result.error;
+            event.context = buildCommandFailedEventContext(ctx, attemptedName);
             emit!CommandFailedEvent(event);
         }
+    }
+
+    private void registerFreeEvent(alias handler)()
+    {
+        alias Subscription = EventSubscriptionType!handler;
+        events.on!Subscription((event) {
+            invokeFreeEvent!handler(event);
+        });
+    }
+
+    private void registerStatefulEvent(T, string memberName)()
+    {
+        mixin("alias memberSymbol = T." ~ memberName ~ ";");
+        alias Subscription = EventSubscriptionType!memberSymbol;
+        events.on!Subscription((event) {
+            auto instance = services.get!T();
+            invokeStatefulEvent!(T, memberSymbol)(instance, event);
+        });
+    }
+
+    private void registerEventMembers(T)()
+    {
+        static foreach (memberName; __traits(allMembers, T))
+        {
+            static if (memberName != "__ctor" && memberName != "__xdtor")
+            {
+                mixin("alias memberSymbol = T." ~ memberName ~ ";");
+                static if (isCallable!memberSymbol)
+                {
+                    enum hasAttrs = __traits(getAttributes, memberSymbol).length > 0;
+                    static if (hasAttrs && hasEventAttr!memberSymbol)
+                        registerStatefulEvent!(T, memberName)();
+                }
+            }
+        }
+    }
+
+    private EventContext buildEventContext(
+        Nullable!User user = Nullable!User.init,
+        Nullable!Guild guild = Nullable!Guild.init,
+        Nullable!GuildMember member = Nullable!GuildMember.init,
+        Nullable!Channel channel = Nullable!Channel.init,
+        Nullable!Message message = Nullable!Message.init,
+        Nullable!Interaction interaction = Nullable!Interaction.init
+    )
+    {
+        EventContext ctx;
+        ctx.rest = rest;
+        ctx.services = services;
+        ctx.cache = cache;
+        ctx.state = state;
+        ctx.logger = logger;
+        ctx.currentUser = user;
+        ctx.currentGuild = guild;
+        ctx.currentMember = member;
+        ctx.currentChannel = channel;
+        ctx.currentMessage = message;
+        ctx.currentInteraction = interaction;
+        return ctx;
+    }
+
+    private ReadyEventContext buildReadyEventContext(User selfUser)
+    {
+        ReadyEventContext ctx;
+        ctx.event = buildEventContext(Nullable!User.of(selfUser));
+        ctx.selfUser = selfUser;
+        return ctx;
+    }
+
+    private ResumedEventContext buildResumedEventContext(User selfUser)
+    {
+        ResumedEventContext ctx;
+        ctx.event = buildEventContext(Nullable!User.of(selfUser));
+        ctx.selfUser = selfUser;
+        return ctx;
+    }
+
+    private MessageCreateEventContext buildMessageCreateEventContext(Message message, Channel channel)
+    {
+        MessageCreateEventContext ctx;
+        ctx.event = buildEventContext(
+            Nullable!User.of(message.author),
+            lookupGuild(message.guildId),
+            message.member,
+            nullableChannel(channel),
+            Nullable!Message.of(message)
+        );
+        ctx.message = message;
+        return ctx;
+    }
+
+    private InteractionCreateEventContext buildInteractionCreateEventContext(Interaction interaction, Channel channel)
+    {
+        InteractionCreateEventContext ctx;
+        ctx.event = buildEventContext(
+            Nullable!User.of(interaction.user),
+            lookupGuild(interaction.guildId),
+            interaction.member,
+            nullableChannel(channel),
+            interaction.targetMessage,
+            Nullable!Interaction.of(interaction)
+        );
+        ctx.interaction = interaction;
+        return ctx;
+    }
+
+    private AutocompleteInteractionEventContext buildAutocompleteInteractionEventContext(
+        Interaction interaction,
+        Channel channel
+    )
+    {
+        AutocompleteInteractionEventContext ctx;
+        ctx.event = buildInteractionCreateEventContext(interaction, channel).event;
+        ctx.interaction = interaction;
+        auto focused = focusedOption(interaction);
+        if (!focused.isNull)
+        {
+            ctx.focusedName = focused.get.name;
+            ctx.focusedValue = focused.get.value;
+        }
+        return ctx;
+    }
+
+    private MessageComponentEventContext buildMessageComponentEventContext(
+        Interaction interaction,
+        Channel channel
+    )
+    {
+        MessageComponentEventContext ctx;
+        ctx.event = buildInteractionCreateEventContext(interaction, channel).event;
+        ctx.interaction = interaction;
+        ctx.customId = interaction.customId;
+        return ctx;
+    }
+
+    private ModalSubmitEventContext buildModalSubmitEventContext(Interaction interaction, Channel channel)
+    {
+        ModalSubmitEventContext ctx;
+        ctx.event = buildInteractionCreateEventContext(interaction, channel).event;
+        ctx.interaction = interaction;
+        ctx.submittedComponents = interaction.submittedComponents.dup;
+        return ctx;
+    }
+
+    private PresenceUpdateEventContext buildPresenceUpdateEventContext(StatusType status, Activity activity)
+    {
+        PresenceUpdateEventContext ctx;
+        ctx.event = buildEventContext(Nullable!User.of(_selfUser));
+        ctx.status = status;
+        ctx.activity = activity;
+        return ctx;
+    }
+
+    private CommandExecutedEventContext buildCommandExecutedEventContext(
+        CommandContext command,
+        string commandName
+    )
+    {
+        CommandExecutedEventContext ctx;
+        ctx.event = buildEventContext(
+            Nullable!User.of(command.user),
+            command.guild,
+            command.member,
+            nullableChannel(command.currentChannel),
+            command.message,
+            command.interaction
+        );
+        ctx.commandName = commandName;
+        ctx.command = command;
+        return ctx;
+    }
+
+    private CommandFailedEventContext buildCommandFailedEventContext(
+        CommandContext command,
+        string commandName
+    )
+    {
+        CommandFailedEventContext ctx;
+        ctx.event = buildEventContext(
+            Nullable!User.of(command.user),
+            command.guild,
+            command.member,
+            nullableChannel(command.currentChannel),
+            command.message,
+            command.interaction
+        );
+        ctx.commandName = commandName;
+        ctx.command = command;
+        return ctx;
+    }
+
+    private Nullable!Guild lookupGuild(Nullable!Snowflake guildId)
+    {
+        if (guildId.isNull)
+            return Nullable!Guild.init;
+        return cache.guild(guildId.get);
+    }
+
+    private Nullable!Channel nullableChannel(Channel channel)
+    {
+        if (channel.id.value == 0)
+            return Nullable!Channel.init;
+        return Nullable!Channel.of(channel);
+    }
+
+    private Nullable!InteractionOption focusedOption(Interaction interaction)
+    {
+        foreach (option; interaction.options)
+        {
+            if (option.focused)
+                return typeof(return).of(option);
+        }
+
+        return typeof(return).init;
     }
 
     private bool sameCommands(
@@ -775,6 +1084,7 @@ final class Client
             event.guilds = ready.guilds.dup;
             event.sessionId = ready.sessionId;
             event.resumeGatewayUrl = ready.resumeGatewayUrl;
+            event.context = buildReadyEventContext(_selfUser);
             emit!ReadyEvent(event);
             logger.information("gateway", "READY received for `" ~ _selfUser.username ~ "`.");
             _gateway.updatePresence(_status, _activity);
@@ -782,6 +1092,7 @@ final class Client
         _gateway.onResumed = () {
             tasks.cancel(GatewayReadyWatchdogLabel);
             ResumedEvent event;
+            event.context = buildResumedEventContext(_selfUser);
             emit!ResumedEvent(event);
             logger.information("gateway", "RESUMED received for `" ~ _selfUser.username ~ "`.");
             _gateway.updatePresence(_status, _activity);
@@ -800,6 +1111,13 @@ final class Client
             event.attemptedName = "[gateway]";
             event.error = message;
             event.user = _selfUser;
+            CommandContext ctx;
+            ctx.rest = rest;
+            ctx.services = services;
+            ctx.cache = cache;
+            ctx.state = state;
+            ctx.invoker = _selfUser;
+            event.context = buildCommandFailedEventContext(ctx, "[gateway]");
             emit!CommandFailedEvent(event);
         };
 
@@ -956,12 +1274,442 @@ final class Client
         _taskThread.start();
     }
 
+    private void syncBuiltInCommandSystems()
+    {
+        commands.removeWhere((descriptor) => descriptor.builtin);
+
+        auto help = helpBehavior;
+        if (!help.enabled)
+            return;
+
+        if (!commands.find(help.commandName, CommandRoute.Prefix).isNull)
+            return;
+        if (!commands.find(help.commandName, CommandRoute.Slash).isNull)
+            return;
+
+        commands.registerDescriptor(buildBuiltInHelpDescriptor());
+    }
+
+    private CommandDescriptor buildBuiltInHelpDescriptor()
+    {
+        auto help = helpBehavior;
+
+        CommandDescriptor descriptor;
+        descriptor.displayName = help.commandName;
+        descriptor.description = help.description;
+        descriptor.routes = CommandRoute.Hybrid;
+        descriptor.applicationType = ApplicationCommandType.ChatInput;
+        descriptor.symbolName = "[built-in]help";
+        descriptor.qualifiedName = "ddiscord.client.Client.help";
+        descriptor.sourceModule = "ddiscord.client";
+        descriptor.sourceFile = __FILE__;
+        descriptor.category = "Built-in";
+        descriptor.builtin = true;
+
+        CommandOptionDescriptor query;
+        query.parameterName = "query";
+        query.displayName = "query";
+        query.description = "Command name or text filter";
+        query.typeName = "string";
+        query.required = false;
+
+        CommandOptionDescriptor page;
+        page.parameterName = "page";
+        page.displayName = "page";
+        page.description = "Page number";
+        page.typeName = "size_t";
+        page.applicationType = ApplicationCommandOptionType.Integer;
+        page.required = false;
+        descriptor.options = [query, page];
+
+        descriptor.prefixExecutor = (CommandContext ctx, string[] rawArgs) {
+            return executeBuiltInHelpPrefix(ctx, rawArgs);
+        };
+        descriptor.slashExecutor = (CommandContext ctx, string[string] rawOptions) {
+            return executeBuiltInHelpSlash(ctx, rawOptions);
+        };
+
+        return descriptor;
+    }
+
+    private Result!(CommandExecution, string) executeBuiltInHelpPrefix(CommandContext ctx, string[] rawArgs)
+    {
+        auto parsed = parseHelpPrefixRequest(rawArgs);
+        if (parsed.isErr)
+            return Result!(CommandExecution, string).err(parsed.error);
+
+        return executeBuiltInHelp(ctx, parsed.value);
+    }
+
+    private Result!(CommandExecution, string) executeBuiltInHelpSlash(
+        CommandContext ctx,
+        string[string] rawOptions
+    )
+    {
+        HelpRequest request;
+
+        if (auto query = "query" in rawOptions)
+            request.query = *query;
+
+        if (auto rawPage = "page" in rawOptions)
+        {
+            auto parsedPage = parseHelpPage(*rawPage);
+            if (parsedPage.isErr)
+                return Result!(CommandExecution, string).err(parsedPage.error);
+            request.page = parsedPage.value;
+        }
+
+        return executeBuiltInHelp(ctx, request);
+    }
+
+    private Result!(CommandExecution, string) executeBuiltInHelp(CommandContext ctx, HelpRequest request)
+    {
+        auto payload = buildHelpPayload(ctx, request.query, request.page);
+
+        auto sent = ctx.send(payload, ctx.source != CommandSource.Prefix).awaitResult();
+        if (sent.isErr)
+            return Result!(CommandExecution, string).err(sent.error);
+
+        CommandExecution execution;
+        execution.commandName = helpBehavior.commandName;
+        execution.replyCount = rest.messages.history.length;
+        return Result!(CommandExecution, string).ok(execution);
+    }
+
+    private Result!(HelpRequest, string) parseHelpPrefixRequest(string[] rawArgs)
+    {
+        HelpRequest request;
+        if (rawArgs.length == 0)
+            return Result!(HelpRequest, string).ok(request);
+
+        auto maybePage = parseHelpPage(rawArgs[$ - 1]);
+        if (maybePage.isOk)
+        {
+            request.page = maybePage.value;
+            if (rawArgs.length > 1)
+                request.query = joinArgs(rawArgs[0 .. $ - 1]);
+            return Result!(HelpRequest, string).ok(request);
+        }
+
+        request.query = joinArgs(rawArgs);
+        return Result!(HelpRequest, string).ok(request);
+    }
+
+    private Result!(size_t, string) parseHelpPage(string raw)
+    {
+        size_t page;
+
+        try
+        {
+            page = raw.to!size_t;
+        }
+        catch (Exception)
+        {
+            return Result!(size_t, string).err(formatError(
+                "help",
+                "The requested help page is not a valid positive integer.",
+                "Received `" ~ raw ~ "`.",
+                "Provide a positive page number such as `1` or `2`."
+            ));
+        }
+
+        if (page == 0)
+        {
+            return Result!(size_t, string).err(formatError(
+                "help",
+                "The requested help page must be greater than zero.",
+                "Received `0`.",
+                "Provide a positive page number such as `1`."
+            ));
+        }
+
+        return Result!(size_t, string).ok(page);
+    }
+
+    private string joinArgs(string[] values)
+    {
+        string joined;
+
+        foreach (index, value; values)
+        {
+            if (index != 0)
+                joined ~= " ";
+            joined ~= value;
+        }
+
+        return joined;
+    }
+
+    private MessageCreate buildHelpPayload(CommandContext ctx, string query, size_t requestedPage)
+    {
+        auto page = prepareHelpPage(ctx, query, requestedPage);
+        auto help = helpBehavior;
+
+        if (help.renderPage !is null)
+            return help.renderPage(page);
+        if (!help.useComponentsV2)
+            return defaultEmbeddedHelpPage(page);
+        return defaultComponentsHelpPage(page);
+    }
+
+    private CommandHelpPage prepareHelpPage(CommandContext ctx, string query, size_t requestedPage)
+    {
+        auto help = helpBehavior;
+        CommandDescriptor[] descriptors;
+
+        foreach (descriptor; commands.descriptors)
+        {
+            if (descriptor.hiddenFromHelp)
+                continue;
+            if (descriptor.builtin && !help.showBuiltinCommands)
+                continue;
+            if (help.includeCommand !is null && !help.includeCommand(descriptor))
+                continue;
+            if (!descriptorVisibleToUser(descriptor, ctx))
+                continue;
+            if (!helpQueryMatches(descriptor, query))
+                continue;
+            descriptors ~= descriptor;
+        }
+
+        sort!((left, right) { return left.displayName < right.displayName; })(descriptors);
+
+        CommandHelpPage page;
+        page.commandName = help.commandName;
+        page.query = query;
+        page.pageSize = help.pageSize == 0 ? BuiltInHelpDefaultPageSize : help.pageSize;
+        page.totalEntries = descriptors.length;
+        page.totalPages = descriptors.length == 0 ? 1 : ((descriptors.length - 1) / page.pageSize) + 1;
+        page.page = requestedPage == 0 ? 1 : requestedPage;
+        if (page.page > page.totalPages)
+            page.page = page.totalPages;
+
+        if (descriptors.length != 0)
+        {
+            auto start = (page.page - 1) * page.pageSize;
+            auto finish = start + page.pageSize;
+            if (finish > descriptors.length)
+                finish = descriptors.length;
+
+            foreach (descriptor; descriptors[start .. finish])
+                page.entries ~= buildHelpEntry(descriptor);
+        }
+
+        page.hasPrevious = page.page > 1;
+        page.hasNext = page.page < page.totalPages;
+
+        if (page.totalPages > 1)
+        {
+            if (page.hasPrevious)
+            {
+                page.previousCustomId = buildPersistentHelpCustomId(
+                    state,
+                    _nextHelpQueryTokenId,
+                    ctx.user.id,
+                    query,
+                    page.page - 1
+                );
+            }
+            if (page.hasNext)
+            {
+                page.nextCustomId = buildPersistentHelpCustomId(
+                    state,
+                    _nextHelpQueryTokenId,
+                    ctx.user.id,
+                    query,
+                    page.page + 1
+                );
+            }
+        }
+
+        return page;
+    }
+
+    private CommandHelpEntry buildHelpEntry(CommandDescriptor descriptor)
+    {
+        auto help = helpBehavior;
+        if (help.buildEntry !is null)
+            return help.buildEntry(descriptor, config.prefix);
+
+        CommandHelpEntry entry;
+        entry.name = descriptor.displayName;
+        entry.description = descriptor.description.length == 0 ? "No description provided." : descriptor.description;
+        entry.usage = buildHelpUsage(descriptor);
+        entry.routes = routeSummary(descriptor);
+        entry.category = descriptor.category.length == 0 ? "General" : descriptor.category;
+        entry.sourceModule = descriptor.sourceModule;
+        entry.owner = descriptor.ownerType.length == 0 ? "free function" : descriptor.ownerType;
+        entry.policies = policySummary(descriptor);
+        entry.descriptor = descriptor;
+        return entry;
+    }
+
+    private string buildHelpUsage(CommandDescriptor descriptor)
+    {
+        if (descriptor.applicationType == ApplicationCommandType.Message)
+            return descriptor.displayName ~ " (message context menu)";
+        if (descriptor.applicationType == ApplicationCommandType.User)
+            return descriptor.displayName ~ " (user context menu)";
+
+        string[] usages;
+
+        if ((cast(uint) descriptor.routes & cast(uint) CommandRoute.Prefix) != 0)
+            usages ~= config.prefix ~ descriptor.displayName ~ helpOptionUsage(descriptor.options, false);
+        if ((cast(uint) descriptor.routes & cast(uint) CommandRoute.Slash) != 0)
+            usages ~= "/" ~ descriptor.displayName ~ helpOptionUsage(descriptor.options, true);
+
+        if (usages.length == 0)
+            return descriptor.displayName;
+
+        string usage;
+        foreach (index, item; usages)
+        {
+            if (index != 0)
+                usage ~= " | ";
+            usage ~= item;
+        }
+        return usage;
+    }
+
+    private string helpOptionUsage(CommandOptionDescriptor[] options, bool slashStyle)
+    {
+        string usage;
+
+        foreach (option; options)
+        {
+            auto label = slashStyle ? option.displayName : option.parameterName;
+            if (option.required)
+                usage ~= " <" ~ label ~ ">";
+            else
+                usage ~= " [" ~ label ~ "]";
+        }
+
+        return usage;
+    }
+
+    private string routeSummary(CommandDescriptor descriptor)
+    {
+        if (descriptor.applicationType == ApplicationCommandType.Message)
+            return "message context";
+        if (descriptor.applicationType == ApplicationCommandType.User)
+            return "user context";
+
+        if (descriptor.routes == CommandRoute.Hybrid)
+            return "prefix + slash";
+        if (descriptor.routes == CommandRoute.Prefix)
+            return "prefix";
+        if (descriptor.routes == CommandRoute.Slash)
+            return "slash";
+        if (descriptor.routes == CommandRoute.ContextMenu)
+            return "context menu";
+        return "unknown";
+    }
+
+    private string policySummary(CommandDescriptor descriptor)
+    {
+        string[] parts;
+
+        if (descriptor.policy.ownerOnly)
+            parts ~= "owner only";
+        if (descriptor.policy.requiredPermissions != 0)
+            parts ~= "requires permissions";
+        if (descriptor.policy.hasRateLimit)
+        {
+            parts ~= "rate limit " ~ descriptor.policy.rateLimitCount.to!string ~ "/" ~
+                descriptor.policy.rateLimitWindow.total!"seconds".to!string ~ "s";
+        }
+
+        if (parts.length == 0)
+            return "none";
+
+        return joinArgs(parts);
+    }
+
+    private bool descriptorVisibleToUser(CommandDescriptor descriptor, CommandContext ctx)
+    {
+        if (descriptor.policy.ownerOnly)
+        {
+            if (config.ownerId.isNull || config.ownerId.get != ctx.user.id)
+                return false;
+        }
+
+        if (descriptor.policy.requiredPermissions != 0)
+        {
+            if ((ctx.permissions & descriptor.policy.requiredPermissions) != descriptor.policy.requiredPermissions)
+                return false;
+        }
+
+        return true;
+    }
+
+    private bool helpQueryMatches(CommandDescriptor descriptor, string query)
+    {
+        if (query.length == 0)
+            return true;
+
+        auto normalized = query;
+        return descriptor.displayName.canFind(normalized) ||
+            descriptor.description.canFind(normalized) ||
+            descriptor.symbolName.canFind(normalized) ||
+            descriptor.category.canFind(normalized);
+    }
+
+    private void handleBuiltInComponent(MessageComponentEvent event)
+    {
+        if (!event.context.customId.startsWith(BuiltInHelpCustomIdPrefix))
+            return;
+
+        if (event.context.customId == BuiltInHelpNoopCustomId)
+            return;
+
+        auto parsedTarget = parsePersistentHelpCustomId(state, event.context.customId);
+        if (parsedTarget.isErr)
+        {
+            replyToComponentError(event, "This help session expired or became invalid. Run the help command again.");
+            return;
+        }
+
+        auto target = parsedTarget.value;
+        if (target.ownerId.value != 0 && target.ownerId != event.context.user.getOr(User.init).id)
+        {
+            replyToComponentError(event, "Only the original requester can turn this help page.");
+            return;
+        }
+
+        auto channel = event.context.channel.getOr(Channel.init);
+        auto ctx = interactionContext(event.interaction, channel);
+        auto payload = buildHelpPayload(ctx, target.query, target.page);
+        auto edited = rest.interactions.update(
+            event.interaction.id,
+            event.interaction.token,
+            payload
+        ).awaitResult();
+        if (edited.isErr)
+            logger.error("help", "Could not edit the help message: " ~ edited.error);
+    }
+
+    private void replyToComponentError(MessageComponentEvent event, string content)
+    {
+        auto channel = event.context.channel.getOr(Channel.init);
+        auto ctx = interactionContext(event.interaction, channel);
+        auto sent = ctx.send(content, true).awaitResult();
+        if (sent.isErr)
+            logger.error("help", "Could not send the component error response: " ~ sent.error);
+    }
+
     private void surfacePrefixFailure(CommandContext ctx, string commandName, string error)
     {
         if (ctx.channel.id.value == 0)
             return;
 
-        auto payload = MessageCreate("Could not run `" ~ commandName ~ "`.\n" ~ error);
+        CommandErrorContext context;
+        context.kind = classifyCommandFailure(error);
+        context.route = "prefix";
+        context.commandName = commandName;
+        context.error = error;
+        context.command = ctx;
+
+        auto payload = buildFailurePayload(context);
         auto sent = ctx.rest.messages.create(ctx.channel.id, payload).awaitResult();
         if (sent.isErr)
         {
@@ -974,14 +1722,20 @@ final class Client
 
     private void surfaceInteractionFailure(CommandContext ctx, string commandName, string error)
     {
-        auto content = "Could not run `" ~ commandName ~ "`.\n" ~ error;
-
         if (ctx.interaction.isNull || ctx.interaction.get.token.length == 0)
             return;
 
-        auto task = (ctx.interactionAcknowledged || ctx.interactionResponded)
-            ? ctx.followup(content, true)
-            : ctx.reply(content, true);
+        CommandErrorContext context;
+        context.kind = classifyCommandFailure(error);
+        context.route = "interaction";
+        context.commandName = commandName;
+        context.error = error;
+        context.command = ctx;
+
+        if (!shouldSurfaceFailure(context))
+            return;
+
+        auto task = ctx.send(buildFailurePayload(context), true);
         auto sent = task.awaitResult();
         if (sent.isErr)
         {
@@ -1084,21 +1838,443 @@ final class Client
         return Result!(ulong, string).ok(permissions);
     }
 
-    private bool isIgnorablePrefixFailure(string error)
+    private CommandErrorKind classifyCommandFailure(string error)
     {
-        return error.canFind("requested prefix command is not registered") ||
-            error.canFind("No command name was provided after the prefix");
+        if (error.canFind("requested prefix command is not registered") ||
+            error.canFind("requested interaction command is not registered"))
+        {
+            return CommandErrorKind.UnknownCommand;
+        }
+
+        if (error.canFind("No command name was provided after the prefix"))
+            return CommandErrorKind.MissingCommandName;
+        if (error.canFind("required prefix-command argument was not provided") ||
+            error.canFind("required slash-command option was not provided"))
+        {
+            return CommandErrorKind.MissingArgument;
+        }
+
+        if (error.canFind("could not be converted to the expected type") ||
+            error.canFind("received an invalid value"))
+        {
+            return CommandErrorKind.InvalidArgument;
+        }
+
+        if (error.canFind("Too many prefix arguments were provided"))
+            return CommandErrorKind.TooManyArguments;
+        if (error.canFind("restricted to the configured bot owner") ||
+            error.canFind("permission requirements") ||
+            error.canFind("temporarily rate limited"))
+        {
+            return CommandErrorKind.PolicyDenied;
+        }
+
+        if (error.canFind("handler raised an exception"))
+            return CommandErrorKind.HandlerFailure;
+
+        return CommandErrorKind.Unknown;
     }
 
-    private bool shouldSurfacePrefixFailure(string error)
+    private bool shouldSurfacePrefixFailure(string error, string commandName, CommandContext ctx)
     {
-        if (error.canFind("restricted to the configured bot owner"))
+        CommandErrorContext context;
+        context.kind = classifyCommandFailure(error);
+        context.route = "prefix";
+        context.commandName = commandName;
+        context.error = error;
+        context.command = ctx;
+        return shouldSurfaceFailure(context);
+    }
+
+    private bool shouldSurfaceFailure(CommandErrorContext context)
+    {
+        auto behavior = errorBehavior;
+        if (!behavior.enabled)
             return false;
-        if (error.canFind("permission requirements"))
+        if (behavior.shouldSurface !is null)
+            return behavior.shouldSurface(context);
+
+        final switch (context.kind)
+        {
+            case CommandErrorKind.UnknownCommand:
+                return behavior.surfaceUnknownCommand;
+            case CommandErrorKind.MissingCommandName:
+                return behavior.surfaceMissingCommandName;
+            case CommandErrorKind.MissingArgument:
+            case CommandErrorKind.InvalidArgument:
+            case CommandErrorKind.TooManyArguments:
+                return behavior.surfaceArgumentErrors;
+            case CommandErrorKind.PolicyDenied:
+                return behavior.surfacePolicyErrors;
+            case CommandErrorKind.HandlerFailure:
+                return behavior.surfaceHandlerFailures;
+            case CommandErrorKind.Unknown:
+                return behavior.surfaceOtherErrors;
+        }
+    }
+
+    private MessageCreate buildFailurePayload(CommandErrorContext context)
+    {
+        auto behavior = errorBehavior;
+        if (behavior.render !is null)
+            return behavior.render(context);
+
+        string[] lines;
+        lines ~= userFacingFailureSummary(context);
+
+        auto detail = userFacingFailureDetail(context);
+        if (detail.length != 0)
+            lines ~= detail;
+
+        auto hint = userFacingFailureHint(context);
+        if (hint.length != 0)
+            lines ~= hint;
+
+        return MessageCreate(joinLines(lines));
+    }
+
+    private string userFacingFailureSummary(CommandErrorContext context)
+    {
+        final switch (context.kind)
+        {
+            case CommandErrorKind.UnknownCommand:
+                return "Command `" ~ context.commandName ~ "` was not found.";
+            case CommandErrorKind.MissingCommandName:
+                return "A command name is required after the prefix.";
+            case CommandErrorKind.MissingArgument:
+                return "Some required arguments are missing.";
+            case CommandErrorKind.InvalidArgument:
+                return "One or more arguments are invalid.";
+            case CommandErrorKind.TooManyArguments:
+                return "Too many arguments were provided.";
+            case CommandErrorKind.PolicyDenied:
+                return "This command cannot run with the current policy restrictions.";
+            case CommandErrorKind.HandlerFailure:
+                return "The command failed while it was running.";
+            case CommandErrorKind.Unknown:
+                return "The command could not be completed.";
+        }
+    }
+
+    private string userFacingFailureDetail(CommandErrorContext context)
+    {
+        static string detailPrefix = "Detail: ";
+        static string hintPrefix = "Hint: ";
+
+        auto detailStart = context.error.indexOf(detailPrefix);
+        if (detailStart == -1)
+            return "";
+
+        detailStart += cast(ptrdiff_t) detailPrefix.length;
+        auto detail = context.error[detailStart .. $];
+        auto hintStart = detail.indexOf(hintPrefix);
+        if (hintStart != -1)
+            detail = detail[0 .. hintStart];
+
+        // Keep user-facing failures concise instead of dumping the full internal error.
+        detail = detail.strip;
+        if (detail.length == 0)
+            return "";
+        if (detail.length > 220)
+            detail = detail[0 .. 220] ~ "...";
+        return detail;
+    }
+
+    private string userFacingFailureHint(CommandErrorContext context)
+    {
+        auto commandText = context.commandName.length == 0 ? "<command>" : context.commandName;
+
+        final switch (context.kind)
+        {
+            case CommandErrorKind.UnknownCommand:
+                return "Use `" ~ config.prefix ~ "help` to list available commands.";
+            case CommandErrorKind.MissingCommandName:
+                return "Try `" ~ config.prefix ~ "help` to see what is available.";
+            case CommandErrorKind.MissingArgument:
+            case CommandErrorKind.InvalidArgument:
+            case CommandErrorKind.TooManyArguments:
+                if (context.route == "prefix")
+                    return "Use `" ~ config.prefix ~ "help " ~ commandText ~ "` for usage examples.";
+                return "Use `/help " ~ commandText ~ "` for usage examples.";
+            case CommandErrorKind.PolicyDenied:
+                if (context.error.canFind("owner"))
+                    return "This command is restricted to the configured bot owner.";
+                if (context.error.canFind("permission"))
+                    return "You do not have the required permissions to run this command.";
+                if (context.error.canFind("rate limit"))
+                    return "This command is on cooldown. Try again in a moment.";
+                return "";
+            case CommandErrorKind.HandlerFailure:
+                return "The failure was logged on the bot side for debugging.";
+            case CommandErrorKind.Unknown:
+                return "Try again in a moment. If it keeps failing, inspect the bot logs.";
+        }
+    }
+
+    private string joinLines(string[] lines)
+    {
+        string joined;
+
+        foreach (index, line; lines)
+        {
+            if (line.length == 0)
+                continue;
+            if (joined.length != 0)
+                joined ~= "\n";
+            joined ~= line;
+        }
+
+        return joined;
+    }
+
+    private string attemptedPrefixCommandName(string content)
+    {
+        if (!content.startsWith(config.prefix))
+            return "[prefix]";
+
+        auto tokens = tokenizePrefixContent(content[config.prefix.length .. $]);
+        if (tokens.length == 0)
+            return config.prefix;
+        return tokens[0];
+    }
+
+    private string[] tokenizePrefixContent(string input)
+    {
+        string[] tokens;
+        string current;
+        bool inQuote;
+        char quote;
+
+        foreach (ch; input)
+        {
+            if (inQuote)
+            {
+                if (ch == quote)
+                {
+                    inQuote = false;
+                }
+                else
+                {
+                    current ~= ch;
+                }
+
+                continue;
+            }
+
+            if (ch == '"' || ch == '\'')
+            {
+                inQuote = true;
+                quote = ch;
+                continue;
+            }
+
+            if (ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r')
+            {
+                if (current.length != 0)
+                {
+                    tokens ~= current;
+                    current = null;
+                }
+                continue;
+            }
+
+            current ~= ch;
+        }
+
+        if (current.length != 0)
+            tokens ~= current;
+
+        return tokens;
+    }
+
+    private void registerModuleMembers(
+        string moduleName,
+        bool includeCommands,
+        bool includeEvents,
+        bool includePlugins
+    )(CommandRegistrationFilter filter = CommandRegistrationFilter.init)
+    {
+        mixin("import " ~ moduleName ~ ";");
+        mixin("alias CurrentModule = " ~ moduleName ~ ";");
+
+        static foreach (memberName; __traits(allMembers, CurrentModule))
+        {
+            {
+                static if (memberName != "object" && memberName != "CurrentModule")
+                {
+                    static if (__traits(compiles, __traits(getMember, CurrentModule, memberName)))
+                    {
+                        alias memberSymbol = __traits(getMember, CurrentModule, memberName);
+                        static if (isCallable!memberSymbol)
+                        {
+                            enum bool commandLike = hasCommandRegistrationAttr!memberSymbol;
+                            enum bool eventLike = hasEventAttr!memberSymbol;
+                            static if (commandLike || eventLike)
+                            {
+                                enum candidate = describeCallableCandidate!memberSymbol();
+                                if (matchesRegistrationFilter(filter, candidate))
+                                {
+                                    static if (includeCommands && commandLike)
+                                        commands.registerAll!memberSymbol(0);
+                                    static if (includeEvents && eventLike)
+                                    {
+                                        if (filter.includeEvents)
+                                            registerEvents!memberSymbol();
+                                    }
+                                }
+                            }
+                        }
+                        else static if (IsTypeSymbol!memberSymbol)
+                        {
+                            enum bool pluginLike = HasLuaPluginAttr!memberSymbol;
+                            enum bool commandMembers = typeHasCommandMembers!memberSymbol;
+                            enum bool eventMembers = typeHasEventMembers!memberSymbol;
+                            static if (pluginLike || commandMembers || eventMembers)
+                            {
+                                enum candidate = describeTypeCandidate!memberSymbol();
+                                if (matchesRegistrationFilter(filter, candidate))
+                                {
+                                    static if (includeCommands && commandMembers)
+                                        registerCommandMembers!memberSymbol(filter);
+                                    static if (includeEvents && eventMembers)
+                                    {
+                                        if (filter.includeEvents)
+                                            registerEventMembersFiltered!memberSymbol(filter);
+                                    }
+                                    static if (includePlugins && pluginLike)
+                                    {
+                                        if (filter.includePlugins)
+                                            registerPlugin!memberSymbol();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private void registerCommandMembers(T)(CommandRegistrationFilter filter)
+    {
+        static foreach (memberName; __traits(allMembers, T))
+        {
+            {
+                static if (memberName != "__ctor" && memberName != "__xdtor")
+                {
+                    mixin("alias memberSymbol = T." ~ memberName ~ ";");
+                    static if (isCallable!memberSymbol)
+                    {
+                        enum hasAttrs = __traits(getAttributes, memberSymbol).length > 0;
+                        static if (hasAttrs && hasCommandRegistrationAttr!memberSymbol)
+                        {
+                            enum candidate = describeCommandMemberCandidate!(T, memberName)();
+                            if (matchesRegistrationFilter(filter, candidate))
+                                commands.registerMember!(T, memberName)();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private void registerEventMembersFiltered(T)(CommandRegistrationFilter filter)
+    {
+        static foreach (memberName; __traits(allMembers, T))
+        {
+            {
+                static if (memberName != "__ctor" && memberName != "__xdtor")
+                {
+                    mixin("alias memberSymbol = T." ~ memberName ~ ";");
+                    static if (isCallable!memberSymbol)
+                    {
+                        enum hasAttrs = __traits(getAttributes, memberSymbol).length > 0;
+                        static if (hasAttrs && hasEventAttr!memberSymbol)
+                        {
+                            enum candidate = describeEventMemberCandidate!(T, memberName)();
+                            if (matchesRegistrationFilter(filter, candidate))
+                                registerStatefulEvent!(T, memberName)();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private bool matchesRegistrationFilter(
+        CommandRegistrationFilter filter,
+        RegistrationCandidate candidate
+    )
+    {
+        if (candidate.freeFunction && !filter.includeFreeFunctions)
             return false;
-        if (error.canFind("temporarily rate limited"))
+        if (candidate.typeSymbol && !filter.includeTypes)
+            return false;
+        if (candidate.event && !filter.includeEvents)
+            return false;
+        if (candidate.plugin && !filter.includePlugins)
+            return false;
+        if (!matchesFilterTokens(candidate.moduleName, filter.includeModules))
+            return false;
+        if (matchesAnyToken(candidate.moduleName, filter.excludeModules))
+            return false;
+        if (!matchesFilterTokens(candidate.ownerName, filter.includeOwners))
+            return false;
+        if (matchesAnyToken(candidate.ownerName, filter.excludeOwners))
+            return false;
+        if (!(candidate.typeSymbol && candidate.commandName.length == 0))
+        {
+            auto nameValue = candidate.commandName.length == 0 ? candidate.symbolName : candidate.commandName;
+            if (!matchesNameFilterTokens(nameValue, filter.includeNames))
+                return false;
+            if (matchesAnyNameToken(nameValue, filter.excludeNames))
+                return false;
+        }
+        if (!matchesFilterTokens(candidate.category, filter.includeCategories))
+            return false;
+        if (matchesAnyToken(candidate.category, filter.excludeCategories))
             return false;
         return true;
+    }
+
+    private bool matchesFilterTokens(string value, string[] includes)
+    {
+        if (includes.length == 0)
+            return true;
+        return matchesAnyToken(value, includes);
+    }
+
+    private bool matchesNameFilterTokens(string value, string[] includes)
+    {
+        if (includes.length == 0)
+            return true;
+        return matchesAnyNameToken(value, includes);
+    }
+
+    private bool matchesAnyToken(string value, string[] tokens)
+    {
+        foreach (token; tokens)
+        {
+            if (token.length == 0)
+                continue;
+            if (value == token || value.canFind(token))
+                return true;
+        }
+
+        return false;
+    }
+
+    private bool matchesAnyNameToken(string value, string[] tokens)
+    {
+        foreach (token; tokens)
+        {
+            if (token.length == 0)
+                continue;
+            if (value == token)
+                return true;
+        }
+
+        return false;
     }
 
     private long snowflakeLatencyMilliseconds(Snowflake id)
@@ -1168,6 +2344,340 @@ final class Client
     }
 }
 
+private template hasCommandRegistrationAttr(alias fn)
+{
+    static if (__traits(getAttributes, fn).length == 0)
+    {
+        enum bool hasCommandRegistrationAttr = false;
+    }
+    else
+    {
+        enum bool hasCommandRegistrationAttr = hasCommandRegistrationAttrImpl!(__traits(getAttributes, fn));
+    }
+}
+
+private template hasCommandRegistrationAttrImpl(attrs...)
+{
+    static if (attrs.length == 0)
+    {
+        enum bool hasCommandRegistrationAttrImpl = false;
+    }
+    else static if (
+        is(typeof(attrs[0]) == Command) ||
+        is(typeof(attrs[0]) == HybridCommand) ||
+        is(typeof(attrs[0]) == MessageCommand) ||
+        is(typeof(attrs[0]) == UserCommand)
+    )
+    {
+        enum bool hasCommandRegistrationAttrImpl = true;
+    }
+    else
+    {
+        enum bool hasCommandRegistrationAttrImpl = hasCommandRegistrationAttrImpl!(attrs[1 .. $]);
+    }
+}
+
+private template typeHasCommandMembers(T)
+{
+    enum bool typeHasCommandMembers = typeHasCommandMembersImpl!(T, __traits(allMembers, T));
+}
+
+private template typeHasCommandMembersImpl(T, members...)
+{
+    static if (members.length == 0)
+    {
+        enum bool typeHasCommandMembersImpl = false;
+    }
+    else static if (members[0] == "__ctor" || members[0] == "__xdtor")
+    {
+        enum bool typeHasCommandMembersImpl = typeHasCommandMembersImpl!(T, members[1 .. $]);
+    }
+    else
+    {
+        mixin("alias memberSymbol = T." ~ members[0] ~ ";");
+        static if (isCallable!memberSymbol && __traits(getAttributes, memberSymbol).length > 0 && hasCommandRegistrationAttr!memberSymbol)
+        {
+            enum bool typeHasCommandMembersImpl = true;
+        }
+        else
+        {
+            enum bool typeHasCommandMembersImpl = typeHasCommandMembersImpl!(T, members[1 .. $]);
+        }
+    }
+}
+
+private template typeHasEventMembers(T)
+{
+    enum bool typeHasEventMembers = typeHasEventMembersImpl!(T, __traits(allMembers, T));
+}
+
+private template typeHasEventMembersImpl(T, members...)
+{
+    static if (members.length == 0)
+    {
+        enum bool typeHasEventMembersImpl = false;
+    }
+    else static if (members[0] == "__ctor" || members[0] == "__xdtor")
+    {
+        enum bool typeHasEventMembersImpl = typeHasEventMembersImpl!(T, members[1 .. $]);
+    }
+    else
+    {
+        mixin("alias memberSymbol = T." ~ members[0] ~ ";");
+        static if (isCallable!memberSymbol && __traits(getAttributes, memberSymbol).length > 0 && hasEventAttr!memberSymbol)
+        {
+            enum bool typeHasEventMembersImpl = true;
+        }
+        else
+        {
+            enum bool typeHasEventMembersImpl = typeHasEventMembersImpl!(T, members[1 .. $]);
+        }
+    }
+}
+
+private string moduleFromQualifiedName(string qualifiedName)
+{
+    size_t lastDot = size_t.max;
+
+    foreach (index, ch; qualifiedName)
+    {
+        if (ch == '.')
+            lastDot = index;
+    }
+
+    if (lastDot == size_t.max)
+        return qualifiedName;
+
+    return qualifiedName[0 .. lastDot];
+}
+
+private string categoryFromAttrs(attrs...)()
+{
+    static foreach (attr; attrs)
+    {
+        static if (is(typeof(attr) == CommandCategory))
+            return attr.name;
+    }
+
+    return "";
+}
+
+private RegistrationCandidate describeCallableCandidate(alias fn)()
+{
+    RegistrationCandidate candidate;
+    candidate.moduleName = moduleFromQualifiedName(fullyQualifiedName!fn);
+    candidate.symbolName = __traits(identifier, fn);
+    candidate.commandName = candidate.symbolName;
+    candidate.freeFunction = true;
+    candidate.command = hasCommandRegistrationAttr!fn;
+    candidate.event = hasEventAttr!fn;
+    candidate.category = categoryFromAttrs!(__traits(getAttributes, fn))();
+
+    static foreach (attr; __traits(getAttributes, fn))
+    {
+        static if (is(typeof(attr) == Command))
+            candidate.commandName = attr.name;
+        else static if (is(typeof(attr) == HybridCommand))
+            candidate.commandName = attr.name;
+        else static if (is(typeof(attr) == MessageCommand))
+            candidate.commandName = attr.name;
+        else static if (is(typeof(attr) == UserCommand))
+            candidate.commandName = attr.name;
+    }
+
+    return candidate;
+}
+
+private RegistrationCandidate describeTypeCandidate(T)()
+{
+    RegistrationCandidate candidate;
+    candidate.moduleName = moduleFromQualifiedName(fullyQualifiedName!T);
+    candidate.ownerName = T.stringof;
+    candidate.symbolName = T.stringof;
+    candidate.typeSymbol = true;
+    candidate.command = typeHasCommandMembers!T;
+    candidate.event = typeHasEventMembers!T;
+    candidate.plugin = HasLuaPluginAttr!T;
+    return candidate;
+}
+
+private RegistrationCandidate describeCommandMemberCandidate(T, string memberName)()
+{
+    mixin("alias memberSymbol = T." ~ memberName ~ ";");
+    auto candidate = describeTypeCandidate!T();
+    candidate.symbolName = memberName;
+    candidate.command = true;
+    candidate.event = false;
+    candidate.category = categoryFromAttrs!(__traits(getAttributes, memberSymbol))();
+    candidate.commandName = memberName;
+
+    static foreach (attr; __traits(getAttributes, memberSymbol))
+    {
+        static if (is(typeof(attr) == Command))
+            candidate.commandName = attr.name;
+        else static if (is(typeof(attr) == HybridCommand))
+            candidate.commandName = attr.name;
+        else static if (is(typeof(attr) == MessageCommand))
+            candidate.commandName = attr.name;
+        else static if (is(typeof(attr) == UserCommand))
+            candidate.commandName = attr.name;
+    }
+
+    return candidate;
+}
+
+private RegistrationCandidate describeEventMemberCandidate(T, string memberName)()
+{
+    auto candidate = describeTypeCandidate!T();
+    candidate.symbolName = memberName;
+    candidate.command = false;
+    candidate.event = true;
+    return candidate;
+}
+
+private template isEventContextType(T)
+{
+    enum bool isEventContextType =
+        is(T == ReadyEventContext) ||
+        is(T == ResumedEventContext) ||
+        is(T == GuildMemberAddEventContext) ||
+        is(T == MessageCreateEventContext) ||
+        is(T == InteractionCreateEventContext) ||
+        is(T == AutocompleteInteractionEventContext) ||
+        is(T == MessageComponentEventContext) ||
+        is(T == ModalSubmitEventContext) ||
+        is(T == PresenceUpdateEventContext) ||
+        is(T == CommandExecutedEventContext) ||
+        is(T == CommandFailedEventContext);
+}
+
+private template EventTypeOfContext(T)
+{
+    static if (is(T == ReadyEventContext))
+        alias EventTypeOfContext = ReadyEvent;
+    else static if (is(T == ResumedEventContext))
+        alias EventTypeOfContext = ResumedEvent;
+    else static if (is(T == GuildMemberAddEventContext))
+        alias EventTypeOfContext = GuildMemberAddEvent;
+    else static if (is(T == MessageCreateEventContext))
+        alias EventTypeOfContext = MessageCreateEvent;
+    else static if (is(T == InteractionCreateEventContext))
+        alias EventTypeOfContext = InteractionCreateEvent;
+    else static if (is(T == AutocompleteInteractionEventContext))
+        alias EventTypeOfContext = AutocompleteInteractionEvent;
+    else static if (is(T == MessageComponentEventContext))
+        alias EventTypeOfContext = MessageComponentEvent;
+    else static if (is(T == ModalSubmitEventContext))
+        alias EventTypeOfContext = ModalSubmitEvent;
+    else static if (is(T == PresenceUpdateEventContext))
+        alias EventTypeOfContext = PresenceUpdateEvent;
+    else static if (is(T == CommandExecutedEventContext))
+        alias EventTypeOfContext = CommandExecutedEvent;
+    else static if (is(T == CommandFailedEventContext))
+        alias EventTypeOfContext = CommandFailedEvent;
+    else
+        static assert(false, "Unsupported event context type.");
+}
+
+private template hasEventAttr(alias fn)
+{
+    static if (__traits(getAttributes, fn).length == 0)
+    {
+        enum bool hasEventAttr = false;
+    }
+    else
+    {
+        enum bool hasEventAttr = hasEventAttrImpl!(__traits(getAttributes, fn));
+    }
+}
+
+private template hasEventAttrImpl(attrs...)
+{
+    static if (attrs.length == 0)
+    {
+        enum bool hasEventAttrImpl = false;
+    }
+    else static if (__traits(compiles, typeof(attrs[0])) && is(typeof(attrs[0]) == Event))
+    {
+        enum bool hasEventAttrImpl = true;
+    }
+    else static if (is(attrs[0] == Event))
+    {
+        enum bool hasEventAttrImpl = true;
+    }
+    else
+    {
+        enum bool hasEventAttrImpl = hasEventAttrImpl!(attrs[1 .. $]);
+    }
+}
+
+private template EventSubscriptionType(alias handler)
+{
+    static if (Parameters!handler.length != 1)
+    {
+        static assert(false, "@Event handlers must accept exactly one event or event-context parameter.");
+    }
+    else static if (isEventContextType!(Parameters!handler[0]))
+    {
+        alias EventSubscriptionType = EventTypeOfContext!(Parameters!handler[0]);
+    }
+    else
+    {
+        alias EventSubscriptionType = Parameters!handler[0];
+    }
+}
+
+private void invokeFreeEvent(alias handler, E)(E event)
+{
+    alias ParamType = Parameters!handler[0];
+
+    static if (isEventContextType!ParamType)
+    {
+        static if (is(E == ReadyEvent))
+            handler(event.context);
+        else static if (is(E == ResumedEvent))
+            handler(event.context);
+        else static if (is(E == GuildMemberAddEvent))
+            handler(event.context);
+        else static if (is(E == MessageCreateEvent))
+            handler(event.context);
+        else static if (is(E == InteractionCreateEvent))
+            handler(event.context);
+        else static if (is(E == AutocompleteInteractionEvent))
+            handler(event.context);
+        else static if (is(E == MessageComponentEvent))
+            handler(event.context);
+        else static if (is(E == ModalSubmitEvent))
+            handler(event.context);
+        else static if (is(E == PresenceUpdateEvent))
+            handler(event.context);
+        else static if (is(E == CommandExecutedEvent))
+            handler(event.context);
+        else static if (is(E == CommandFailedEvent))
+            handler(event.context);
+        else
+            static assert(false, "Unsupported @Event payload type.");
+    }
+    else
+    {
+        handler(event);
+    }
+}
+
+private void invokeStatefulEvent(T, alias member, E)(T instance, E event)
+{
+    alias ParamType = Parameters!member[0];
+
+    static if (isEventContextType!ParamType)
+    {
+        mixin("instance." ~ __traits(identifier, member) ~ "(event.context);");
+    }
+    else
+    {
+        mixin("instance." ~ __traits(identifier, member) ~ "(event);");
+    }
+}
+
 private template IsTypeSymbol(alias symbol)
 {
     enum bool IsTypeSymbol = is(symbol == class) || is(symbol == struct) || is(symbol == interface);
@@ -1204,15 +2714,64 @@ private template hasLuaPluginAttrImpl(attrs...)
 private @Command("ping", routes: CommandRoute.Prefix)
 void clientUnittestPing(CommandContext ctx)
 {
-    ctx.reply("pong").await();
+    ctx.send("pong").await();
 }
+
+@CommandCategory("Testing")
+private @HybridCommand("alpha", "Alpha command for builtin help")
+void clientUnittestAlpha(CommandContext ctx)
+{
+    ctx.send("alpha").await();
+}
+
+@HideFromHelp
+private @Command("hidden-alpha", routes: CommandRoute.Prefix)
+void clientUnittestHiddenAlpha(CommandContext ctx)
+{
+    ctx.send("hidden").await();
+}
+
+private bool clientUnittestReadyEventSeen;
+
+private @Event
+void clientUnittestOnReady(ReadyEventContext ctx)
+{
+    clientUnittestReadyEventSeen = ctx.selfUser.username == "tester";
+}
+
+static assert(hasEventAttr!clientUnittestOnReady);
 
 @RequirePermissions(Permissions.SendMessages)
 private @Command("secure-ping", routes: CommandRoute.Prefix)
 void clientUnittestSecurePing(CommandContext ctx)
 {
-    ctx.reply("allowed").await();
+    ctx.send("allowed").await();
 }
+
+private bool clientUnittestMessageEventSeen;
+
+private @Event
+void clientUnittestOnMessage(MessageCreateEventContext ctx)
+{
+    clientUnittestMessageEventSeen = ctx.message.content == "hello" &&
+        !ctx.user.isNull &&
+        ctx.user.get.username == "alice";
+}
+
+static assert(hasEventAttr!clientUnittestOnMessage);
+
+private struct ClientUnittestEventGroup
+{
+    @Event
+    void onMessage(MessageCreateEventContext ctx)
+    {
+        clientUnittestMessageEventSeen = ctx.message.content == "group" &&
+            !ctx.user.isNull &&
+            ctx.user.get.username == "group-user";
+    }
+}
+
+static assert(hasEventAttr!(ClientUnittestEventGroup.onMessage));
 
 @LuaPlugin("counter")
 private struct ClientUnittestCounterPlugin
@@ -1228,6 +2787,16 @@ private struct ClientUnittestAdminGroup
     }
 }
 
+private struct ClientUnittestAutoGroup
+{
+    @CommandCategory("Testing")
+    @Command("group-auto", routes: CommandRoute.Prefix)
+    void run(CommandContext ctx)
+    {
+        ctx.send("group-auto").await();
+    }
+}
+
 unittest
 {
     auto client = new Client(ClientConfig("token", cast(uint) GatewayIntent.Guilds));
@@ -1237,6 +2806,140 @@ unittest
     client.emit!int(5);
 
     assert(seen);
+}
+
+unittest
+{
+    auto client = new Client(ClientConfig("token", cast(uint) GatewayIntent.Guilds));
+    auto filter = CommandRegistrationFilter.names("alpha", "group-auto");
+
+    client.registerAllCommands(filter);
+
+    assert(!client.commands.find("alpha", CommandRoute.Prefix).isNull);
+    assert(!client.commands.find("group-auto", CommandRoute.Prefix).isNull);
+    assert(client.commands.find("hidden-alpha", CommandRoute.Prefix).isNull);
+}
+
+unittest
+{
+    string[] bodies;
+    HttpTransport transport = (request) {
+        bodies ~= cast(string) request.body;
+
+        HttpResponse response;
+        response.statusCode = 200;
+        response.body = cast(ubyte[]) `{"id":"1","channel_id":"10","content":"ok","author":{"id":"999","username":"ddiscord","bot":true}}`.dup;
+        return Result!(HttpResponse, HttpError).ok(response);
+    };
+
+    auto client = new Client(ClientConfig(
+        "token",
+        cast(uint) GatewayIntent.Guilds,
+        transport: Nullable!HttpTransport.of(transport)
+    ));
+    client.logger.minimumLevel = cast(LogLevel) -1;
+    client.helpBehavior.pageSize = 1;
+    client.registerCommands(CommandRegistrationFilter.names("alpha", "ping", "hidden-alpha"));
+
+    Message message;
+    message.channelId = Snowflake(10);
+    message.content = "!help";
+    message.author.id = Snowflake(22);
+    message.author.username = "alice";
+
+    auto result = client.receiveMessage(message);
+    assert(result.isOk);
+    assert(bodies.length == 1);
+    assert(bodies[0].canFind(`"flags":32768`));
+    assert(bodies[0].canFind(`"type":17`));
+    assert(!client.commands.find("help", CommandRoute.Prefix).isNull);
+    assert(client.commands.find("hidden-alpha", CommandRoute.Prefix).get.hiddenFromHelp);
+}
+
+unittest
+{
+    string[] bodies;
+    HttpTransport transport = (request) {
+        bodies ~= cast(string) request.body;
+
+        HttpResponse response;
+        response.statusCode = 200;
+        response.body = cast(ubyte[]) `{"id":"1","channel_id":"10","content":"ok","author":{"id":"999","username":"ddiscord","bot":true}}`.dup;
+        return Result!(HttpResponse, HttpError).ok(response);
+    };
+
+    auto client = new Client(ClientConfig(
+        "token",
+        cast(uint) GatewayIntent.Guilds,
+        transport: Nullable!HttpTransport.of(transport)
+    ));
+    client.logger.minimumLevel = cast(LogLevel) -1;
+
+    Message message;
+    message.channelId = Snowflake(10);
+    message.content = "!missing-command";
+    message.author.id = Snowflake(22);
+    message.author.username = "alice";
+
+    auto result = client.receiveMessage(message);
+    assert(result.isErr);
+    assert(bodies.length == 1);
+    assert(bodies[0].canFind("was not found"));
+
+    bodies.length = 0;
+    client.errorBehavior.surfaceUnknownCommand = false;
+    auto hidden = client.receiveMessage(message);
+    assert(hidden.isErr);
+    assert(bodies.length == 0);
+}
+
+unittest
+{
+    clientUnittestReadyEventSeen = false;
+
+    auto client = new Client(ClientConfig("token", cast(uint) GatewayIntent.Guilds));
+    client.registerAllCommands!clientUnittestOnReady();
+
+    ReadyEvent event;
+    event.selfUser.username = "tester";
+    event.context.selfUser = event.selfUser;
+    client.emit!ReadyEvent(event);
+
+    assert(clientUnittestReadyEventSeen);
+}
+
+unittest
+{
+    clientUnittestMessageEventSeen = false;
+
+    auto client = new Client(ClientConfig("token", cast(uint) GatewayIntent.Guilds));
+    client.registerAllCommands!clientUnittestOnMessage();
+
+    MessageCreateEvent event;
+    event.message.content = "hello";
+    event.message.author.username = "alice";
+    event.context.message = event.message;
+    event.context.event.currentUser = Nullable!User.of(event.message.author);
+    client.emit!MessageCreateEvent(event);
+
+    assert(clientUnittestMessageEventSeen);
+}
+
+unittest
+{
+    clientUnittestMessageEventSeen = false;
+
+    auto client = new Client(ClientConfig("token", cast(uint) GatewayIntent.Guilds));
+    client.registerAllCommands!ClientUnittestEventGroup();
+
+    MessageCreateEvent event;
+    event.message.content = "group";
+    event.message.author.username = "group-user";
+    event.context.message = event.message;
+    event.context.event.currentUser = Nullable!User.of(event.message.author);
+    client.emit!MessageCreateEvent(event);
+
+    assert(clientUnittestMessageEventSeen);
 }
 
 unittest
@@ -1417,7 +3120,7 @@ unittest
         @Command("owner-only", routes: CommandRoute.Prefix)
         void run(CommandContext ctx)
         {
-            ctx.reply("should not send").await();
+            ctx.send("should not send").await();
         }
     }
 
@@ -1434,6 +3137,7 @@ unittest
         ownerId: Nullable!Snowflake.of(Snowflake(999)),
         transport: Nullable!HttpTransport.of(transport)
     ));
+    client.logger.minimumLevel = cast(LogLevel) -1;
     client.registerAllCommands!OwnerGroup();
 
     Message message;
@@ -1455,7 +3159,7 @@ unittest
         @Command("owner-refresh", routes: CommandRoute.Prefix)
         void run(CommandContext ctx)
         {
-            ctx.reply("ok").await();
+            ctx.send("ok").await();
         }
     }
 

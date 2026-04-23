@@ -276,7 +276,7 @@ final class GatewayClient
                 if (_stopRequested || _fatalShutdownRequested || !config.autoReconnect)
                     break;
             }
-            catch (Throwable error)
+            catch (Exception error)
             {
                 _lastError = formatError(
                     "gateway",
@@ -760,7 +760,7 @@ final class GatewayClient
                 {
                     sendHeartbeat();
                 }
-                catch (Throwable)
+                catch (Exception)
                 {
                     abortCurrentConnection();
                     return;

@@ -12,6 +12,11 @@ import std.algorithm : filter;
 import std.array : array;
 import std.variant : Variant;
 
+/// Marks a function or method as an event handler for `Client.registerAllCommands!`.
+struct Event
+{
+}
+
 private struct HandlerEntry(E)
 {
     bool once;
@@ -81,7 +86,7 @@ final class EventDispatcher
             {
                 entry.handler(event);
             }
-            catch (Throwable error)
+            catch (Exception error)
             {
                 synchronized (_mutex)
                 {

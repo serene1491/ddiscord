@@ -3,10 +3,16 @@
 `ddiscord` ships some runnable console examples as separate DUB packages. Try them:
 
 - `basic-bot/`: prefix + slash commands with a live Discord session
+- `basic-bot/` also shows `@Event` registration through `registerAllCommands!`
 - `plugin-bot/`: plugin descriptors, service injection, `@LuaExpose`, and owner-only command flow
 - `full-bot/`: permissions, rate limits, state, components, prefix + slash orchestration
 - `test-bot/`: integration-focused gateway, REST, prefix, slash, and event validation
+- `help-bot/`: built-in help customization, categories, hidden commands, and user-facing error behavior
+- `filter-bot/`: module auto-registration with category filters
 - `lua-scripting-bot/`: Dorm + SQLite-backed saved Lua scripts with slash management and prefix execution
+
+Most examples now use module-local registration helpers such as `client.registerCommands();` or
+`client.registerAllCommands();`, so the console `main()` stays short even as commands grow.
 
 Each example builds its executable into its own directory:
 
@@ -14,6 +20,8 @@ Each example builds its executable into its own directory:
 - `examples/plugin-bot/plugin-bot`
 - `examples/full-bot/full-bot`
 - `examples/test-bot/test-bot`
+- `examples/help-bot/help-bot`
+- `examples/filter-bot/filter-bot`
 - `examples/lua-scripting-bot/lua-scripting-bot`
 
 ## Run
@@ -23,6 +31,8 @@ cd examples/basic-bot && dub run
 cd examples/plugin-bot && dub run
 cd examples/full-bot && dub run
 cd examples/test-bot && dub run
+cd examples/help-bot && dub run
+cd examples/filter-bot && dub run
 cd examples/lua-scripting-bot && dub run
 ```
 
@@ -35,6 +45,4 @@ Accepted token variables for the examples:
 - `BOT_OWNER_ID` or `OWNER_ID` for the owner-only Lua eval command in `plugin-bot`
 - `PLUGINS_DIR` to override the default plugin directory used by `plugin-bot`
 - `TEST_CHANNEL_ID` to let `test-bot` send a startup validation message after `READY`
-
-When adapting the examples, you can now use `ctx.think()` for long-running handlers and
-`ctx.replyTo(...)` when you want a real Discord reply instead of a plain channel message.
+- `TEST_SERVER_ID` to let `test-bot` run extra guild/member/roles startup checks

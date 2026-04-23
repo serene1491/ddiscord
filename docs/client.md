@@ -57,17 +57,41 @@ This makes it much easier to tell whether a bot is failing before `READY`, faili
 
 ## Registration
 
-`registerAllCommands!` is the recommended public entrypoint:
+The shortest entrypoints now auto-scan the calling module:
 
 ```d
-client.registerAllCommands!(ping, AdminCommands, CounterPlugin);
+client.registerCommands();
+client.registerAllCommands();
 ```
 
-It accepts:
+- `registerCommands()` registers only command handlers from the current module
+- `registerAllCommands()` also includes `@Event` handlers, stateful command groups, and plugin descriptor types
 
-- free command handlers
-- stateful command groups
-- Lua plugin descriptor types
+Explicit template registration still works:
+
+```d
+client.registerAllCommands!(ping, onReady, AdminCommands, CounterPlugin);
+```
+
+Automatic registration accepts filters when you want something between “everything here” and
+fully manual registration:
+
+```d
+auto filter = CommandRegistrationFilter
+    .owners("AdminCommands")
+    .exceptNames("debug")
+    .exceptCategories("Internal");
+
+client.registerAllCommands(filter);
+```
+
+Available filter targets include:
+
+- source module names
+- owner/group type names
+- command names
+- `@CommandCategory` values
+- whether free functions, types, events, or plugins should be considered
 
 ## Events
 
@@ -79,6 +103,21 @@ client.on!ReadyEvent((event) {
     writeln("Ready as ", event.selfUser.username);
 });
 ```
+
+Or declare them with `@Event` and let `registerAllCommands!` wire them:
+
+```d
+@Event
+void onReady(ReadyEventContext ctx)
+{
+    import std.stdio : writeln;
+    writeln("Ready as ", ctx.selfUser.username);
+}
+```
+
+`@Event` is the UDA form of event registration. It is useful when you want command handlers and
+event handlers to live under the same `registerAllCommands!` flow, including stateful groups.
+Handlers may accept either the raw event struct or the matching context type.
 
 Useful events include:
 
@@ -93,6 +132,69 @@ Useful events include:
 - `CommandFailedEvent`
 
 `ReadyEvent` now also includes `gatewayVersion`, the placeholder guild list carried by the initial `READY`, and `resumeGatewayUrl`.
+Each shipped event now also carries a typed `context` field with cached/current entities and
+runtime services for fluent follow-up work.
+
+For example:
+
+- `MessageCreateEventContext` carries `message`, `user`, `guild`, `member`, `channel`, plus `cache`, `state`, `services`, `rest`, and `logger`
+- `InteractionCreateEventContext` carries `interaction` and the same shared runtime surface
+- `CommandExecutedEventContext` and `CommandFailedEventContext` also expose the originating command context and route-aware helpers such as `prefix`, `slash`, `contextMenu`, and `hybrid`
+
+## Built-in help
+
+The client registers a built-in `help` command by default unless you already provide your own
+command with the same name on prefix or slash routes.
+
+Its defaults are meant to be useful immediately:
+
+- paginated output
+- embeds or Components V2 rendering
+- visibility checks against owner-only and permission-gated commands
+- support for `@CommandCategory` and `@HideFromHelp`
+
+Customize it through `client.helpBehavior`:
+
+```d
+client.helpBehavior.pageSize = 4;
+client.helpBehavior.useComponentsV2 = true;
+client.helpBehavior.includeCommand = (descriptor) => descriptor.category != "Internal";
+client.helpBehavior.buildEntry = (descriptor, usage) {
+    CommandHelpEntry entry;
+    entry.name = descriptor.displayName;
+    entry.description = descriptor.description;
+    entry.usage = usage;
+    entry.category = descriptor.category;
+    return entry;
+};
+```
+
+## Command errors
+
+Prefix and interaction failures can now be surfaced back to the caller by default instead of only
+showing up in logs.
+
+The default renderer keeps user-facing output concise (summary + short actionable hint) while full
+failure details remain in bot logs.
+
+The built-in behavior can report:
+
+- unknown commands
+- missing command names
+- missing or invalid arguments
+- handler failures
+- other library-side command execution failures
+
+Control it through `client.errorBehavior`:
+
+```d
+client.errorBehavior.surfaceUnknownCommand = false;
+client.errorBehavior.surfaceArgumentErrors = true;
+client.errorBehavior.shouldSurface = (error) => error.commandName != "eval";
+client.errorBehavior.render = (error) {
+    return MessageCreate("command error: " ~ error.error);
+};
+```
 
 ## Presence
 
@@ -126,14 +228,29 @@ Useful additions include:
 - `client.messages.create(...)`
 - `client.slash.sync(...)` when you want direct command-manifest sync
 
-## Reply and thinking helpers
+## Sending and thinking helpers
 
-`CommandContext` now has two helpers for common UX flows:
+`CommandContext` now has three helpers for common UX flows:
 
 ```d
 ctx.think().await();
-ctx.replyTo("Working on it...", true).await();
+ctx.send("Done.").await();
+ctx.reply("Working on it...", true).await();
 ```
 
 - `think()` defers interaction commands and triggers channel typing for prefix/message commands
-- `replyTo(...)` sends a native Discord reply when the context came from a message
+- `send(...)` sends the normal response for the current context and automatically switches to
+  interaction follow-up messages when the interaction was already acknowledged
+- `reply(...)` sends a native Discord reply when the context came from a message
+
+The command layer now also exposes route-specific context shapes when you want tighter typing:
+
+- `PrefixCommandContext`
+- `SlashCommandContext`
+- `ContextMenuCommandContext`
+- `HybridCommandContext`
+
+You can also annotate commands for the default help system:
+
+- `@CommandCategory("Utility")` to group/filter commands
+- `@HideFromHelp` to keep a command registered but absent from built-in help

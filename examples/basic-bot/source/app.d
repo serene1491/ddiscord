@@ -7,6 +7,12 @@ import std.path : buildPath;
 import std.random : uniform;
 import std.stdio : writeln;
 
+@Event
+void handleReady(ReadyEventContext ctx)
+{
+    writeln("[basic] ready as ", ctx.selfUser.username);
+}
+
 @Command("ping", description: "Check the bot latency", routes: CommandRoute.Prefix)
 void handlePing(CommandContext ctx)
 {
@@ -21,7 +27,7 @@ void handlePing(CommandContext ctx)
 
     MessageCreate payload;
     payload = payload.withEmbed(embed);
-    ctx.reply(payload).await();
+    ctx.send(payload).await();
 }
 
 @Command("info", description: "Show information about a user", routes: CommandRoute.Slash)
@@ -39,7 +45,7 @@ void handleInfo(CommandContext ctx, Nullable!User target = Nullable!User.init)
 
     MessageCreate payload;
     payload = payload.withEmbed(embed);
-    ctx.reply(payload, ephemeral: true).await();
+    ctx.send(payload, ephemeral: true).await();
 }
 
 @HybridCommand("roll", "Roll a dice")
@@ -49,9 +55,9 @@ void handleRoll(CommandContext ctx, long sides = 6)
     auto response = format!"Rolled %d on a d%d."(result, sides);
 
     if (ctx.source == CommandSource.Slash)
-        ctx.reply(response, ephemeral: true).await();
+        ctx.send(response, ephemeral: true).await();
     else
-        ctx.reply(response).await();
+        ctx.send(response).await();
 }
 
 void main()
@@ -64,11 +70,7 @@ void main()
         prefix: env.get!string("BOT_PREFIX", "!")
     ));
 
-    client.on!ReadyEvent((event) {
-        writeln("[basic] ready as ", event.selfUser.username);
-    });
-
-    client.registerAllCommands!(handlePing, handleInfo, handleRoll);
+    client.registerAllCommands();
     client.setPresence(StatusType.Online, Activity(ActivityType.Watching, "your commands"));
 
     client.run();

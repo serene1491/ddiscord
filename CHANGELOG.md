@@ -1,0 +1,35 @@
+# Changelog
+
+All notable changes to `ddiscord` should be documented in this file.
+
+## [0.3.0] - In Development
+
+### Added
+
+- Module-local auto-registration through `client.registerCommands()` and `client.registerAllCommands()`.
+- `CommandRegistrationFilter` to include or exclude modules, owners, names, categories, events, and plugins.
+- Built-in `help` command with pagination and configurable rendering.
+- Configurable command error behavior (`CommandErrorBehavior`) for unknown commands, argument issues, and handler failures.
+- Help-oriented command metadata via `@CommandCategory` and `@HideFromHelp`.
+- Expanded runnable examples with `help-bot` and `filter-bot`.
+
+### Changed
+
+- Built-in help now respects visibility rules and command metadata (owner-only, permissions, hidden/category tags).
+- Route-specific command contexts and typed event contexts are now used consistently across runtime and examples.
+- `test-bot` startup flow now performs richer REST validation checks, including optional guild-scoped checks.
+
+### Fixed
+
+- Corrected Components V2 serialization to emit Discord-compatible integer component types and payload shapes.
+- Fixed message component serialization in `MessageCreate` so complex component payloads no longer degrade into unknown types.
+- Improved default user-facing command failure messages to stay concise while still giving actionable hints.
+
+### Refactored
+
+- Split large command/client type surfaces into dedicated modules:
+  `ddiscord.command_types` and `ddiscord.client_types`.
+
+### Documentation
+
+- Updated README/examples/client docs for auto-registration filters, built-in help/error behavior, and new runnable consoles.

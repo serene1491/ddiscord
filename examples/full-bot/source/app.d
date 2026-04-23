@@ -17,7 +17,7 @@ void handleGreet(
 {
     auto seen = ctx.state.user(ctx.user.id).getOr!int("greet-count", 0);
     ctx.state.user(ctx.user.id).set("greet-count", seen + 1);
-    ctx.reply("Greeted " ~ target.mention ~ " in " ~ targetChannel.mention ~ " | " ~ reason, ephemeral: ctx.source == CommandSource.Slash).await();
+    ctx.send("Greeted " ~ target.mention ~ " in " ~ targetChannel.mention ~ " | " ~ reason, ephemeral: ctx.source == CommandSource.Slash).await();
 }
 
 @Command("dashboard", description: "Render a components dashboard", routes: CommandRoute.Prefix)
@@ -38,7 +38,7 @@ void handleDashboard(CommandContext ctx)
     payload = payload.withContent("dashboard");
     payload = payload.addComponent(container);
     payload = payload.setFlag(MessageFlags.IsComponentsV2);
-    ctx.reply(payload).await();
+    ctx.send(payload).await();
 }
 
 @Command("counter", description: "Increment a per-user counter", routes: CommandRoute.Prefix)
@@ -46,7 +46,7 @@ void handleCounter(CommandContext ctx)
 {
     auto current = ctx.state.user(ctx.user.id).getOr!int("counter", 0) + 1;
     ctx.state.user(ctx.user.id).set("counter", current);
-    ctx.reply("counter => " ~ current.to!string).await();
+    ctx.send("counter => " ~ current.to!string).await();
 }
 
 void main()
@@ -63,7 +63,7 @@ void main()
         writeln("[full] ready as ", event.selfUser.username);
     });
 
-    client.registerAllCommands!(handleGreet, handleDashboard, handleCounter);
+    client.registerCommands();
     client.setPresence(StatusType.Online, Activity(ActivityType.Playing, "server tools"));
 
     client.run();

@@ -217,7 +217,7 @@ final class TaskScheduler
                 {
                     task.callback();
                 }
-                catch (Throwable error)
+                catch (Exception error)
                 {
                     auto message = formatError(
                         "tasks",

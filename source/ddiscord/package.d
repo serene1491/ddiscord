@@ -14,6 +14,7 @@ public import ddiscord.events.dispatcher;
 public import ddiscord.events.types;
 public import ddiscord.context.autocomplete;
 public import ddiscord.context.command;
+public import ddiscord.context.event;
 public import ddiscord.gateway.client;
 public import ddiscord.gateway.intents;
 public import ddiscord.core.http.client;

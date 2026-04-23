@@ -184,10 +184,15 @@ struct ApplicationCommandDefinition
     {
         JSONValue json;
         json["name"] = name;
-        json["description"] = description;
         json["type"] = cast(int) type;
 
-        if (options.length != 0)
+        if (type == ApplicationCommandType.ChatInput)
+        {
+            if (description.length != 0)
+                json["description"] = description;
+        }
+
+        if (type == ApplicationCommandType.ChatInput && options.length != 0)
         {
             JSONValue[] optionValues;
             foreach (option; options)
@@ -223,4 +228,26 @@ struct ApplicationCommandDefinition
 
         return definition;
     }
+}
+
+unittest
+{
+    ApplicationCommandDefinition chatInput;
+    chatInput.name = "ping";
+    chatInput.description = "Replies with pong";
+    chatInput.type = ApplicationCommandType.ChatInput;
+
+    auto chatJson = chatInput.toJSON();
+    assert(chatJson.object.get("description", JSONValue.init).type == JSONType.string);
+}
+
+unittest
+{
+    ApplicationCommandDefinition contextMenu;
+    contextMenu.name = "Inspect User";
+    contextMenu.description = "ignored";
+    contextMenu.type = ApplicationCommandType.User;
+
+    auto contextJson = contextMenu.toJSON();
+    assert(contextJson.object.get("description", JSONValue.init).type == JSONType.null_);
 }

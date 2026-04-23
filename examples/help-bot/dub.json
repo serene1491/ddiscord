@@ -1,0 +1,16 @@
+{
+    "name": "ddiscord-help-bot",
+    "description": "Built-in help and error-behavior showcase",
+    "targetType": "executable",
+    "targetName": "help-bot",
+    "targetPath": ".",
+    "dependencies": {
+        "ddiscord": {
+            "path": "../.."
+        }
+    },
+    "sourcePaths": [
+        "source"
+    ],
+    "mainSourceFile": "source/app.d"
+}

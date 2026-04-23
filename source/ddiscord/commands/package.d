@@ -6,11 +6,14 @@
  */
 module ddiscord.commands;
 
+public import ddiscord.command_types;
+
 import core.sync.mutex : Mutex;
 import core.time : Duration, MonoTime, dur;
 import ddiscord.core.http.client : HttpError, HttpResponse, HttpTransport;
 import ddiscord.context.autocomplete : AutocompleteContext;
-import ddiscord.context.command : CommandContext, CommandSource;
+import ddiscord.context.command : CommandContext, CommandSource, ContextMenuCommandContext,
+    HybridCommandContext, PrefixCommandContext, SlashCommandContext;
 import ddiscord.models.application_command : ApplicationCommandDefinition, ApplicationCommandOption,
     ApplicationCommandOptionType, ApplicationCommandType;
 import ddiscord.models.channel : Channel;
@@ -23,8 +26,6 @@ import ddiscord.util.errors : formatError;
 import ddiscord.util.optional : Nullable;
 import ddiscord.util.result : Result;
 import ddiscord.util.snowflake : Snowflake;
-public import ddiscord.models.application_command : CommandRoute;
-import ddiscord.models.channel : ChannelType;
 import ddiscord.models.role : Permissions;
 import ddiscord.services : ServiceContainer;
 import std.ascii : isUpper, toLower;
@@ -33,221 +34,9 @@ import std.conv : to;
 import std.exception : enforce;
 import std.json : JSONType, JSONValue, parseJSON;
 import std.string : startsWith, strip;
-import std.traits : ParameterDefaults, Parameters, ParameterIdentifierTuple, ReturnType, isCallable;
+import std.traits : ParameterDefaults, Parameters, ParameterIdentifierTuple, ReturnType,
+    fullyQualifiedName, isCallable;
 import std.typecons : Tuple;
-
-/// Marks a command handler.
-struct Command
-{
-    string name;
-    string description;
-    CommandRoute routes;
-
-    this(string name, string description = "", CommandRoute routes = CommandRoute.Hybrid)
-    {
-        this.name = name;
-        this.description = description;
-        this.routes = routes;
-    }
-}
-
-/// Marks an explicit hybrid command handler.
-struct HybridCommand
-{
-    string name;
-    string description;
-
-    this(string name, string description = "")
-    {
-        this.name = name;
-        this.description = description;
-    }
-}
-
-/// Marks a message context-menu handler.
-struct MessageCommand
-{
-    string name;
-
-    this(string name)
-    {
-        this.name = name;
-    }
-}
-
-/// Marks a user context-menu handler.
-struct UserCommand
-{
-    string name;
-
-    this(string name)
-    {
-        this.name = name;
-    }
-}
-
-/// Marks an input parameter as a command option.
-struct Option
-{
-    string name;
-    string description;
-    double min;
-    double max;
-
-    this(string name, string description = "", double min = double.nan, double max = double.nan)
-    {
-        this.name = name;
-        this.description = description;
-        this.min = min;
-        this.max = max;
-    }
-}
-
-/// Marks a choice for a string option.
-struct Choice
-{
-    string label;
-    string value;
-
-    this(string label, string value)
-    {
-        this.label = label;
-        this.value = value;
-    }
-}
-
-/// Marks allowed channel kinds.
-struct ChannelTypes
-{
-    ChannelType[] values;
-
-    this(ChannelType[] values...)
-    {
-        this.values = values.dup;
-    }
-}
-
-/// Marks a greedy prefix argument.
-struct Greedy
-{
-}
-
-/// Marks a type or field as stateful/injectable.
-struct Stateful
-{
-}
-
-/// Marks a field for service injection.
-struct Inject
-{
-}
-
-/// Marks a command that requires bot ownership.
-struct RequireOwner
-{
-}
-
-/// Marks a command that requires specific permissions.
-struct RequirePermissions
-{
-    ulong permissions;
-
-    this(ulong permissions)
-    {
-        this.permissions = permissions;
-    }
-}
-
-/// Rate limit bucket selector.
-enum RateLimitBucket
-{
-    User,
-    Guild,
-    Channel,
-    Global,
-}
-
-/// Rate limit attribute.
-struct RateLimit
-{
-    uint count;
-    Duration window;
-    RateLimitBucket bucket;
-
-    this(uint count, Duration window, RateLimitBucket bucket = RateLimitBucket.User)
-    {
-        this.count = count;
-        this.window = window;
-        this.bucket = bucket;
-    }
-}
-
-/// Attribute attaching an autocomplete handler symbol.
-struct Autocomplete(alias handler)
-{
-}
-
-/// High-level command descriptor captured from UDAs.
-struct CommandDescriptor
-{
-    string displayName;
-    string description;
-    CommandRoute routes = CommandRoute.Hybrid;
-    ApplicationCommandType applicationType = ApplicationCommandType.ChatInput;
-    bool stateful;
-    string ownerType;
-    string symbolName;
-    string[] parameterNames;
-    string[] parameterTypes;
-    CommandOptionDescriptor[] options;
-    CommandPolicyDescriptor policy;
-    Result!(CommandExecution, string) delegate(CommandContext, string[]) prefixExecutor;
-    Result!(CommandExecution, string) delegate(CommandContext, string[string]) slashExecutor;
-}
-
-/// High-level option descriptor inferred from a handler parameter.
-struct CommandOptionDescriptor
-{
-    string parameterName;
-    string displayName;
-    string description;
-    string typeName;
-    ApplicationCommandOptionType applicationType = ApplicationCommandOptionType.String;
-    bool required = true;
-    bool greedy;
-}
-
-/// Policy descriptor extracted from command UDAs.
-struct CommandPolicyDescriptor
-{
-    bool ownerOnly;
-    ulong requiredPermissions;
-    bool hasRateLimit;
-    uint rateLimitCount;
-    Duration rateLimitWindow;
-    RateLimitBucket rateLimitBucket = RateLimitBucket.User;
-}
-
-/// Prefix command parse result.
-struct ParsedCommand
-{
-    string name;
-    string[] args;
-    Nullable!CommandDescriptor descriptor;
-}
-
-/// Outcome of a successfully-executed command.
-struct CommandExecution
-{
-    string commandName;
-    size_t replyCount;
-}
-
-/// Runtime settings consulted by command policies.
-struct CommandExecutionSettings
-{
-    Nullable!Snowflake ownerId;
-}
 
 private struct RateLimitWindowState
 {
@@ -276,6 +65,28 @@ final class CommandRegistry
         registerHandlers!handlers(this);
     }
 
+    /// Registers a prebuilt descriptor.
+    void registerDescriptor(CommandDescriptor descriptor)
+    {
+        if (descriptor.displayName.length == 0)
+            return;
+        _descriptors ~= descriptor;
+    }
+
+    /// Removes descriptors matching the predicate.
+    void removeWhere(bool delegate(const(CommandDescriptor)) predicate)
+    {
+        CommandDescriptor[] kept;
+
+        foreach (descriptor; _descriptors)
+        {
+            if (!predicate(descriptor))
+                kept ~= descriptor;
+        }
+
+        _descriptors = kept;
+    }
+
     /// Registers a stateful command group type.
     void register(T)()
     {
@@ -292,14 +103,22 @@ final class CommandRegistry
                         enum hasAttrs = __traits(getAttributes, memberSymbol).length > 0;
                         static if (hasAttrs)
                         {
-                            auto descriptor = describeMember!(T, memberName)();
-                            if (descriptor.displayName.length != 0)
-                                _descriptors ~= descriptor;
+                            registerMember!(T, memberName)();
                         }
                     }
                 }
             }
         }
+    }
+
+    /// Registers a single stateful command member.
+    void registerMember(T, string memberName)()
+    {
+        injectServices!T();
+
+        auto descriptor = describeMember!(T, memberName)();
+        if (descriptor.displayName.length != 0)
+            _descriptors ~= descriptor;
     }
 
     /// Returns the registered descriptors.
@@ -448,13 +267,14 @@ final class CommandRegistry
 
             ApplicationCommandDefinition definition;
             definition.name = descriptor.displayName;
-            definition.description = descriptor.description.length == 0
-                ? "Generated by ddiscord"
-                : descriptor.description;
             definition.type = descriptor.applicationType;
 
             if (descriptor.applicationType == ApplicationCommandType.ChatInput)
             {
+                definition.description = descriptor.description.length == 0
+                    ? "Generated by ddiscord"
+                    : descriptor.description;
+
                 foreach (option; descriptor.options)
                 {
                     ApplicationCommandOption definitionOption;
@@ -502,6 +322,9 @@ final class CommandRegistry
 
     private void injectServices(T)()
     {
+        if (_services.has!T())
+            return;
+
         T instance = T.init;
 
         static foreach (index, _; instance.tupleof)
@@ -630,6 +453,9 @@ private CommandDescriptor describeHandler(alias fn)()
 {
     CommandDescriptor descriptor;
     descriptor.symbolName = __traits(identifier, fn);
+    descriptor.qualifiedName = fullyQualifiedName!fn;
+    descriptor.sourceModule = qualifiedModuleName(descriptor.qualifiedName);
+    descriptor.sourceFile = symbolSourceFile!fn();
     descriptor.parameterNames = parameterNames!fn();
     descriptor.parameterTypes = parameterTypes!fn();
     descriptor.options = optionDescriptors!fn();
@@ -677,6 +503,14 @@ private CommandDescriptor describeHandler(alias fn)()
             descriptor.policy.rateLimitWindow = attr.window;
             descriptor.policy.rateLimitBucket = attr.bucket;
         }
+        else static if (is(typeof(attr) == CommandCategory))
+        {
+            descriptor.category = attr.name;
+        }
+        else static if (AttrIs!(attr, HideFromHelp))
+        {
+            descriptor.hiddenFromHelp = true;
+        }
     }
 
     if (!hasCommandAttr!fn)
@@ -691,6 +525,9 @@ private CommandDescriptor describeMember(T, string memberName)()
     auto descriptor = describeHandler!memberSymbol();
     descriptor.stateful = true;
     descriptor.ownerType = T.stringof;
+    descriptor.ownerQualifiedName = fullyQualifiedName!T;
+    if (descriptor.sourceModule.length == 0)
+        descriptor.sourceModule = qualifiedModuleName(descriptor.ownerQualifiedName);
     descriptor.prefixExecutor = buildStatefulPrefixExecutor!(T, memberName)();
     descriptor.slashExecutor = buildStatefulSlashExecutor!(T, memberName)();
     return descriptor;
@@ -721,7 +558,7 @@ private CommandOptionDescriptor[] optionDescriptors(alias fn)()
 
     static foreach (index, ParamType; ParamTypes)
     {
-        static if (!is(ParamType == CommandContext))
+        static if (!isCommandContextParameter!ParamType)
         {
             {
                 CommandOptionDescriptor option;
@@ -758,6 +595,84 @@ private bool hasCommandAttr(alias fn)()
     }
 
     return result;
+}
+
+private template isCommandContextParameter(T)
+{
+    enum bool isCommandContextParameter =
+        is(T == CommandContext) ||
+        is(T == PrefixCommandContext) ||
+        is(T == SlashCommandContext) ||
+        is(T == ContextMenuCommandContext) ||
+        is(T == HybridCommandContext);
+}
+
+private Result!(T, string) resolveCommandContextParameter(T)(CommandContext ctx)
+{
+    static if (is(T == CommandContext))
+    {
+        return Result!(T, string).ok(ctx);
+    }
+    else static if (is(T == PrefixCommandContext))
+    {
+        if (ctx.source != CommandSource.Prefix)
+        {
+            return Result!(T, string).err(formatError(
+                "commands",
+                "A prefix command context was requested outside a prefix execution.",
+                "",
+                "Use `PrefixCommandContext` only for prefix handlers or `HybridCommandContext` when the handler supports both prefix and slash."
+            ));
+        }
+
+        return Result!(T, string).ok(ctx.asPrefix());
+    }
+    else static if (is(T == SlashCommandContext))
+    {
+        if (ctx.source != CommandSource.Slash)
+        {
+            return Result!(T, string).err(formatError(
+                "commands",
+                "A slash command context was requested outside a slash execution.",
+                "",
+                "Use `SlashCommandContext` only for slash handlers or `HybridCommandContext` when the handler supports both prefix and slash."
+            ));
+        }
+
+        return Result!(T, string).ok(ctx.asSlash());
+    }
+    else static if (is(T == ContextMenuCommandContext))
+    {
+        if (ctx.source != CommandSource.ContextMenu)
+        {
+            return Result!(T, string).err(formatError(
+                "commands",
+                "A context-menu command context was requested outside a context-menu execution.",
+                "",
+                "Use `ContextMenuCommandContext` only for context-menu handlers."
+            ));
+        }
+
+        return Result!(T, string).ok(ctx.asContextMenu());
+    }
+    else static if (is(T == HybridCommandContext))
+    {
+        if (ctx.source == CommandSource.ContextMenu)
+        {
+            return Result!(T, string).err(formatError(
+                "commands",
+                "A hybrid command context was requested for a context-menu execution.",
+                "",
+                "Use `HybridCommandContext` only for prefix/slash flows."
+            ));
+        }
+
+        return Result!(T, string).ok(ctx.asHybrid());
+    }
+    else
+    {
+        static assert(false, "Unsupported command context parameter.");
+    }
 }
 
 private bool routeEnabled(CommandRoute available, CommandRoute requested)
@@ -1017,7 +932,7 @@ private string parseArgumentMessage(
     );
 }
 
-private string handlerFailureMessage(string commandName, Throwable error)
+private string handlerFailureMessage(string commandName, Exception error)
 {
     return formatError(
         "commands",
@@ -1122,9 +1037,12 @@ private Result!(CommandExecution, string) invokeFreePrefix(alias fn)(
     size_t cursor = 0;
     static foreach (index, ParamType; ParamTypes)
     {
-        static if (is(ParamType == CommandContext))
+        static if (isCommandContextParameter!ParamType)
         {
-            bound[index] = ctx;
+            auto resolved = resolveCommandContextParameter!ParamType(ctx);
+            if (resolved.isErr)
+                return Result!(CommandExecution, string).err(resolved.error);
+            bound[index] = resolved.value;
         }
         else
         {
@@ -1218,7 +1136,7 @@ private Result!(CommandExecution, string) invokeFreePrefix(alias fn)(
         else
             auto _ = fn(bound.expand);
     }
-    catch (Throwable error)
+    catch (Exception error)
     {
         return Result!(CommandExecution, string).err(handlerFailureMessage(commandName!fn(), error));
     }
@@ -1242,9 +1160,12 @@ private Result!(CommandExecution, string) invokeFreeSlash(alias fn)(
     static foreach (index, ParamType; ParamTypes)
     {
         {
-            static if (is(ParamType == CommandContext))
+            static if (isCommandContextParameter!ParamType)
             {
-                bound[index] = ctx;
+                auto resolved = resolveCommandContextParameter!ParamType(ctx);
+                if (resolved.isErr)
+                    return Result!(CommandExecution, string).err(resolved.error);
+                bound[index] = resolved.value;
             }
             else
             {
@@ -1290,7 +1211,7 @@ private Result!(CommandExecution, string) invokeFreeSlash(alias fn)(
         else
             auto _ = fn(bound.expand);
     }
-    catch (Throwable error)
+    catch (Exception error)
     {
         return Result!(CommandExecution, string).err(handlerFailureMessage(commandName!fn(), error));
     }
@@ -1315,9 +1236,12 @@ private Result!(CommandExecution, string) invokeStatefulPrefix(T, alias member)(
     size_t cursor = 0;
     static foreach (index, ParamType; ParamTypes)
     {
-        static if (is(ParamType == CommandContext))
+        static if (isCommandContextParameter!ParamType)
         {
-            bound[index] = ctx;
+            auto resolved = resolveCommandContextParameter!ParamType(ctx);
+            if (resolved.isErr)
+                return Result!(CommandExecution, string).err(resolved.error);
+            bound[index] = resolved.value;
         }
         else
         {
@@ -1411,7 +1335,7 @@ private Result!(CommandExecution, string) invokeStatefulPrefix(T, alias member)(
         else
             mixin("auto _ = instance." ~ __traits(identifier, member) ~ "(bound.expand);");
     }
-    catch (Throwable error)
+    catch (Exception error)
     {
         return Result!(CommandExecution, string).err(handlerFailureMessage(commandName!member(), error));
     }
@@ -1436,9 +1360,12 @@ private Result!(CommandExecution, string) invokeStatefulSlash(T, alias member)(
     static foreach (index, ParamType; ParamTypes)
     {
         {
-            static if (is(ParamType == CommandContext))
+            static if (isCommandContextParameter!ParamType)
             {
-                bound[index] = ctx;
+                auto resolved = resolveCommandContextParameter!ParamType(ctx);
+                if (resolved.isErr)
+                    return Result!(CommandExecution, string).err(resolved.error);
+                bound[index] = resolved.value;
             }
             else
             {
@@ -1484,7 +1411,7 @@ private Result!(CommandExecution, string) invokeStatefulSlash(T, alias member)(
         else
             mixin("auto _ = instance." ~ __traits(identifier, member) ~ "(bound.expand);");
     }
-    catch (Throwable error)
+    catch (Exception error)
     {
         return Result!(CommandExecution, string).err(handlerFailureMessage(commandName!member(), error));
     }
@@ -1517,6 +1444,34 @@ private string commandName(alias fn)()
     }
 
     return __traits(identifier, fn);
+}
+
+private string qualifiedModuleName(string qualifiedName)
+{
+    size_t lastDot = size_t.max;
+
+    foreach (index, ch; qualifiedName)
+    {
+        if (ch == '.')
+            lastDot = index;
+    }
+
+    if (lastDot == size_t.max)
+        return qualifiedName;
+
+    return qualifiedName[0 .. lastDot];
+}
+
+private string symbolSourceFile(alias fn)()
+{
+    static if (__traits(compiles, __traits(getLocation, fn)))
+    {
+        return __traits(getLocation, fn)[0];
+    }
+    else
+    {
+        return "";
+    }
 }
 
 private RestClient unittestRestClient()
@@ -1592,7 +1547,7 @@ unittest
     @Command("sum", routes: CommandRoute.Prefix)
     void sum(CommandContext ctx, long left, long right)
     {
-        ctx.reply((left + right).to!string).await();
+        ctx.send((left + right).to!string).await();
     }
 
     auto services = new ServiceContainer;
@@ -1629,7 +1584,7 @@ unittest
         void run(CommandContext ctx, long value)
         {
             auto _ = value;
-            ctx.reply("18").await();
+            ctx.send("18").await();
         }
     }
 
@@ -1655,7 +1610,7 @@ unittest
     @RequireOwner
     void secure(CommandContext ctx)
     {
-        ctx.reply("ok").await();
+        ctx.send("ok").await();
     }
 
     auto services = new ServiceContainer;
@@ -1688,7 +1643,7 @@ unittest
     @RateLimit(1, dur!"seconds"(5), bucket: RateLimitBucket.User)
     void slow(CommandContext ctx)
     {
-        ctx.reply("ok").await();
+        ctx.send("ok").await();
     }
 
     auto services = new ServiceContainer;
@@ -1713,7 +1668,7 @@ unittest
     @HybridCommand("echo", "Echoes text")
     void echo(CommandContext ctx, string text)
     {
-        ctx.reply(text).await();
+        ctx.send(text).await();
     }
 
     auto services = new ServiceContainer;
@@ -1733,6 +1688,59 @@ unittest
     assert(result.isOk);
     assert(rest.messages.history.length == 1);
     assert(rest.messages.history[0].content == "hello");
+}
+
+unittest
+{
+    @Command("whoami", routes: CommandRoute.Prefix)
+    void whoami(PrefixCommandContext ctx)
+    {
+        assert(ctx.isPrefix);
+        ctx.send("prefix").await();
+    }
+
+    auto services = new ServiceContainer;
+    auto registry = new CommandRegistry(services);
+    auto rest = unittestRestClient();
+    registerHandlers!(whoami)(registry);
+
+    CommandContext ctx;
+    ctx.rest = rest;
+    ctx.services = services;
+    ctx.source = CommandSource.Prefix;
+
+    auto result = registry.executePrefix(ctx, "!", "!whoami");
+    assert(result.isOk);
+    assert(rest.messages.history[$ - 1].content == "prefix");
+}
+
+unittest
+{
+    @HybridCommand("route", "Inspect hybrid route")
+    void route(HybridCommandContext ctx, string text = "")
+    {
+        assert(ctx.fromSlash);
+        assert(!ctx.slash.isNull);
+        assert(ctx.prefix.isNull);
+        ctx.send("hybrid:" ~ text).await();
+    }
+
+    auto services = new ServiceContainer;
+    auto registry = new CommandRegistry(services);
+    auto rest = unittestRestClient();
+    registerHandlers!(route)(registry);
+
+    CommandContext ctx;
+    ctx.rest = rest;
+    ctx.services = services;
+    ctx.source = CommandSource.Slash;
+
+    string[string] options;
+    options["text"] = "ok";
+
+    auto result = registry.executeSlash(ctx, "route", options);
+    assert(result.isOk);
+    assert(rest.messages.history[$ - 1].content == "hybrid:ok");
 }
 
 unittest

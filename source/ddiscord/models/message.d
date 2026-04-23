@@ -6,7 +6,7 @@
  */
 module ddiscord.models.message;
 
-import ddiscord.interactions.components : IsComponentsV2Component, componentToJSON;
+import ddiscord.interactions.components : IsComponentsV2Component;
 import ddiscord.models.attachment : Attachment;
 import ddiscord.models.channel : Channel;
 import ddiscord.models.embed : Embed;
@@ -276,7 +276,7 @@ struct MessageCreate
 {
     string content;
     Embed[] embeds;
-    Object[] components;
+    JSONValue[] components;
     MessageFlags flags = MessageFlags.None;
     Nullable!MessageReference messageReference;
     Nullable!AllowedMentions allowedMentions;
@@ -300,7 +300,15 @@ struct MessageCreate
 
     MessageCreate addComponent(T)(T component)
     {
-        components ~= cast(Object) new ComponentBox!T(component);
+        static if (__traits(compiles, component.toJSON()))
+        {
+            components ~= component.toJSON();
+        }
+        else
+        {
+            static assert(false, "MessageCreate.addComponent expects a component that provides toJSON().");
+        }
+
         static if (IsComponentsV2Component!T)
             flags |= MessageFlags.IsComponentsV2;
         return this;
@@ -374,7 +382,7 @@ struct MessageCreate
         {
             JSONValue[] componentValues;
             foreach (component; components)
-                componentValues ~= componentToJSON(component);
+                componentValues ~= component;
             json["components"] = componentValues;
         }
 
@@ -384,16 +392,6 @@ struct MessageCreate
             json["allowed_mentions"] = allowedMentions.get.toJSON();
 
         return json;
-    }
-}
-
-private final class ComponentBox(T) : Object
-{
-    T value;
-
-    this(T value)
-    {
-        this.value = value;
     }
 }
 
@@ -538,6 +536,11 @@ unittest
 
     auto json = payload.toJSON();
     assert(json.object.get("components", JSONValue.init).type == JSONType.array);
+    auto container = json.object.get("components", JSONValue.init)[0];
+    assert(container.object.get("type", JSONValue.init).integer == 17);
+    auto section = container.object.get("components", JSONValue.init)[0];
+    assert(section.object.get("type", JSONValue.init).integer == 9);
+    assert(section.object.get("components", JSONValue.init)[0].object.get("content", JSONValue.init).str == "hello");
 }
 
 unittest

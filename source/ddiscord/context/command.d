@@ -10,7 +10,9 @@ import ddiscord.cache : CacheStore;
 import ddiscord.interactions.components : Modal;
 import ddiscord.models.application_command : AutocompleteChoice;
 import ddiscord.models.channel : Channel;
+import ddiscord.models.guild : Guild;
 import ddiscord.models.interaction : Interaction;
+import ddiscord.models.member : GuildMember;
 import ddiscord.models.message : Message, MessageCreate, MessageFlags;
 import ddiscord.models.user : User;
 import ddiscord.rest : RestClient;
@@ -41,6 +43,8 @@ struct CommandContext
     StateStore state;
     User invoker;
     Channel currentChannel;
+    Nullable!Guild currentGuild;
+    Nullable!GuildMember currentMember;
     ulong permissions;
     long receiveLatencyMilliseconds;
     bool interactionAcknowledged;
@@ -58,17 +62,29 @@ struct CommandContext
         return currentChannel;
     }
 
-    /// Reply overload for string content.
-    Task!void reply(string content, bool ephemeral = false)
+    /// Guild shortcut.
+    Nullable!Guild guild() @property
+    {
+        return currentGuild;
+    }
+
+    /// Member shortcut.
+    Nullable!GuildMember member() @property
+    {
+        return currentMember;
+    }
+
+    /// Sends a message in the current command context.
+    Task!void send(string content, bool ephemeral = false)
     {
         auto payload = MessageCreate(content);
         if (ephemeral)
             payload.setFlag(MessageFlags.Ephemeral);
-        return reply(payload, ephemeral);
+        return send(payload, ephemeral);
     }
 
-    /// Reply overload for payloads.
-    Task!void reply(MessageCreate payload, bool ephemeral = false)
+    /// Sends a payload in the current command context.
+    Task!void send(MessageCreate payload, bool ephemeral = false)
     {
         if (ephemeral)
             payload.setFlag(MessageFlags.Ephemeral);
@@ -84,7 +100,7 @@ struct CommandContext
                 return Task!void.success();
             }
 
-            auto sent = rest.interactions.reply(interaction.get.id, interaction.get.token, payload).awaitResult();
+            auto sent = rest.interactions.send(interaction.get.id, interaction.get.token, payload).awaitResult();
             if (sent.isErr)
                 return Task!void.failure(sent.error);
 
@@ -104,34 +120,22 @@ struct CommandContext
     }
 
     /// Replies to the source message using Discord's native reply payload.
-    Task!void replyToSource(string content, bool mentionAuthor = false, bool ephemeral = false)
+    Task!void reply(string content, bool mentionAuthor = false, bool ephemeral = false)
     {
         auto payload = MessageCreate(content);
-        return replyToSource(payload, mentionAuthor, ephemeral);
+        return reply(payload, mentionAuthor, ephemeral);
     }
 
     /// Replies to the source message using Discord's native reply payload.
-    Task!void replyToSource(MessageCreate payload, bool mentionAuthor = false, bool ephemeral = false)
+    Task!void reply(MessageCreate payload, bool mentionAuthor = false, bool ephemeral = false)
     {
         if (ephemeral)
             payload.setFlag(MessageFlags.Ephemeral);
 
         if (!message.isNull)
-            return reply(message.get.reply(payload, mentionAuthor), false);
+            return send(message.get.reply(payload, mentionAuthor), false);
 
-        return reply(payload, false);
-    }
-
-    /// Short alias for `replyToSource`.
-    Task!void replyTo(string content, bool mentionAuthor = false, bool ephemeral = false)
-    {
-        return replyToSource(content, mentionAuthor, ephemeral);
-    }
-
-    /// Short alias for `replyToSource`.
-    Task!void replyTo(MessageCreate payload, bool mentionAuthor = false, bool ephemeral = false)
-    {
-        return replyToSource(payload, mentionAuthor, ephemeral);
+        return send(payload, false);
     }
 
     /// Sends a deferred acknowledgement for interaction-based commands.
@@ -201,7 +205,7 @@ struct CommandContext
             ));
         }
 
-        auto sent = rest.interactions.respondAutocomplete(interaction.get.id, interaction.get.token, choices).awaitResult();
+        auto sent = rest.interactions.autocomplete(interaction.get.id, interaction.get.token, choices).awaitResult();
         if (sent.isErr)
             return Task!void.failure(sent.error);
 
@@ -222,7 +226,7 @@ struct CommandContext
             ));
         }
 
-        auto sent = rest.interactions.respondModal(interaction.get.id, interaction.get.token, modal).awaitResult();
+        auto sent = rest.interactions.modal(interaction.get.id, interaction.get.token, modal).awaitResult();
         if (sent.isErr)
             return Task!void.failure(sent.error);
 
@@ -261,16 +265,16 @@ struct CommandContext
     }
 
     /// Edits the original interaction response.
-    Task!void editOriginal(string content, bool ephemeral = false)
+    Task!void edit(string content, bool ephemeral = false)
     {
         auto payload = MessageCreate(content);
         if (ephemeral)
             payload.setFlag(MessageFlags.Ephemeral);
-        return editOriginal(payload);
+        return edit(payload);
     }
 
     /// Edits the original interaction response payload.
-    Task!void editOriginal(MessageCreate payload)
+    Task!void edit(MessageCreate payload)
     {
         if (interaction.isNull || interaction.get.token.length == 0)
         {
@@ -278,11 +282,11 @@ struct CommandContext
                 "context",
                 "Editing the original interaction response requires an active interaction token.",
                 "",
-                "Call `editOriginal` only after handling a real interaction."
+                "Call `edit` only after handling a real interaction."
             ));
         }
 
-        auto edited = rest.interactions.editOriginal(interaction.get.token, payload).awaitResult();
+        auto edited = rest.interactions.edit(interaction.get.token, payload).awaitResult();
         if (edited.isErr)
             return Task!void.failure(edited.error);
 
@@ -299,11 +303,125 @@ struct CommandContext
         return interaction.get.targetMessage;
     }
 
+    /// Returns this context as a prefix command context.
+    PrefixCommandContext asPrefix()
+    {
+        PrefixCommandContext ctx;
+        ctx.command = this;
+        return ctx;
+    }
+
+    /// Returns this context as a slash command context.
+    SlashCommandContext asSlash()
+    {
+        SlashCommandContext ctx;
+        ctx.command = this;
+        return ctx;
+    }
+
+    /// Returns this context as a context-menu command context.
+    ContextMenuCommandContext asContextMenu()
+    {
+        ContextMenuCommandContext ctx;
+        ctx.command = this;
+        return ctx;
+    }
+
+    /// Returns this context as a hybrid command context.
+    HybridCommandContext asHybrid()
+    {
+        HybridCommandContext ctx;
+        ctx.command = this;
+        return ctx;
+    }
+
     private Snowflake currentChannelId() const
     {
         if (!message.isNull && message.get.channelId.value != 0)
             return message.get.channelId;
         return currentChannel.id;
+    }
+}
+
+/// Prefix/text command context.
+struct PrefixCommandContext
+{
+    CommandContext command;
+    alias command this;
+
+    Message sourceMessage() @property
+    {
+        return command.message.getOr(Message.init);
+    }
+
+    bool isPrefix() const @property
+    {
+        return command.source == CommandSource.Prefix;
+    }
+}
+
+/// Slash command context.
+struct SlashCommandContext
+{
+    CommandContext command;
+    alias command this;
+
+    Interaction sourceInteraction() @property
+    {
+        return command.interaction.getOr(Interaction.init);
+    }
+
+    bool isSlash() const @property
+    {
+        return command.source == CommandSource.Slash;
+    }
+}
+
+/// Context-menu command context.
+struct ContextMenuCommandContext
+{
+    CommandContext command;
+    alias command this;
+
+    Interaction sourceInteraction() @property
+    {
+        return command.interaction.getOr(Interaction.init);
+    }
+
+    bool isContextMenu() const @property
+    {
+        return command.source == CommandSource.ContextMenu;
+    }
+}
+
+/// Unified hybrid command context spanning prefix and slash flows.
+struct HybridCommandContext
+{
+    CommandContext command;
+    alias command this;
+
+    bool fromPrefix() const @property
+    {
+        return command.source == CommandSource.Prefix;
+    }
+
+    bool fromSlash() const @property
+    {
+        return command.source == CommandSource.Slash;
+    }
+
+    Nullable!PrefixCommandContext prefix() @property
+    {
+        if (!fromPrefix)
+            return Nullable!PrefixCommandContext.init;
+        return Nullable!PrefixCommandContext.of(command.asPrefix());
+    }
+
+    Nullable!SlashCommandContext slash() @property
+    {
+        if (!fromSlash)
+            return Nullable!SlashCommandContext.init;
+        return Nullable!SlashCommandContext.of(command.asSlash());
     }
 }
 
@@ -373,7 +491,7 @@ unittest
     source.channelId = Snowflake(99);
     ctx.message = Nullable!Message.of(source);
 
-    auto sent = ctx.replyTo("hello", true).awaitResult();
+    auto sent = ctx.reply("hello", true).awaitResult();
     assert(sent.isOk);
 
     auto body = parseJSON(cast(string) captured.body);

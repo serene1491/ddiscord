@@ -1,26 +1,55 @@
 # ddiscord
 
-`ddiscord` is a modular Discord bot engine for D with a UDA-first public API.
+A UDA-first Discord bot library for D.
 
-The refactored design in this repository treats UDAs as the primary way to declare:
+> [!NOTE]
+`ddiscord` is an early-stage project (pre-`1.0.0`) developed in the open with AI assistance.  
+This library is also used in personal projects, so changes may be frequent and occasionally breaking until a stable release.
 
-- commands and command options
-- hybrid or slash-only routing
-- permission gates and rate limits
-- stateful handler groups with service injection
-- Lua plugin descriptors and host APIs exposed to Lua
+## Key Features
 
-## Current Status
+- UDA-first command API for prefix, slash, and hybrid commands
+- Real Discord REST and gateway connectivity
+- Typed events, typed models, and typed command inputs
+- Interaction helpers for replies, follow-ups, modals, autocomplete, and deferred responses
+- Components V2 coverage with runnable examples
+- State, cache, rate limiting, services, tasks, and Lua/plugin support
 
-The library currently ships a working core aimed at real bot usage:
+## Installing
 
-- real Discord REST calls over `requests`
-- real Discord gateway sessions over `aurora-websocket` + TLS sockets
-- command sync, prefix handling, slash-command handling, non-command interaction events, modal replies, follow-up/edit interaction replies, rate limits, cache/state, and scheduled tasks
-- file-based Lua plugin loading with sandboxed execution and capability-gated host APIs
-- runnable example bots in `examples/`
+Recommended toolchains:
 
-## Example
+- DMD `>= 2.106`
+- LDC `>= 1.36`
+- `liblua5.4` when you want Lua/plugin features
+
+You can install `ddiscord` directly with DUB:
+
+```sh
+dub add ddiscord
+```
+
+Or add it manually to `dub.json`:
+
+```json
+{
+  "dependencies": {
+    "ddiscord": "~>0.2.0"
+  }
+}
+```
+
+If you want the current development head instead, work from the repository directly:
+
+```sh
+git clone https://github.com/soloverdrive/ddiscord.git
+cd ddiscord
+dub test
+```
+
+Runnable example consoles live under [`examples/`](examples/README.md).
+
+## Quick Example
 
 ```d
 import ddiscord;
@@ -29,7 +58,7 @@ import std.path : buildPath;
 @Command("ping", description: "Check the bot latency", routes: CommandRoute.Prefix)
 void handlePing(CommandContext ctx)
 {
-    ctx.reply("Pong!").await();
+    ctx.send("Pong!").await();
 }
 
 void main()
@@ -42,25 +71,209 @@ void main()
         prefix: "!"
     ));
 
-    client.registerAllCommands!handlePing();
+    client.registerCommands();
     client.run();
     client.wait();
 }
 ```
 
-## Lua
+## More Examples
 
-Lua integrations are also attribute-driven:
+### Slash command with an ephemeral response
 
-- `@LuaPlugin` declares the host-side descriptor for a Lua bundle
-- `@LuaExpose` marks D functions or methods that may be injected into Lua
-- sandbox profile and permission grants decide what is actually visible at runtime
-- untrusted scripts only receive safe proxy tables and capability-gated functions
-- file-based plugins can be loaded from `plugin.json` + `.lua` entrypoints and executed during client startup
+```d
+@Command("userinfo", description: "Show information about a user", routes: CommandRoute.Slash)
+void handleUserInfo(CommandContext ctx, Nullable!User target = Nullable!User.init)
+{
+    auto resolved = target.isNull ? ctx.user : target.get;
+    ctx.send("User: " ~ resolved.mention, ephemeral: true).await();
+}
+```
 
-## Docs
+### Native message reply versus normal send
 
-- [docs/index.md](docs/index.md) for user-facing guides
-- [examples/README.md](examples/README.md) for runnable consoles
+```d
+@HybridCommand("hello", "Reply to the caller")
+void handleHello(CommandContext ctx)
+{
+    if (ctx.source == CommandSource.Prefix)
+        ctx.reply("Hello there.", mentionAuthor: true).await();
+    else
+        ctx.send("Hello there.", ephemeral: true).await();
+}
+```
 
-The client now ships with default console logging at `Information` level, so connection, sync, owner-configuration warnings, command failures, and plugin lifecycle problems are visible without extra setup. Successful command timing logs are available at `Debug`.
+### Long-running interaction flow
+
+```d
+@Command("build", description: "Run a longer task", routes: CommandRoute.Slash)
+void handleBuild(CommandContext ctx)
+{
+    ctx.think(ephemeral: true).await();
+    ctx.edit("Finished the build.").await();
+}
+```
+
+### Opening a modal
+
+```d
+@Command("report", description: "Open a report modal", routes: CommandRoute.Slash)
+void handleReport(CommandContext ctx)
+{
+    auto modal = Modal("report_modal", "Report User")
+        .addTextInput(TextInput("reason", "Reason"));
+
+    ctx.showModal(modal).await();
+}
+```
+
+### Event handlers with `@Event`
+
+```d
+@Event
+void handleReady(ReadyEventContext ctx)
+{
+    import std.stdio : writeln;
+    writeln("Ready as ", ctx.selfUser.username);
+}
+```
+
+`@Event` handlers can receive either the event itself, such as `ReadyEvent`, or its richer
+context type, such as `ReadyEventContext`.
+
+`@Event` is the event-side UDA entrypoint, matching the same registration style used for commands.
+Each shipped event now has its own context companion so follow-up work stays fluent without
+throwing away the smaller payload structs. Those contexts expose `rest`, `cache`, `services`,
+`state`, `logger`, and current cached entities like `ctx.user`, `ctx.guild`, `ctx.channel`,
+`ctx.message`, or `ctx.interaction` when they are available.
+
+```d
+@Event
+void auditMessage(MessageCreateEventContext ctx)
+{
+    import std.stdio : writeln;
+
+    auto guildText = ctx.guild.isNull ? "DM" : ctx.guild.get.name;
+    writeln("[", guildText, "] ", ctx.message.content);
+}
+```
+
+### Hybrid command contexts
+
+```d
+@HybridCommand("where", "Show how the command was invoked")
+void handleWhere(HybridCommandContext ctx)
+{
+    if (ctx.fromPrefix)
+        ctx.reply("You used the prefix route.").await();
+    else
+        ctx.send("You used the slash route.", ephemeral: true).await();
+}
+```
+
+## Auto Registration
+
+The simplest path is now module-local registration:
+
+```d
+client.registerCommands();
+client.registerAllCommands();
+```
+
+- `registerCommands()` scans the current module and registers command handlers only
+- `registerAllCommands()` scans the current module and also wires `@Event` handlers, stateful command groups, and plugin descriptor types
+
+Both helpers accept filters, so you can keep registration short without giving up control:
+
+```d
+auto filter = CommandRegistrationFilter
+    .modules("app")
+    .exceptNames("debug")
+    .exceptCategories("Internal");
+
+client.registerAllCommands(filter);
+```
+
+Useful filter targets include module names, owner types, command names, and `@CommandCategory`
+values.
+
+## Built-in Help and Error Surfacing
+
+The client now ships a built-in `help` command by default. It uses embeds or Components V2,
+supports pagination, and can be fully customized by swapping how entries and pages are rendered.
+
+```d
+@CommandCategory("Utility")
+@HybridCommand("ping", "Check the bot latency")
+void handlePing(CommandContext ctx)
+{
+    ctx.send("Pong!").await();
+}
+
+@HideFromHelp
+@Command("debug-cache", routes: CommandRoute.Prefix)
+void debugCache(CommandContext ctx)
+{
+    ctx.send("cache ok").await();
+}
+
+void main()
+{
+    auto client = new Client(ClientConfig(token: "...", intents: 0));
+
+    client.registerCommands();
+    client.helpBehavior.pageSize = 4;
+    client.errorBehavior.surfaceUnknownCommand = true;
+    client.errorBehavior.surfaceArgumentErrors = true;
+}
+```
+
+Out of the box, the client can surface things like unknown commands, missing arguments, invalid
+arguments, and handler failures. That behavior is also customizable through `client.errorBehavior`.
+
+## Library Status
+
+| Area | Status | Notes |
+| --- | --- | --- |
+| REST core | usable | real HTTP transport, command sync, messages, users, apps, and interaction callbacks |
+| Gateway | usable | live sessions, heartbeat, resume/reconnect basics, typed dispatch integration |
+| Commands | active | prefix, slash, hybrid, permissions, rate limits, and service-backed handlers |
+| Components and modals | growing | buttons, selects, modals, and Components V2 are present and evolving |
+| State, cache, tasks | available | cache store, scoped state, and scheduled tasks are already shipped |
+| Lua and plugins | experimental | useful today, but still changing quickly |
+| Voice / calls | early | only surface-level groundwork for now |
+
+## Examples
+
+- [`examples/basic-bot`](examples/basic-bot/source/app.d): prefix + slash basics
+- [`examples/full-bot`](examples/full-bot/source/app.d): state, permissions, rate limits, and components
+- [`examples/plugin-bot`](examples/plugin-bot/source/app.d): Lua host APIs and file-based plugins
+- [`examples/test-bot`](examples/test-bot/source/app.d): integration-oriented validation bot with startup REST checks
+- [`examples/help-bot`](examples/help-bot/source/app.d): built-in help customization and error behavior
+- [`examples/filter-bot`](examples/filter-bot/source/app.d): module auto-registration filters in practice
+- [`examples/lua-scripting-bot`](examples/lua-scripting-bot/source/app.d): persisted user scripts with SQLite + Dorm
+
+## Documentation
+
+- [`docs/client.md`](docs/client.md) for the runtime/client guide
+- [`examples/README.md`](examples/README.md) for the runnable consoles
+- [`agent-docs/`](agent-docs) for architecture and contribution notes during development
+- [`CHANGELOG.md`](CHANGELOG.md) for release notes in progress
+
+## Current API Direction
+
+The public naming is being tightened before `1.0.0`:
+
+- `ctx.send(...)` is the normal response helper
+- `ctx.reply(...)` is the native reply helper
+- `ctx.edit(...)` edits the original interaction response
+- `client.registerCommands()` and `client.registerAllCommands()` scan the current module by default
+- `CommandRegistrationFilter` narrows auto-registration by module, owner, name, or category
+- built-in `help` is enabled by default and can render through embeds or Components V2
+- `@CommandCategory` and `@HideFromHelp` shape the default help output
+- `client.errorBehavior` controls how command failures are surfaced back to users
+- events now have typed context companions such as `ReadyEventContext` and `MessageCreateEventContext`
+- command outcome events now expose route-aware helpers like `prefix`, `slash`, `contextMenu`, and `hybrid`
+- `@Event` can register event handlers through `client.registerAllCommands!(...)`
+
+That means pre-`1.0.0` consistency wins over keeping older aliases around.
