@@ -7,14 +7,17 @@
 module ddiscord.plugins;
 
 import ddiscord.logging : Logger;
-import ddiscord.scripting : LuaCapability, LuaExpose, LuaRuntime, LuaSandboxProfile, ScriptingEngine;
+import ddiscord.scripting : LuaCapability, LuaExpose, LuaRuntime, LuaSandboxProfile, ScriptingEngine,
+    allLuaCapabilities;
 import ddiscord.state : StateStore;
 import ddiscord.util.errors : formatError;
 import ddiscord.util.optional : Nullable;
 import std.algorithm : canFind;
-import std.file : SpanMode, dirEntries, exists, isDir, readText;
+import std.conv : to;
+import std.file : SpanMode, dirEntries, exists, getSize, isDir, readText;
 import std.json : JSONType, JSONValue, parseJSON;
 import std.path : absolutePath, baseName, buildPath, dirName, extension, relativePath;
+import std.string : startsWith;
 
 /// The plugin manifest API generation supported by this build.
 enum CurrentPluginApiVersion = "2";
@@ -43,7 +46,7 @@ struct PluginDescriptor
     string resolvedEntrypoint;
     string pluginVersion = "0.0.0";
     string apiVersion = CurrentPluginApiVersion;
-    LuaSandboxProfile sandbox;
+    LuaSandboxProfile sandbox = LuaSandboxProfile.Untrusted;
     LuaCapability[] permissions;
 }
 
@@ -56,15 +59,66 @@ struct PluginRuntimeState
     Nullable!string lastError;
 }
 
+/// Hardening options for file-based plugin discovery and activation.
+struct PluginSecurityPolicy
+{
+    /// When false, only manifest-driven plugins are loaded.
+    bool allowLooseScripts = true;
+
+    /// When false, manifest entrypoints must stay under the plugin directory.
+    bool allowEntrypointOutsidePluginDirectory = false;
+
+    /// When true, untrusted file plugins without declared permissions receive zero host capabilities.
+    bool requireDeclaredPermissionsForUntrusted = false;
+
+    /// Maximum accepted plugin manifest size in bytes.
+    size_t maxManifestBytes = 256 * 1024;
+}
+
 private struct PluginHostApi
 {
     string pluginName;
+    string pluginVersion;
+    string pluginApiVersion;
+    string pluginEntrypoint;
+    string pluginSandbox;
     StateStore state;
+    Logger logger;
 
     @LuaExpose("plugin_name", LuaCapability.ContextRead)
     string pluginNameValue()
     {
         return pluginName;
+    }
+
+    @LuaExpose("plugin_version", LuaCapability.ContextRead)
+    string pluginVersionValue()
+    {
+        return pluginVersion;
+    }
+
+    @LuaExpose("plugin_api_version", LuaCapability.ContextRead)
+    string pluginApiVersionValue()
+    {
+        return pluginApiVersion;
+    }
+
+    @LuaExpose("plugin_entrypoint", LuaCapability.ContextRead)
+    string pluginEntrypointValue()
+    {
+        return pluginEntrypoint;
+    }
+
+    @LuaExpose("plugin_sandbox", LuaCapability.ContextRead)
+    string pluginSandboxValue()
+    {
+        return pluginSandbox;
+    }
+
+    @LuaExpose("state_prefix", LuaCapability.ContextRead)
+    string statePrefix()
+    {
+        return "plugin:" ~ pluginName ~ ":";
     }
 
     @LuaExpose("state_get", LuaCapability.StateRead)
@@ -77,6 +131,42 @@ private struct PluginHostApi
     void stateSet(string key, string value)
     {
         state.global.set("plugin:" ~ pluginName ~ ":" ~ key, value);
+    }
+
+    @LuaExpose("state_has", LuaCapability.StateRead)
+    bool stateHas(string key)
+    {
+        return state.global.has("plugin:" ~ pluginName ~ ":" ~ key);
+    }
+
+    @LuaExpose("state_del", LuaCapability.StateWrite)
+    void stateDelete(string key)
+    {
+        state.global.remove("plugin:" ~ pluginName ~ ":" ~ key);
+    }
+
+    @LuaExpose("log_info", LuaCapability.LogWrite)
+    void logInfo(string message)
+    {
+        if (logger is null)
+            return;
+        logger.information("plugins", "[" ~ pluginName ~ "] " ~ message);
+    }
+
+    @LuaExpose("log_warn", LuaCapability.LogWrite)
+    void logWarn(string message)
+    {
+        if (logger is null)
+            return;
+        logger.warning("plugins", "[" ~ pluginName ~ "] " ~ message);
+    }
+
+    @LuaExpose("log_error", LuaCapability.LogWrite)
+    void logError(string message)
+    {
+        if (logger is null)
+            return;
+        logger.error("plugins", "[" ~ pluginName ~ "] " ~ message);
     }
 }
 
@@ -93,6 +183,7 @@ private final class LoadedPlugin
 final class PluginRegistry
 {
     Logger logger;
+    PluginSecurityPolicy security;
 
     private PluginDescriptor[] _descriptors;
     private LoadedPlugin[] _loaded;
@@ -139,7 +230,11 @@ final class PluginRegistry
             }
 
             if (extension(entry.name) == ".lua")
+            {
+                if (!security.allowLooseScripts)
+                    continue;
                 loadLooseScript(entry.name, directory);
+            }
         }
     }
 
@@ -192,10 +287,27 @@ final class PluginRegistry
                 continue;
             }
 
+            auto permissions = effectivePermissions(descriptor, security);
+            if (permissions.length == 0 && logger !is null)
+            {
+                logger.warning(
+                    "plugins",
+                    "Plugin `" ~ descriptor.pluginName ~ "` is untrusted and did not declare permissions; host API exports were disabled by policy."
+                );
+            }
+
             auto runtime = scripting.open!PluginHostApi(
-                PluginHostApi(descriptor.pluginName, state),
+                PluginHostApi(
+                    descriptor.pluginName,
+                    descriptor.pluginVersion,
+                    descriptor.apiVersion,
+                    descriptor.resolvedEntrypoint,
+                    sandboxLabel(descriptor.sandbox),
+                    state,
+                    logger
+                ),
                 descriptor.sandbox,
-                descriptor.permissions
+                permissions
             );
 
             auto evalResult = runtime.evalFile(descriptor.resolvedEntrypoint);
@@ -346,6 +458,30 @@ final class PluginRegistry
 
     private void loadManifest(string manifestPath, string rootDirectory)
     {
+        if (security.maxManifestBytes > 0)
+        {
+            try
+            {
+                auto bytes = getSize(manifestPath);
+                if (bytes > security.maxManifestBytes)
+                {
+                    auto message = formatError(
+                        "plugins",
+                        "A plugin manifest exceeded the configured size limit.",
+                        "Manifest `" ~ manifestPath ~ "` has `" ~ bytes.to!string ~ "` bytes.",
+                        "Reduce the manifest size or increase `PluginRegistry.security.maxManifestBytes`."
+                    );
+                    _loadErrors ~= message;
+                    if (logger !is null)
+                        logger.error("plugins", message);
+                    return;
+                }
+            }
+            catch (Exception)
+            {
+            }
+        }
+
         JSONValue json;
         try
             json = parseJSON(readText(manifestPath));
@@ -366,20 +502,16 @@ final class PluginRegistry
         PluginDescriptor descriptor;
         descriptor.typeName = "lua:" ~ manifestPath;
 
-        auto nameValue = json.object.get("name", JSONValue.init);
-        if (nameValue.type != JSONType.null_)
-            descriptor.pluginName = nameValue.str;
+        descriptor.pluginName = jsonStringValue(json, "name");
+        auto versionText = jsonStringValue(json, "version");
+        if (versionText.length != 0)
+            descriptor.pluginVersion = versionText;
+        auto apiVersion = jsonStringValue(json, "ddiscordApiVersion");
+        if (apiVersion.length != 0)
+            descriptor.apiVersion = apiVersion;
 
-        auto versionValue = json.object.get("version", JSONValue.init);
-        if (versionValue.type != JSONType.null_)
-            descriptor.pluginVersion = versionValue.str;
-
-        auto apiVersionValue = json.object.get("ddiscordApiVersion", JSONValue.init);
-        if (apiVersionValue.type != JSONType.null_)
-            descriptor.apiVersion = apiVersionValue.str;
-
-        auto sandboxValue = json.object.get("sandbox", JSONValue.init);
-        if (sandboxValue.type != JSONType.null_ && sandboxValue.str == "trusted")
+        auto sandboxValue = jsonStringValue(json, "sandbox");
+        if (sandboxValue == "trusted")
             descriptor.sandbox = LuaSandboxProfile.Trusted;
 
         auto permissionsValue = json.object.get("permissions", JSONValue.init);
@@ -387,36 +519,83 @@ final class PluginRegistry
         {
             foreach (item; permissionsValue.array)
             {
+                if (item.type != JSONType.string)
+                    continue;
                 auto permission = parseCapability(item.str);
                 if (!permission.isNull)
                     descriptor.permissions ~= permission.get;
             }
         }
 
+        bool explicitEntrypointRequested;
+
         auto scriptsValue = json.object.get("scripts", JSONValue.init);
-        if (scriptsValue.type == JSONType.array && scriptsValue.array.length != 0)
+        if (scriptsValue.type == JSONType.array)
         {
-            auto entry = scriptsValue.array[0].str;
-            descriptor.entrypoint = relativeOrOriginal(resolveScriptPath(entry, manifestPath), rootDirectory);
-            descriptor.resolvedEntrypoint = resolveScriptPath(entry, manifestPath);
+            explicitEntrypointRequested = true;
+            foreach (item; scriptsValue.array)
+            {
+                if (item.type != JSONType.string)
+                    continue;
+
+                auto resolved = resolveManifestScriptPath(
+                    item.str,
+                    manifestPath,
+                    security.allowEntrypointOutsidePluginDirectory
+                );
+                if (resolved.isNull)
+                    continue;
+                descriptor.entrypoint = relativeOrOriginal(resolved.get, rootDirectory);
+                descriptor.resolvedEntrypoint = resolved.get;
+                break;
+            }
         }
 
-        auto entrypointValue = json.object.get("entrypoint", JSONValue.init);
-        if (descriptor.entrypoint.length == 0 && entrypointValue.type != JSONType.null_)
+        auto entrypoint = jsonStringValue(json, "entrypoint");
+        if (descriptor.entrypoint.length == 0 && entrypoint.length != 0)
         {
-            auto entry = entrypointValue.str;
-            descriptor.entrypoint = relativeOrOriginal(resolveScriptPath(entry, manifestPath), rootDirectory);
-            descriptor.resolvedEntrypoint = resolveScriptPath(entry, manifestPath);
+            explicitEntrypointRequested = true;
+            auto resolved = resolveManifestScriptPath(
+                entrypoint,
+                manifestPath,
+                security.allowEntrypointOutsidePluginDirectory
+            );
+            if (!resolved.isNull)
+            {
+                descriptor.entrypoint = relativeOrOriginal(resolved.get, rootDirectory);
+                descriptor.resolvedEntrypoint = resolved.get;
+            }
         }
 
         if (descriptor.pluginName.length == 0)
             descriptor.pluginName = baseName(dirName(manifestPath));
 
-        if (descriptor.entrypoint.length == 0)
+        if (descriptor.entrypoint.length == 0 && !explicitEntrypointRequested)
         {
-            auto fallback = buildPath(dirName(manifestPath), "main.lua");
-            descriptor.entrypoint = relativeOrOriginal(fallback, rootDirectory);
-            descriptor.resolvedEntrypoint = fallback;
+            auto fallback = resolveManifestScriptPath(
+                "main.lua",
+                manifestPath,
+                security.allowEntrypointOutsidePluginDirectory
+            );
+            if (!fallback.isNull)
+            {
+                descriptor.entrypoint = relativeOrOriginal(fallback.get, rootDirectory);
+                descriptor.resolvedEntrypoint = fallback.get;
+            }
+        }
+
+        if (descriptor.resolvedEntrypoint.length == 0)
+        {
+            auto message = formatError(
+                "plugins",
+                "A plugin manifest points to an invalid entrypoint path.",
+                "Manifest `" ~ manifestPath ~ "` does not resolve to a safe Lua file path.",
+                "Set `entrypoint`/`scripts` to a file inside the plugin directory or enable `allowEntrypointOutsidePluginDirectory`."
+            );
+            _loadErrors ~= message;
+            if (logger !is null)
+                logger.error("plugins", message);
+            return;
         }
 
         appendIfMissing(descriptor);
@@ -463,11 +642,26 @@ final class PluginRegistry
     }
 }
 
-private string resolveScriptPath(string entry, string manifestPath)
+private Nullable!string resolveManifestScriptPath(
+    string entry,
+    string manifestPath,
+    bool allowOutsidePluginDirectory
+)
 {
+    if (entry.length == 0)
+        return Nullable!string.init;
+
+    auto manifestDirectory = absolutePath(dirName(manifestPath));
+    string resolved;
     if (isAbsoluteLike(entry))
-        return absolutePath(entry);
-    return absolutePath(buildPath(dirName(manifestPath), entry));
+        resolved = absolutePath(entry);
+    else
+        resolved = absolutePath(buildPath(manifestDirectory, entry));
+
+    if (allowOutsidePluginDirectory || pathIsWithin(manifestDirectory, resolved))
+        return Nullable!string.of(resolved);
+
+    return Nullable!string.init;
 }
 
 private string relativeOrOriginal(string path, string rootDirectory)
@@ -475,6 +669,22 @@ private string relativeOrOriginal(string path, string rootDirectory)
     if (rootDirectory.length == 0)
         return path;
     return relativePath(path, absolutePath(rootDirectory));
+}
+
+private string jsonStringValue(JSONValue root, string key)
+{
+    auto value = root.object.get(key, JSONValue.init);
+    if (value.type == JSONType.string)
+        return value.str;
+    return "";
+}
+
+private bool pathIsWithin(string root, string path)
+{
+    auto relative = relativePath(path, root);
+    if (relative.length == 0 || relative == ".")
+        return true;
+    return !relative.startsWith("..") && !relative.startsWith("../") && !relative.startsWith("..\\");
 }
 
 private Nullable!LuaCapability parseCapability(string value)
@@ -491,9 +701,35 @@ private Nullable!LuaCapability parseCapability(string value)
             return Nullable!LuaCapability.of(LuaCapability.StateWrite);
         case "http":
             return Nullable!LuaCapability.of(LuaCapability.Http);
+        case "log.write":
+            return Nullable!LuaCapability.of(LuaCapability.LogWrite);
         default:
             return Nullable!LuaCapability.init;
     }
+}
+
+private LuaCapability[] effectivePermissions(PluginDescriptor descriptor, PluginSecurityPolicy security)
+{
+    if (descriptor.permissions.length != 0)
+        return descriptor.permissions;
+
+    // UDA-backed plugin descriptors are authored in trusted D code; keep legacy behavior.
+    if (!descriptor.typeName.startsWith("lua:"))
+        return allLuaCapabilities();
+
+    if (descriptor.sandbox == LuaSandboxProfile.Trusted)
+        return allLuaCapabilities();
+
+    if (security.requireDeclaredPermissionsForUntrusted)
+        return [];
+
+    // Default minimal capability set for undeclared untrusted plugins.
+    return [LuaCapability.ContextRead];
+}
+
+private string sandboxLabel(LuaSandboxProfile profile)
+{
+    return profile == LuaSandboxProfile.Trusted ? "trusted" : "untrusted";
 }
 
 private bool isAbsoluteLike(string path)
@@ -516,6 +752,10 @@ unittest
 
     assert(registry.registeredNames == ["counter"]);
     assert(registry.find("counter").get.entrypoint == "counter.lua");
+
+    auto descriptor = registry.find("counter").get;
+    auto permissions = effectivePermissions(descriptor, PluginSecurityPolicy.init);
+    assert(permissions.length == allLuaCapabilities.length);
 }
 
 unittest
@@ -533,7 +773,7 @@ unittest
     mkdirRecurse(buildPath(root, "counter"));
     write(
         buildPath(root, "counter", "plugin.json"),
-        `{"name":"counter","version":"1.0.0","ddiscordApiVersion":"2","scripts":["main.lua"],"permissions":["state.read","state.write"],"sandbox":"trusted"}`
+        `{"name":"counter","version":"1.0.0","ddiscordApiVersion":"2","scripts":["main.lua"],"permissions":["state.read","state.write","log.write"],"sandbox":"trusted"}`
     );
     write(
         buildPath(root, "counter", "main.lua"),
@@ -552,8 +792,35 @@ unittest
     }
 
     assert(registry.find("counter").get.sandbox == LuaSandboxProfile.Trusted);
-    assert(registry.find("counter").get.permissions.length == 2);
+    assert(registry.find("counter").get.permissions.length == 3);
     assert(sawLoose);
+}
+
+unittest
+{
+    import std.file : mkdirRecurse, rmdirRecurse, write;
+
+    auto root = "plugins-no-loose-unittest";
+    scope(exit)
+    {
+        if (exists(root))
+            rmdirRecurse(root);
+    }
+
+    mkdirRecurse(buildPath(root, "counter"));
+    write(
+        buildPath(root, "counter", "plugin.json"),
+        `{"name":"counter","ddiscordApiVersion":"2","scripts":["main.lua"]}`
+    );
+    write(buildPath(root, "counter", "main.lua"), "function onEnable() end\n");
+    write(buildPath(root, "loose.lua"), "function onEnable() end\n");
+
+    auto registry = new PluginRegistry;
+    registry.security.allowLooseScripts = false;
+    registry.loadAll(root);
+
+    assert(!registry.find("counter").isNull);
+    assert(registry.find("loose.lua").isNull);
 }
 
 unittest
@@ -587,6 +854,108 @@ unittest
     assert(registry.runtimeStates.length == 1);
     assert(registry.runtimeStates[0].enabled);
     assert(state.global.get!string("plugin:counter:status") == "enabled");
+}
+
+unittest
+{
+    import std.file : mkdirRecurse, rmdirRecurse, write;
+
+    auto root = "plugins-default-permissions-unittest";
+    scope(exit)
+    {
+        if (exists(root))
+            rmdirRecurse(root);
+    }
+
+    mkdirRecurse(buildPath(root, "minimal"));
+    write(
+        buildPath(root, "minimal", "plugin.json"),
+        `{"name":"minimal","ddiscordApiVersion":"2","scripts":["main.lua"]}`
+    );
+    write(
+        buildPath(root, "minimal", "main.lua"),
+        "function onEnable() if state_set then state_set('status', 'enabled') end end\n"
+    );
+
+    auto registry = new PluginRegistry;
+    registry.loadAll(root);
+    auto descriptor = registry.find("minimal").get;
+    auto permissions = effectivePermissions(descriptor, PluginSecurityPolicy.init);
+    assert(permissions.length == 1);
+    assert(permissions[0] == LuaCapability.ContextRead);
+}
+
+unittest
+{
+    import std.file : mkdirRecurse, rmdirRecurse, write;
+
+    auto root = "plugins-strict-permissions-unittest";
+    scope(exit)
+    {
+        if (exists(root))
+            rmdirRecurse(root);
+    }
+
+    mkdirRecurse(buildPath(root, "minimal"));
+    write(
+        buildPath(root, "minimal", "plugin.json"),
+        `{"name":"minimal","ddiscordApiVersion":"2","scripts":["main.lua"]}`
+    );
+    write(buildPath(root, "minimal", "main.lua"), "function onEnable() end\n");
+
+    auto registry = new PluginRegistry;
+    registry.security.requireDeclaredPermissionsForUntrusted = true;
+    registry.loadAll(root);
+    auto descriptor = registry.find("minimal").get;
+    auto permissions = effectivePermissions(descriptor, registry.security);
+    assert(permissions.length == 0);
+}
+
+unittest
+{
+    import std.file : mkdirRecurse, rmdirRecurse, write;
+
+    auto root = "plugins-entrypoint-path-unittest";
+    scope(exit)
+    {
+        if (exists(root))
+            rmdirRecurse(root);
+    }
+
+    mkdirRecurse(buildPath(root, "sample"));
+    write(
+        buildPath(root, "sample", "plugin.json"),
+        `{"name":"sample","ddiscordApiVersion":"2","entrypoint":"../outside.lua"}`
+    );
+    write(buildPath(root, "outside.lua"), "function onEnable() end\n");
+
+    auto registry = new PluginRegistry;
+    registry.loadAll(root);
+    assert(registry.find("sample").isNull);
+}
+
+unittest
+{
+    import std.file : mkdirRecurse, rmdirRecurse, write;
+
+    auto root = "plugins-entrypoint-optout-unittest";
+    scope(exit)
+    {
+        if (exists(root))
+            rmdirRecurse(root);
+    }
+
+    mkdirRecurse(buildPath(root, "sample"));
+    write(
+        buildPath(root, "sample", "plugin.json"),
+        `{"name":"sample","ddiscordApiVersion":"2","entrypoint":"../outside.lua"}`
+    );
+    write(buildPath(root, "outside.lua"), "function onEnable() end\n");
+
+    auto registry = new PluginRegistry;
+    registry.security.allowEntrypointOutsidePluginDirectory = true;
+    registry.loadAll(root);
+    assert(!registry.find("sample").isNull);
 }
 
 unittest

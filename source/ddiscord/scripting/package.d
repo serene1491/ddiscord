@@ -23,6 +23,7 @@ enum LuaCapability
     StateRead,
     StateWrite,
     Http,
+    LogWrite,
 }
 
 /// Sandbox profiles for Lua execution.
@@ -367,49 +368,67 @@ struct LuaRuntime
     /// Evaluates a Lua snippet.
     Result!(string, ScriptError) eval(string code)
     {
-        if (code.length == 0)
-            return Result!(string, ScriptError).err(ScriptError("empty script", 0));
-
-        if (_vm is null)
-            return Result!(string, ScriptError).err(ScriptError("runtime is not initialized", 0));
-
-        auto result = _vm.evalValue(code);
+        auto result = evalTyped(code);
         if (result.isErr)
             return Result!(string, ScriptError).err(result.error);
 
         return Result!(string, ScriptError).ok(result.value.toDisplayString());
+    }
+
+    /// Evaluates Lua and returns the typed bridge value.
+    Result!(LuaValue, ScriptError) evalTyped(string code)
+    {
+        if (code.length == 0)
+            return Result!(LuaValue, ScriptError).err(ScriptError("empty script", 0));
+
+        if (_vm is null)
+            return Result!(LuaValue, ScriptError).err(ScriptError("runtime is not initialized", 0));
+
+        return _vm.evalValue(code);
     }
 
     /// Evaluates a Lua file from disk.
     Result!(string, ScriptError) evalFile(string path)
     {
-        if (path.length == 0)
-            return Result!(string, ScriptError).err(ScriptError("empty path", 0));
-
-        if (_vm is null)
-            return Result!(string, ScriptError).err(ScriptError("runtime is not initialized", 0));
-
-        auto result = _vm.evalFileValue(path);
+        auto result = evalFileTyped(path);
         if (result.isErr)
             return Result!(string, ScriptError).err(result.error);
 
         return Result!(string, ScriptError).ok(result.value.toDisplayString());
     }
 
+    /// Evaluates a Lua file and returns the typed bridge value.
+    Result!(LuaValue, ScriptError) evalFileTyped(string path)
+    {
+        if (path.length == 0)
+            return Result!(LuaValue, ScriptError).err(ScriptError("empty path", 0));
+
+        if (_vm is null)
+            return Result!(LuaValue, ScriptError).err(ScriptError("runtime is not initialized", 0));
+
+        return _vm.evalFileValue(path);
+    }
+
     /// Calls an already-loaded global Lua function.
     Result!(string, ScriptError) call(string globalName, LuaValue[] args = null)
     {
-        if (globalName.length == 0)
-            return Result!(string, ScriptError).err(ScriptError("empty function name", 0));
-
-        if (_vm is null)
-            return Result!(string, ScriptError).err(ScriptError("runtime is not initialized", 0));
-
-        auto result = _vm.callValue(globalName, args);
+        auto result = callTyped(globalName, args);
         if (result.isErr)
             return Result!(string, ScriptError).err(result.error);
 
         return Result!(string, ScriptError).ok(result.value.toDisplayString());
+    }
+
+    /// Calls an already-loaded global Lua function and returns typed bridge data.
+    Result!(LuaValue, ScriptError) callTyped(string globalName, LuaValue[] args = null)
+    {
+        if (globalName.length == 0)
+            return Result!(LuaValue, ScriptError).err(ScriptError("empty function name", 0));
+
+        if (_vm is null)
+            return Result!(LuaValue, ScriptError).err(ScriptError("runtime is not initialized", 0));
+
+        return _vm.callValue(globalName, args);
     }
 
     /// Returns whether a named Lua global exists and is callable.
@@ -462,6 +481,19 @@ final class ScriptingEngine
         runtime._vm = new LuaVm(profile, callables);
         return runtime;
     }
+}
+
+/// Returns every capability currently known by this build.
+LuaCapability[] allLuaCapabilities()
+{
+    return [
+        LuaCapability.ContextRead,
+        LuaCapability.DiscordReply,
+        LuaCapability.StateRead,
+        LuaCapability.StateWrite,
+        LuaCapability.Http,
+        LuaCapability.LogWrite,
+    ];
 }
 
 private final class BindingBox(T)
@@ -952,6 +984,11 @@ unittest
     auto called = runtime.call("greet", [LuaValue.from("world")]);
     assert(called.isOk);
     assert(called.value == "hello world");
+
+    auto typed = runtime.callTyped("greet", [LuaValue.from("world")]);
+    assert(typed.isOk);
+    assert(typed.value.kind == LuaValue.Kind.String);
+    assert(typed.value.stringValue == "hello world");
 }
 
 unittest
@@ -994,4 +1031,11 @@ unittest
     assert(runtime.exports.length == 1);
     assert(runtime.hasExport("author"));
     assert(!runtime.hasExport("ping"));
+}
+
+unittest
+{
+    auto capabilities = allLuaCapabilities();
+    assert(capabilities.canFind(LuaCapability.ContextRead));
+    assert(capabilities.canFind(LuaCapability.LogWrite));
 }

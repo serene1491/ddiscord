@@ -35,5 +35,6 @@ On the first run it creates the SQLite schema with Dorm migrations, then starts 
 ## Example Script
 
 ```lua
+log("running script " .. script_name())
 reply("hello from " .. script_name())
 ```

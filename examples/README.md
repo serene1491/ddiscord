@@ -18,6 +18,8 @@
 
 Most examples now use module-local registration helpers such as `client.registerCommands();` or
 `client.registerAllCommands();`, so the console `main()` stays short even as commands grow.
+They also use `GatewayIntent` presets like `GatewayIntent.GuildTextCommands` to keep startup
+configuration concise.
 
 Each example builds its executable into its own directory:
 

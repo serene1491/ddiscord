@@ -15,7 +15,10 @@ import core.sync.mutex : Mutex;
 import core.thread : Thread;
 import core.time : MonoTime, dur;
 import ddiscord.cache : CacheStore;
+import ddiscord.client_filters : matchesRegistrationFilter;
 import ddiscord.client_queue : DispatchQueuePushOutcome, compactQueue, pushBounded, queueDepth;
+import ddiscord.client_runtime : UptimeSample, snowflakeLatencyMilliseconds;
+import ddiscord.client_text : attemptedPrefixCommandName;
 import ddiscord.client_types : HelpRequest, RegistrationCandidate;
 import ddiscord.commands : Command, CommandCategory, CommandDescriptor, CommandExecution,
     CommandExecutionSettings, CommandOptionDescriptor, CommandRegistry, CommandRoute,
@@ -64,7 +67,6 @@ import ddiscord.util.snowflake : Snowflake;
 import std.algorithm : canFind, sort;
 import std.ascii : toLower;
 import std.conv : to;
-import std.datetime : Clock;
 import std.string : indexOf, startsWith, strip;
 import std.traits : Parameters, fullyQualifiedName, isCallable;
 
@@ -78,6 +80,9 @@ struct ClientConfig
     uint intents;
     string prefix = "!";
     string pluginsDir = "./plugins";
+    bool allowLoosePlugins = true;
+    bool allowPluginEntrypointEscape = false;
+    bool requireExplicitPluginPermissions = false;
     Nullable!Snowflake ownerId;
     Nullable!Snowflake applicationId;
     bool autoSyncCommands = true;
@@ -86,15 +91,6 @@ struct ClientConfig
     size_t maxDispatchQueueSize = DefaultMaxDispatchQueueSize;
     bool dropOldestDispatchOnOverflow = true;
     size_t dispatchOverflowLogEvery = DefaultDispatchOverflowLogEvery;
-}
-
-/// Simple uptime sample used by docs and examples.
-struct UptimeSample
-{
-    string toString() const
-    {
-        return "0s";
-    }
 }
 
 private enum GatewayReadyWatchdogLabel = "gateway-ready-watchdog";
@@ -166,6 +162,9 @@ final class Client
         cache = new CacheStore;
         state = new StateStore;
         plugins.logger = logger;
+        plugins.security.allowLooseScripts = config.allowLoosePlugins;
+        plugins.security.allowEntrypointOutsidePluginDirectory = config.allowPluginEntrypointEscape;
+        plugins.security.requireDeclaredPermissionsForUntrusted = config.requireExplicitPluginPermissions;
         tasks.logger = logger;
         _dispatchMutex = new Mutex;
         _dispatchAvailable = new Condition(_dispatchMutex);
@@ -223,6 +222,8 @@ final class Client
 
         syncCommandExecutionSettings();
         _running = true;
+        uptime.reset();
+        uptime.markStarted();
         resetDispatchQueue();
         _selfUser = me.value;
         _gatewayInfo = Nullable!GatewayBotInfo.of(gateway.value);
@@ -594,7 +595,7 @@ final class Client
             ctx.currentMember = message.member;
             ctx.receiveLatencyMilliseconds = snowflakeLatencyMilliseconds(message.id);
 
-            auto attemptedName = attemptedPrefixCommandName(message.content);
+            auto attemptedName = attemptedPrefixCommandName(config.prefix, message.content);
             auto result = Result!(CommandExecution, string).err(parsed.error);
             if (shouldSurfacePrefixFailure(parsed.error, attemptedName, ctx))
                 surfacePrefixFailure(ctx, attemptedName, parsed.error);
@@ -750,6 +751,7 @@ final class Client
     void stop()
     {
         _running = false;
+        uptime.markStopped();
         _dispatchLoopRunning = false;
         _taskLoopRunning = false;
         tasks.cancel(GatewayReadyWatchdogLabel);
@@ -1155,6 +1157,7 @@ final class Client
         _gatewayThread = new Thread({
             _gateway.run();
             _running = false;
+            uptime.markStopped();
             _dispatchLoopRunning = false;
             _taskLoopRunning = false;
             tasks.cancel(GatewayReadyWatchdogLabel);
@@ -2091,66 +2094,6 @@ final class Client
         return joined;
     }
 
-    private string attemptedPrefixCommandName(string content)
-    {
-        if (!content.startsWith(config.prefix))
-            return "[prefix]";
-
-        auto tokens = tokenizePrefixContent(content[config.prefix.length .. $]);
-        if (tokens.length == 0)
-            return config.prefix;
-        return tokens[0];
-    }
-
-    private string[] tokenizePrefixContent(string input)
-    {
-        string[] tokens;
-        string current;
-        bool inQuote;
-        char quote;
-
-        foreach (ch; input)
-        {
-            if (inQuote)
-            {
-                if (ch == quote)
-                {
-                    inQuote = false;
-                }
-                else
-                {
-                    current ~= ch;
-                }
-
-                continue;
-            }
-
-            if (ch == '"' || ch == '\'')
-            {
-                inQuote = true;
-                quote = ch;
-                continue;
-            }
-
-            if (ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r')
-            {
-                if (current.length != 0)
-                {
-                    tokens ~= current;
-                    current = null;
-                }
-                continue;
-            }
-
-            current ~= ch;
-        }
-
-        if (current.length != 0)
-            tokens ~= current;
-
-        return tokens;
-    }
-
     private void registerModuleMembers(
         string moduleName,
         bool includeCommands,
@@ -2263,95 +2206,6 @@ final class Client
                 }
             }
         }
-    }
-
-    private bool matchesRegistrationFilter(
-        CommandRegistrationFilter filter,
-        RegistrationCandidate candidate
-    )
-    {
-        if (candidate.freeFunction && !filter.includeFreeFunctions)
-            return false;
-        if (candidate.typeSymbol && !filter.includeTypes)
-            return false;
-        if (candidate.event && !filter.includeEvents)
-            return false;
-        if (candidate.plugin && !filter.includePlugins)
-            return false;
-        if (!matchesFilterTokens(candidate.moduleName, filter.includeModules))
-            return false;
-        if (matchesAnyToken(candidate.moduleName, filter.excludeModules))
-            return false;
-        if (!matchesFilterTokens(candidate.ownerName, filter.includeOwners))
-            return false;
-        if (matchesAnyToken(candidate.ownerName, filter.excludeOwners))
-            return false;
-        if (!(candidate.typeSymbol && candidate.commandName.length == 0))
-        {
-            auto nameValue = candidate.commandName.length == 0 ? candidate.symbolName : candidate.commandName;
-            if (!matchesNameFilterTokens(nameValue, filter.includeNames))
-                return false;
-            if (matchesAnyNameToken(nameValue, filter.excludeNames))
-                return false;
-        }
-        if (!matchesFilterTokens(candidate.category, filter.includeCategories))
-            return false;
-        if (matchesAnyToken(candidate.category, filter.excludeCategories))
-            return false;
-        return true;
-    }
-
-    private bool matchesFilterTokens(string value, string[] includes)
-    {
-        if (includes.length == 0)
-            return true;
-        return matchesAnyToken(value, includes);
-    }
-
-    private bool matchesNameFilterTokens(string value, string[] includes)
-    {
-        if (includes.length == 0)
-            return true;
-        return matchesAnyNameToken(value, includes);
-    }
-
-    private bool matchesAnyToken(string value, string[] tokens)
-    {
-        foreach (token; tokens)
-        {
-            if (token.length == 0)
-                continue;
-            if (value == token || value.canFind(token))
-                return true;
-        }
-
-        return false;
-    }
-
-    private bool matchesAnyNameToken(string value, string[] tokens)
-    {
-        foreach (token; tokens)
-        {
-            if (token.length == 0)
-                continue;
-            if (value == token)
-                return true;
-        }
-
-        return false;
-    }
-
-    private long snowflakeLatencyMilliseconds(Snowflake id)
-    {
-        if (id.value == 0)
-            return 0;
-
-        enum unixEpochStdTime = 621355968000000000L;
-        auto nowMs = cast(long) ((Clock.currTime.stdTime - unixEpochStdTime) / 10_000);
-        auto createdMs = cast(long) id.timestampMilliseconds;
-        if (nowMs <= createdMs)
-            return 0;
-        return nowMs - createdMs;
     }
 
     private ApplicationCommandDefinition[] normalizeCommands(ApplicationCommandDefinition[] definitions)

@@ -75,6 +75,12 @@ final class LuaScriptApi
     {
         return script.scopeType;
     }
+
+    @LuaExpose("log", LuaCapability.LogWrite)
+    void logMessage(string message)
+    {
+        ctx.services.get!Logger().information("lua-script", "[" ~ script.name ~ "] " ~ message);
+    }
 }
 
 @Command("save-script", description: "Save a new Lua script", routes: CommandRoute.Slash)
@@ -211,7 +217,7 @@ void main()
 
     auto client = new Client(ClientConfig(
         token: env.get!string("DISCORD_TOKEN", env.require!string("TOKEN")),
-        intents: cast(uint) (GatewayIntent.Guilds | GatewayIntent.GuildMessages | GatewayIntent.MessageContent),
+        intents: cast(uint) GatewayIntent.GuildTextCommands,
         prefix: env.get!string("BOT_PREFIX", "!"),
         autoSyncCommands: true
     ));
@@ -268,7 +274,7 @@ private Result!(bool, string) executeScript(CommandContext ctx, SavedScript scri
     auto runtime = scripting.open!LuaScriptApi(
         api,
         LuaSandboxProfile.Untrusted,
-        [LuaCapability.ContextRead, LuaCapability.DiscordReply]
+        [LuaCapability.ContextRead, LuaCapability.DiscordReply, LuaCapability.LogWrite]
     );
 
     auto result = runtime.eval(script.source);

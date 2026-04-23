@@ -3,6 +3,6 @@
     "version": "1.0.0",
     "ddiscordApiVersion": "2",
     "scripts": ["main.lua"],
-    "permissions": ["state.read", "state.write"],
+    "permissions": ["state.read", "state.write", "log.write"],
     "sandbox": "untrusted"
 }

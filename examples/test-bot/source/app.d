@@ -174,7 +174,7 @@ void main()
 
     auto client = new Client(ClientConfig(
         token: env.get!string("DISCORD_TOKEN", env.require!string("TOKEN")),
-        intents: cast(uint) (GatewayIntent.Guilds | GatewayIntent.GuildMessages | GatewayIntent.MessageContent),
+        intents: cast(uint) GatewayIntent.GuildTextCommands,
         prefix: env.get!string("BOT_PREFIX", "!"),
         autoSyncCommands: true
     ));

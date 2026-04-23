@@ -15,6 +15,7 @@ This library is also used in personal projects, so changes may be frequent and o
 - Components V2 coverage with runnable examples
 - State, cache, rate limiting, services, tasks, and Lua/plugin support
 - Production-minded runtime controls (dispatch backpressure, error surfacing, and telemetry)
+  with built-in queue health and real uptime tracking
 
 ## Philosophy
 
@@ -74,7 +75,7 @@ void main()
 
     auto client = new Client(ClientConfig(
         token: env.get!string("DISCORD_TOKEN", env.require!string("TOKEN")),
-        intents: cast(uint) (GatewayIntent.Guilds | GatewayIntent.GuildMessages | GatewayIntent.MessageContent),
+        intents: cast(uint) GatewayIntent.GuildTextCommands,
         prefix: "!"
     ));
 
@@ -271,6 +272,19 @@ arguments, and handler failures. That behavior is also customizable through `cli
 - [`docs/philosophy.md`](docs/philosophy.md) for project direction and engineering principles
 - [`examples/README.md`](examples/README.md) for the runnable consoles
 - [`CHANGELOG.md`](CHANGELOG.md) for release notes in progress
+
+## Lua and Plugins Notes
+
+Lua host APIs now include:
+
+- state helpers: `state_get`, `state_set`, `state_has`, `state_del`
+- plugin-scoped logging helpers: `log_info`, `log_warn`, `log_error`
+- plugin context metadata: `plugin_name`, `plugin_version`, `plugin_api_version`, `plugin_entrypoint`, `plugin_sandbox`
+
+For file-based plugins with `sandbox: "untrusted"` and no explicit `permissions`, the default
+capability set is intentionally minimal (`context.read`) to reduce accidental overexposure.
+Production hardening can be enabled with `ClientConfig` flags:
+`requireExplicitPluginPermissions`, `allowLoosePlugins`, and `allowPluginEntrypointEscape`.
 
 ## Current API Direction
 

@@ -2,7 +2,7 @@
 
 All notable changes to `ddiscord` should be documented in this file.
 
-## [0.3.0] - In Development
+## [0.3.0]
 
 ### Added
 
@@ -16,12 +16,20 @@ All notable changes to `ddiscord` should be documented in this file.
 - Dispatch queue backpressure controls in `ClientConfig` (`maxDispatchQueueSize`, `dropOldestDispatchOnOverflow`, `dispatchOverflowLogEvery`).
 - `client.dispatchQueueHealth` runtime telemetry for queued/peak/dropped dispatch tracking.
 - Production philosophy document at `docs/philosophy.md`.
+- Real `client.uptime` tracking with elapsed milliseconds and human-readable formatting.
+- Lua plugin host API additions: `state_has`, `state_del`, `log_info`, `log_warn`, `log_error`.
+- Lua plugin context exports: `plugin_version`, `plugin_api_version`, `plugin_entrypoint`, and `plugin_sandbox`.
+- Typed Lua runtime call/eval methods (`evalTyped`, `evalFileTyped`, `callTyped`) for richer host integrations.
+- File-based Lua plugins without declared permissions now default to a minimal untrusted capability set (`context.read`).
+- Gateway intent presets (`GuildTextCommands`, `DefaultCommandBot`, `NonPrivileged`, etc.) to simplify common setup.
 
 ### Changed
 
 - Built-in help now respects visibility rules and command metadata (owner-only, permissions, hidden/category tags).
 - Route-specific command contexts and typed event contexts are now used consistently across runtime and examples.
 - `test-bot` startup flow now performs richer REST validation checks, including optional guild-scoped checks.
+- Plugin loading now enforces safer manifest entrypoint resolution by default (no path escape outside plugin directory).
+- `ClientConfig` now exposes plugin hardening controls (`allowLoosePlugins`, `allowPluginEntrypointEscape`, `requireExplicitPluginPermissions`).
 
 ### Fixed
 
@@ -37,6 +45,8 @@ All notable changes to `ddiscord` should be documented in this file.
 - Split large command/client type surfaces into dedicated modules:
   `ddiscord.command_types` and `ddiscord.client_types`.
 - Split client dispatch queue internals into `ddiscord.client_queue` to reduce `client.d` responsibility.
+- Split runtime helpers into `ddiscord.client_runtime` and registration filter matching into `ddiscord.client_filters`.
+- Split prefix-text parsing helpers into `ddiscord.client_text` to keep `client.d` focused on orchestration.
 
 ### Documentation
 

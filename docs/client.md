@@ -13,7 +13,7 @@
 ```d
 auto client = new Client(ClientConfig(
     token: env.require!string("TOKEN"),
-    intents: cast(uint) (GatewayIntent.Guilds | GatewayIntent.GuildMessages | GatewayIntent.MessageContent),
+    intents: cast(uint) GatewayIntent.GuildTextCommands,
     prefix: "!"
 ));
 ```
@@ -24,12 +24,23 @@ The most important `ClientConfig` fields are:
 - `intents`: gateway intents
 - `prefix`: used for prefix command parsing
 - `pluginsDir`: folder scanned for file-based Lua plugins
+- `allowLoosePlugins`: allows standalone `.lua` files without a manifest (`true` by default)
+- `allowPluginEntrypointEscape`: allows manifest entrypoints outside the plugin directory (`false` by default)
+- `requireExplicitPluginPermissions`: disables implicit host permissions for untrusted plugins without a `permissions` list (`false` by default)
 - `ownerId`: used by `@RequireOwner`; if owner-only commands are registered and this is unset, startup logs a warning and those commands deny every invoker until you configure an owner ID
 - `autoSyncCommands`: keeps slash commands in sync during startup
 - `logLevel`: optional minimum log level, defaults to `Information`
 - `maxDispatchQueueSize`: upper bound for pending gateway dispatch work (default `4096`, `0` = unbounded)
 - `dropOldestDispatchOnOverflow`: when queue pressure is high, keep latest events by dropping oldest pending items (`true` by default)
 - `dispatchOverflowLogEvery`: overflow warning cadence (`100` by default, `0` disables warning logs)
+
+Common intent presets:
+
+- `GatewayIntent.GuildTextCommands`: guild text command bots
+- `GatewayIntent.GuildTextCommandsWithReactions`: guild text + reactions
+- `GatewayIntent.DirectTextCommands`: DM command bots
+- `GatewayIntent.DefaultCommandBot`: guild + DM command flows
+- `GatewayIntent.NonPrivileged`: all currently surfaced non-privileged intents
 
 ## Runtime lifecycle
 
@@ -53,7 +64,7 @@ without limits.
 ```d
 auto client = new Client(ClientConfig(
     token: env.require!string("TOKEN"),
-    intents: cast(uint) (GatewayIntent.Guilds | GatewayIntent.GuildMessages),
+    intents: cast(uint) GatewayIntent.NonPrivileged,
     maxDispatchQueueSize: 8192,
     dropOldestDispatchOnOverflow: true,
     dispatchOverflowLogEvery: 50
@@ -71,6 +82,17 @@ auto health = client.dispatchQueueHealth;
 ```
 
 This keeps bots responsive under bursts while still exposing enough telemetry to tune limits.
+
+## Uptime
+
+`client.uptime` now tracks real process uptime instead of a placeholder value.
+
+```d
+import std.stdio : writeln;
+
+writeln("uptime: ", client.uptime.toString());
+writeln("uptime ms: ", client.uptime.milliseconds);
+```
 
 ## Logging
 

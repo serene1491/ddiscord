@@ -43,6 +43,18 @@ struct StateScope
     {
         return _store.getOrFromScope!T(_scopeKey, key, fallback);
     }
+
+    /// Returns whether a non-expired key exists in the scope.
+    bool has(string key)
+    {
+        return _store.hasInScope(_scopeKey, key);
+    }
+
+    /// Deletes a key from the scope.
+    void remove(string key)
+    {
+        _store.removeInScope(_scopeKey, key);
+    }
 }
 
 /// In-memory state root with Discord-like scopes.
@@ -135,6 +147,32 @@ final class StateStore
         }
     }
 
+    package bool hasInScope(string scopeKey, string key)
+    {
+        synchronized (_mutex)
+        {
+            ensureScope(scopeKey);
+            auto entryPtr = key in _storage[scopeKey];
+            if (entryPtr is null)
+                return false;
+            if (expired(*entryPtr))
+            {
+                _storage[scopeKey].remove(key);
+                return false;
+            }
+            return true;
+        }
+    }
+
+    package void removeInScope(string scopeKey, string key)
+    {
+        synchronized (_mutex)
+        {
+            ensureScope(scopeKey);
+            _storage[scopeKey].remove(key);
+        }
+    }
+
     private void ensureScope(string key)
     {
         auto _ = key in _storage;
@@ -183,4 +221,7 @@ unittest
     state.global.set("count", 3);
     assert(state.global.get!int("count") == 3);
     assert(state.global.getOr!int("missing", 9) == 9);
+    assert(state.global.has("count"));
+    state.global.remove("count");
+    assert(!state.global.has("count"));
 }
