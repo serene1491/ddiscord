@@ -9,7 +9,7 @@ module ddiscord.command_types;
 import core.time : Duration;
 import ddiscord.context.command : CommandContext;
 import ddiscord.models.application_command : ApplicationCommandOptionType, ApplicationCommandType,
-    ApplicationIntegrationType, InteractionContextType;
+    ApplicationCommandOptionChoice, ApplicationIntegrationType, AutocompleteChoice, InteractionContextType;
 public import ddiscord.models.application_command : CommandRoute;
 import ddiscord.models.channel : ChannelType;
 import ddiscord.util.optional : Nullable;
@@ -245,6 +245,26 @@ struct UserInstalledPrivateOnly
 {
 }
 
+/// Restricts command contexts to DM surfaces (bot DMs + private channels).
+struct DmContextOnly
+{
+}
+
+/// Convenience combo for guild-installed commands available only in guild channels.
+struct GuildInstalledGuildOnly
+{
+}
+
+/// Convenience combo for user-installed commands available in any interaction context.
+struct UserInstalledEverywhere
+{
+}
+
+/// Convenience combo for commands installable in guilds and user installs.
+struct InstalledEverywhere
+{
+}
+
 /// Marks a command module for future module-level auto-discovery.
 struct BotModule
 {
@@ -305,6 +325,12 @@ alias CooldownRate = RateLimit;
 /// Attribute attaching an autocomplete handler symbol.
 struct Autocomplete(alias handler)
 {
+    string optionName;
+
+    this(string optionName)
+    {
+        this.optionName = optionName;
+    }
 }
 
 /// High-level command descriptor captured from UDAs.
@@ -330,6 +356,12 @@ struct CommandDescriptor
     string[] parameterNames;
     string[] parameterTypes;
     CommandOptionDescriptor[] options;
+    Result!(AutocompleteChoice[], string) delegate(
+        CommandContext,
+        string focusedName,
+        string focusedValue,
+        string[string] options
+    ) autocompleteExecutor;
     CommandPolicyDescriptor policy;
     Result!(CommandExecution, string) delegate(CommandContext, string[]) prefixExecutor;
     Result!(CommandExecution, string) delegate(CommandContext, string[string]) slashExecutor;
@@ -345,6 +377,9 @@ struct CommandOptionDescriptor
     ApplicationCommandOptionType applicationType = ApplicationCommandOptionType.String;
     bool required = true;
     bool greedy;
+    bool autocomplete;
+    ApplicationCommandOptionChoice[] choices;
+    ChannelType[] channelTypes;
 }
 
 /// Policy descriptor extracted from command UDAs.

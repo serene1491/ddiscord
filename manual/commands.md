@@ -16,7 +16,7 @@ void ping(CommandContext ctx)
 
 ```d
 @SlashCommand("info", "Show info")
-void info(CommandContext ctx, Nullable!User target = Nullable!User.init)
+void info(SlashContext ctx, Nullable!User target = Nullable!User.init)
 {
     auto user = target.isNull ? ctx.user : target.get;
     ctx.reply(user.username, ephemeral: true).await();
@@ -27,7 +27,7 @@ void info(CommandContext ctx, Nullable!User target = Nullable!User.init)
 
 ```d
 @HybridCommand("roll", "Roll a dice")
-void roll(CommandContext ctx, long sides = 6)
+void roll(HybridContext ctx, long sides = 6)
 {
     ctx.reply("Rolling d" ~ sides.to!string).await();
 }
@@ -101,18 +101,73 @@ Convenience UDAs:
 
 - install targets: `@GuildInstalled`, `@UserInstalled`
 - contexts: `@GuildContextOnly`, `@BotDmOnly`, `@PrivateChannelOnly`
-- combos: `@UserInstalledDmOnly`, `@UserInstalledPrivateOnly`
+- context combo: `@DmContextOnly`
+- install/context combos: `@UserInstalledDmOnly`, `@UserInstalledPrivateOnly`, `@GuildInstalledGuildOnly`, `@UserInstalledEverywhere`
+- install combo: `@InstalledEverywhere`
 
 Example:
 
 ```d
 @SlashCommand("inbox", "Open personal inbox")
 @UserInstalledDmOnly
-void inbox(CommandContext ctx)
+void inbox(SlashContext ctx)
 {
     ctx.reply("inbox ready", ephemeral: true).await();
 }
 ```
+
+## Context types by route
+
+Use typed context aliases to keep handler signatures explicit:
+
+- `CommandContext`: route-agnostic handlers (`@Command`)
+- `PrefixContext`: prefix-only (`@PrefixCommand`)
+- `SlashContext`: slash-only (`@SlashCommand`)
+- `HybridContext`: prefix/slash (`@HybridCommand`)
+- `ContextMenuContext`: message/user context menu
+
+`ddiscord` validates route/context mismatches during registration (for example, `SlashContext` on a hybrid route).
+
+Route-specific fluent helpers are available:
+
+- `PrefixContext.respond(...)` and `PrefixContext.replyToSource(...)`
+- `SlashContext.respond(...)`, `SlashContext.respondEphemeral(...)`, `SlashContext.deferEphemeral(...)`, `SlashContext.thinkEphemeral(...)`
+- `HybridContext.respond(...)` with optional `ephemeralOnSlash` behavior
+
+Safety guardrail: `ephemeral: true` fails fast on non-interaction routes (prefix).
+
+## Typed autocomplete
+
+Attach autocomplete handlers directly with `@Autocomplete`:
+
+```d
+AutocompleteChoice[] searchSongs(string partial, CommandContext ctx)
+{
+    auto _ = ctx;
+    return [
+        AutocompleteChoice("Song " ~ partial, partial ~ "-1"),
+        AutocompleteChoice("Song " ~ partial ~ " 2", partial ~ "-2")
+    ];
+}
+
+@SlashCommand("play", "Play a song")
+@Autocomplete!searchSongs("song")
+void play(SlashContext ctx, string song)
+{
+    auto _ = ctx;
+    auto __ = song;
+}
+```
+
+Supported autocomplete handler signatures:
+
+- `AutocompleteChoice[] handler(string partial)`
+- `AutocompleteChoice[] handler(string partial, CommandContext ctx)`
+- `AutocompleteChoice[] handler(AutocompleteContext ctx)`
+- `AutocompleteChoice[] handler(AutocompleteContext ctx, CommandContext command)`
+- same signatures returning `void`, using `AutocompleteContext.respond(...)`
+
+If a slash command has only one non-context parameter, `@Autocomplete!handler` can omit the option name.
 
 When no explicit command context UDA is provided, `@GuildOnly` and `@DirectMessageOnly`
 are projected to Discord `contexts` automatically for slash/context-menu sync:

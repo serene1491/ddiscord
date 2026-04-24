@@ -13,10 +13,12 @@ import core.time : Duration, MonoTime, dur;
 import ddiscord.core.http.client : HttpError, HttpResponse, HttpTransport;
 import ddiscord.context.autocomplete : AutocompleteContext;
 import ddiscord.context.command : CommandContext, CommandSource, ContextMenuCommandContext,
-    HybridCommandContext, PrefixCommandContext, SlashCommandContext;
+    ContextMenuContext, HybridCommandContext, HybridContext, PrefixCommandContext, PrefixContext,
+    SlashCommandContext, SlashContext;
 import ddiscord.models.guild : Guild;
 import ddiscord.models.application_command : ApplicationCommandDefinition, ApplicationCommandOption,
     ApplicationCommandOptionType, ApplicationCommandType, ApplicationIntegrationType,
+    AutocompleteChoice,
     InteractionContextType;
 import ddiscord.models.channel : Channel;
 import ddiscord.models.member : GuildMember;
@@ -25,6 +27,7 @@ import ddiscord.models.role : Role;
 import ddiscord.models.user : User;
 import ddiscord.rest : RestClient, RestClientConfig;
 import ddiscord.util.errors : DdiscordException, formatError;
+import ddiscord.util.limits : DiscordMaxAutocompleteChoices;
 import ddiscord.util.optional : Nullable;
 import ddiscord.util.result : Result;
 import ddiscord.util.snowflake : Snowflake;
@@ -107,6 +110,9 @@ final class CommandRegistry
 {
     private ServiceContainer _services;
     private CommandDescriptor[] _descriptors;
+    private size_t[string] _prefixLookup;
+    private size_t[string] _slashLookup;
+    private size_t[string] _contextLookup;
     private RateLimitWindowState[string] _rateLimits;
     private Mutex _rateLimitMutex;
     private CommandMiddleware[] _globalMiddlewares;
@@ -132,6 +138,7 @@ final class CommandRegistry
             return;
         validateDescriptorMetadata(descriptor);
         _descriptors ~= descriptor;
+        rebuildLookupCaches();
     }
 
     /// Registers a middleware that runs before every command.
@@ -163,6 +170,7 @@ final class CommandRegistry
         }
 
         _descriptors = kept;
+        rebuildLookupCaches();
     }
 
     /// Registers a stateful command group type.
@@ -199,6 +207,7 @@ final class CommandRegistry
         {
             validateDescriptorMetadata(descriptor);
             _descriptors ~= descriptor;
+            rebuildLookupCaches();
         }
     }
 
@@ -211,6 +220,28 @@ final class CommandRegistry
     /// Finds a command by name and route.
     Nullable!CommandDescriptor find(string name, CommandRoute route = CommandRoute.Hybrid)
     {
+        if (name.length == 0)
+            return Nullable!CommandDescriptor.init;
+
+        if (route == CommandRoute.Prefix)
+        {
+            if (auto index = name in _prefixLookup)
+                return Nullable!CommandDescriptor.of(_descriptors[*index]);
+            return Nullable!CommandDescriptor.init;
+        }
+        if (route == CommandRoute.Slash)
+        {
+            if (auto index = name in _slashLookup)
+                return Nullable!CommandDescriptor.of(_descriptors[*index]);
+            return Nullable!CommandDescriptor.init;
+        }
+        if (route == CommandRoute.ContextMenu)
+        {
+            if (auto index = name in _contextLookup)
+                return Nullable!CommandDescriptor.of(_descriptors[*index]);
+            return Nullable!CommandDescriptor.init;
+        }
+
         foreach (descriptor; _descriptors)
         {
             if (descriptor.displayName == name && routeEnabled(descriptor.routes, route))
@@ -331,6 +362,46 @@ final class CommandRegistry
         return resolved.slashExecutor(ctx, options);
     }
 
+    /// Executes autocomplete handlers for a slash command option.
+    Result!(AutocompleteChoice[], string) executeAutocomplete(
+        CommandContext ctx,
+        string name,
+        string focusedName,
+        string focusedValue,
+        string[string] options = null,
+        bool* handled = null
+    )
+    {
+        auto descriptor = find(name, CommandRoute.Slash);
+        if (descriptor.isNull)
+        {
+            if (handled !is null)
+                *handled = false;
+            return Result!(AutocompleteChoice[], string).ok(null);
+        }
+
+        auto resolved = descriptor.get;
+        auto policyError = validatePolicy(resolved, ctx);
+        if (!policyError.isNull)
+            return Result!(AutocompleteChoice[], string).err(policyError.get);
+
+        auto middlewareError = runMiddlewares(resolved, ctx);
+        if (!middlewareError.isNull)
+            return Result!(AutocompleteChoice[], string).err(middlewareError.get);
+
+        if (resolved.autocompleteExecutor is null)
+        {
+            if (handled !is null)
+                *handled = false;
+            return Result!(AutocompleteChoice[], string).ok(null);
+        }
+
+        if (handled !is null)
+            *handled = true;
+
+        return resolved.autocompleteExecutor(ctx, focusedName, focusedValue, options);
+    }
+
     /// Returns slash/context-menu definitions derived from registered handlers.
     ApplicationCommandDefinition[] applicationCommands() @property
     {
@@ -379,6 +450,9 @@ final class CommandRegistry
                         : option.description;
                     definitionOption.type = option.applicationType;
                     definitionOption.required = option.required;
+                    definitionOption.autocomplete = option.autocomplete;
+                    definitionOption.choices = option.choices.dup;
+                    definitionOption.channelTypes = option.channelTypes.dup;
                     definition.options ~= definitionOption;
                 }
             }
@@ -530,6 +604,43 @@ final class CommandRegistry
         return Nullable!string.init;
     }
 
+    private void rebuildLookupCaches()
+    {
+        _prefixLookup = null;
+        _slashLookup = null;
+        _contextLookup = null;
+
+        foreach (index, descriptor; _descriptors)
+        {
+            if (descriptor.displayName.length == 0)
+                continue;
+
+            if (routeEnabled(descriptor.routes, CommandRoute.Prefix) &&
+                descriptor.displayName !in _prefixLookup)
+            {
+                _prefixLookup[descriptor.displayName] = index;
+            }
+
+            if (
+                descriptor.applicationType == ApplicationCommandType.ChatInput &&
+                routeEnabled(descriptor.routes, CommandRoute.Slash) &&
+                descriptor.displayName !in _slashLookup
+            )
+            {
+                _slashLookup[descriptor.displayName] = index;
+            }
+
+            if (
+                descriptor.applicationType != ApplicationCommandType.ChatInput &&
+                routeEnabled(descriptor.routes, CommandRoute.ContextMenu) &&
+                descriptor.displayName !in _contextLookup
+            )
+            {
+                _contextLookup[descriptor.displayName] = index;
+            }
+        }
+    }
+
     private Nullable!string runMiddlewares(CommandDescriptor descriptor, CommandContext ctx)
     {
         foreach (index, middleware; _globalMiddlewares)
@@ -616,19 +727,26 @@ private bool commandHasGuildScope(CommandContext ctx)
 
 private void registerHandlers(handlers...)(CommandRegistry registry)
 {
+    bool appended;
+
     static foreach (handler; handlers)
     {
         {
-                auto descriptor = describeHandler!handler();
-                if (descriptor.displayName.length != 0)
-                {
-                    descriptor.prefixExecutor = buildFreePrefixExecutor!handler();
-                    descriptor.slashExecutor = buildFreeSlashExecutor!handler();
-                    validateDescriptorMetadata(descriptor);
-                    registry._descriptors ~= descriptor;
-                }
+            auto descriptor = describeHandler!handler();
+            if (descriptor.displayName.length != 0)
+            {
+                descriptor.prefixExecutor = buildFreePrefixExecutor!handler();
+                descriptor.slashExecutor = buildFreeSlashExecutor!handler();
+                descriptor.autocompleteExecutor = buildFreeAutocompleteExecutor!handler();
+                validateDescriptorMetadata(descriptor);
+                registry._descriptors ~= descriptor;
+                appended = true;
             }
         }
+    }
+
+    if (appended)
+        registry.rebuildLookupCaches();
 }
 
 private CommandDescriptor describeHandler(alias fn)()
@@ -722,6 +840,33 @@ private CommandDescriptor describeHandler(alias fn)()
             appendIntegrationTypes(descriptor.integrationTypes, [ApplicationIntegrationType.UserInstall]);
             appendInteractionContexts(descriptor.contexts, [InteractionContextType.PrivateChannel]);
         }
+        else static if (AttrIs!(attr, DmContextOnly))
+        {
+            appendInteractionContexts(
+                descriptor.contexts,
+                [InteractionContextType.BotDM, InteractionContextType.PrivateChannel]
+            );
+        }
+        else static if (AttrIs!(attr, GuildInstalledGuildOnly))
+        {
+            appendIntegrationTypes(descriptor.integrationTypes, [ApplicationIntegrationType.GuildInstall]);
+            appendInteractionContexts(descriptor.contexts, [InteractionContextType.Guild]);
+        }
+        else static if (AttrIs!(attr, UserInstalledEverywhere))
+        {
+            appendIntegrationTypes(descriptor.integrationTypes, [ApplicationIntegrationType.UserInstall]);
+            appendInteractionContexts(
+                descriptor.contexts,
+                [InteractionContextType.Guild, InteractionContextType.BotDM, InteractionContextType.PrivateChannel]
+            );
+        }
+        else static if (AttrIs!(attr, InstalledEverywhere))
+        {
+            appendIntegrationTypes(
+                descriptor.integrationTypes,
+                [ApplicationIntegrationType.GuildInstall, ApplicationIntegrationType.UserInstall]
+            );
+        }
         else static if (AttrIs!(attr, RequireOwner))
         {
             descriptor.policy.ownerOnly = true;
@@ -763,6 +908,11 @@ private CommandDescriptor describeHandler(alias fn)()
 
     if (!hasCommandAttr!fn)
         descriptor.displayName = "";
+    else
+    {
+        validateHandlerContextCompatibility!fn(descriptor);
+        validateAutocompleteMetadata!fn(descriptor);
+    }
 
     return descriptor;
 }
@@ -778,6 +928,7 @@ private CommandDescriptor describeMember(T, string memberName)()
         descriptor.sourceModule = qualifiedModuleName(descriptor.ownerQualifiedName);
     descriptor.prefixExecutor = buildStatefulPrefixExecutor!(T, memberName)();
     descriptor.slashExecutor = buildStatefulSlashExecutor!(T, memberName)();
+    descriptor.autocompleteExecutor = buildStatefulAutocompleteExecutor!(T, memberName)();
     return descriptor;
 }
 
@@ -800,9 +951,22 @@ private string[] parameterTypes(alias fn)()
 private CommandOptionDescriptor[] optionDescriptors(alias fn)()
 {
     CommandOptionDescriptor[] options;
+    string[] explicitAutocompleteOptionNames;
+    bool hasImplicitAutocomplete;
     alias ParamTypes = Parameters!fn;
     alias ParamNames = ParameterIdentifierTuple!fn;
     alias Defaults = ParameterDefaults!fn;
+
+    static foreach (attr; __traits(getAttributes, fn))
+    {
+        static if (HasAutocompleteAttr!attr)
+        {
+            if (autocompleteAttrOptionName!attr.length != 0)
+                explicitAutocompleteOptionNames ~= defaultOptionName(autocompleteAttrOptionName!attr);
+            else
+                hasImplicitAutocomplete = true;
+        }
+    }
 
     static foreach (index, ParamType; ParamTypes)
     {
@@ -821,6 +985,18 @@ private CommandOptionDescriptor[] optionDescriptors(alias fn)()
             }
         }
     }
+
+    foreach (name; explicitAutocompleteOptionNames)
+    {
+        foreach (ref option; options)
+        {
+            if (option.displayName == name)
+                option.autocomplete = true;
+        }
+    }
+
+    if (hasImplicitAutocomplete && options.length == 1)
+        options[0].autocomplete = true;
 
     return options;
 }
@@ -855,6 +1031,25 @@ private template isCommandContextParameter(T)
         is(T == SlashCommandContext) ||
         is(T == ContextMenuCommandContext) ||
         is(T == HybridCommandContext);
+}
+
+private template CommandContextParameterCount(Params...)
+{
+    static if (Params.length == 0)
+        enum CommandContextParameterCount = 0;
+    else
+        enum CommandContextParameterCount =
+            (isCommandContextParameter!(Params[0]) ? 1 : 0) + CommandContextParameterCount!(Params[1 .. $]);
+}
+
+private template FirstCommandContextParameterType(Params...)
+{
+    static if (Params.length == 0)
+        alias FirstCommandContextParameterType = void;
+    else static if (isCommandContextParameter!(Params[0]))
+        alias FirstCommandContextParameterType = Params[0];
+    else
+        alias FirstCommandContextParameterType = FirstCommandContextParameterType!(Params[1 .. $]);
 }
 
 private Result!(T, string) resolveCommandContextParameter(T)(CommandContext ctx)
@@ -993,6 +1188,162 @@ private void validateDescriptorMetadata(CommandDescriptor descriptor)
             "Command `" ~ descriptor.displayName ~ "` is prefix-only but defines install/context metadata.",
             "Use `@SlashCommand`/`@Command(..., routes: CommandRoute.Slash|Hybrid)` or remove install/context UDAs."
         ));
+    }
+}
+
+private void validateHandlerContextCompatibility(alias fn)(CommandDescriptor descriptor)
+{
+    alias ParamTypes = Parameters!fn;
+    enum contextParamCount = CommandContextParameterCount!ParamTypes;
+    static assert(
+        contextParamCount <= 1,
+        "Command handlers support at most one command context parameter (`CommandContext`, `PrefixContext`, `SlashContext`, `HybridContext`, or `ContextMenuContext`)."
+    );
+
+    static if (contextParamCount == 0)
+        return;
+    else
+    {
+        alias CtxType = FirstCommandContextParameterType!ParamTypes;
+
+        if (descriptor.applicationType == ApplicationCommandType.User ||
+            descriptor.applicationType == ApplicationCommandType.Message)
+        {
+            static if (!is(CtxType == CommandContext) && !is(CtxType == ContextMenuCommandContext))
+            {
+                throw new DdiscordException(formatError(
+                    "commands",
+                    "Context-menu handlers require `CommandContext` or `ContextMenuContext`.",
+                    "Handler `" ~ commandName!fn() ~ "` uses `" ~ CtxType.stringof ~ "`.",
+                    "Use `ContextMenuContext` for typed context-menu handlers."
+                ));
+            }
+
+            return;
+        }
+
+        static if (is(CtxType == PrefixCommandContext))
+        {
+            if (descriptor.routes != CommandRoute.Prefix)
+            {
+                throw new DdiscordException(formatError(
+                    "commands",
+                    "Prefix-only handler context cannot be used with non-prefix command routes.",
+                    "Handler `" ~ commandName!fn() ~ "` uses `PrefixContext` but routes are `" ~ descriptor.routes.to!string ~ "`.",
+                    "Use `CommandContext` or `HybridContext`, or switch the command route to prefix-only."
+                ));
+            }
+        }
+        else static if (is(CtxType == SlashCommandContext))
+        {
+            if (descriptor.routes != CommandRoute.Slash)
+            {
+                throw new DdiscordException(formatError(
+                    "commands",
+                    "Slash-only handler context cannot be used with non-slash command routes.",
+                    "Handler `" ~ commandName!fn() ~ "` uses `SlashContext` but routes are `" ~ descriptor.routes.to!string ~ "`.",
+                    "Use `CommandContext` or `HybridContext`, or switch the command route to slash-only."
+                ));
+            }
+        }
+        else static if (is(CtxType == HybridCommandContext))
+        {
+            if (descriptor.routes != CommandRoute.Hybrid)
+            {
+                throw new DdiscordException(formatError(
+                    "commands",
+                    "Hybrid handler context requires a hybrid command route.",
+                    "Handler `" ~ commandName!fn() ~ "` uses `HybridContext` but routes are `" ~ descriptor.routes.to!string ~ "`.",
+                    "Use `CommandContext` for single-route commands or expose the command as hybrid."
+                ));
+            }
+        }
+        else static if (is(CtxType == ContextMenuCommandContext))
+        {
+            if (descriptor.applicationType == ApplicationCommandType.ChatInput)
+            {
+                throw new DdiscordException(formatError(
+                    "commands",
+                    "Context-menu handler context cannot be used for chat-input commands.",
+                    "Handler `" ~ commandName!fn() ~ "` uses `ContextMenuContext`.",
+                    "Use `SlashContext`, `PrefixContext`, `HybridContext`, or `CommandContext`."
+                ));
+            }
+        }
+    }
+}
+
+private void validateAutocompleteMetadata(alias fn)(CommandDescriptor descriptor)
+{
+    if (!routeEnabled(descriptor.routes, CommandRoute.Slash))
+    {
+        static foreach (attr; __traits(getAttributes, fn))
+        {
+            static if (HasAutocompleteAttr!attr)
+            {
+                throw new DdiscordException(formatError(
+                    "commands",
+                    "Autocomplete handlers require slash-capable command routes.",
+                    "Command `" ~ descriptor.displayName ~ "` defines `@Autocomplete` without a slash route.",
+                    "Use `@SlashCommand`, `@HybridCommand`, or set `@Command(..., routes: CommandRoute.Slash|Hybrid)`."
+                ));
+            }
+        }
+
+        return;
+    }
+
+    static foreach (attr; __traits(getAttributes, fn))
+    {
+        static if (HasAutocompleteAttr!attr)
+        {
+            auto targetName = autocompleteTargetName!fn(autocompleteAttrOptionName!attr);
+            if (targetName.length == 0)
+            {
+                throw new DdiscordException(formatError(
+                    "commands",
+                    "Implicit autocomplete target is ambiguous.",
+                    "Command `" ~ descriptor.displayName ~ "` has `@Autocomplete` without an explicit option while exposing multiple options.",
+                    "Pass the option explicitly, e.g. `@Autocomplete!handler(\"option-name\")`."
+                ));
+            }
+
+            bool foundOption;
+            ApplicationCommandOptionType targetType = ApplicationCommandOptionType.String;
+            foreach (option; descriptor.options)
+            {
+                if (option.displayName == targetName)
+                {
+                    foundOption = true;
+                    targetType = option.applicationType;
+                    break;
+                }
+            }
+
+            if (!foundOption)
+            {
+                throw new DdiscordException(formatError(
+                    "commands",
+                    "Autocomplete target option was not found in command parameters.",
+                    "Command `" ~ descriptor.displayName ~ "` references option `" ~ targetName ~ "`.",
+                    "Use a parameter name (or configured option name) that exists in the command signature."
+                ));
+            }
+
+            if (
+                targetType != ApplicationCommandOptionType.String &&
+                targetType != ApplicationCommandOptionType.Integer &&
+                targetType != ApplicationCommandOptionType.Number
+            )
+            {
+                throw new DdiscordException(formatError(
+                    "commands",
+                    "Autocomplete is only supported for string/integer/number slash options.",
+                    "Command `" ~ descriptor.displayName ~ "` targets option `" ~ targetName ~ "` of type `" ~ targetType.to!string ~ "`.",
+                    "Use a string/integer/number option for autocomplete targets."
+                ));
+            }
+        }
     }
 }
 
@@ -1161,6 +1512,36 @@ private template AttrIs(alias attr, T)
         enum bool AttrIs = is(typeof(attr) == T);
     else
         enum bool AttrIs = is(attr == T);
+}
+
+private template HasAutocompleteAttr(alias attr)
+{
+    static if (__traits(compiles, typeof(attr)))
+        enum bool HasAutocompleteAttr = is(typeof(attr) == Autocomplete!handler, alias handler);
+    else
+        enum bool HasAutocompleteAttr = is(attr == Autocomplete!handler, alias handler);
+}
+
+private template AutocompleteAttrHandler(alias attr)
+{
+    static if (__traits(compiles, typeof(attr)))
+    {
+        static if (is(typeof(attr) == Autocomplete!handler, alias handler))
+            alias AutocompleteAttrHandler = handler;
+    }
+    else
+    {
+        static if (is(attr == Autocomplete!handler, alias handler))
+            alias AutocompleteAttrHandler = handler;
+    }
+}
+
+private string autocompleteAttrOptionName(alias attr)()
+{
+    static if (__traits(compiles, typeof(attr)))
+        return attr.optionName;
+    else
+        return "";
 }
 
 private bool isNullableType(T)()
@@ -1391,6 +1772,173 @@ private Result!(CommandExecution, string) delegate(CommandContext, string[string
         return invokeStatefulSlash!(T, memberSymbol)(instance, ctx, rawOptions);
     };
     return executor;
+}
+
+private Result!(AutocompleteChoice[], string) delegate(CommandContext, string, string, string[string]) buildFreeAutocompleteExecutor(alias fn)()
+{
+    Result!(AutocompleteChoice[], string) delegate(CommandContext, string, string, string[string]) executor;
+    executor = (CommandContext ctx, string focusedName, string focusedValue, string[string] options) {
+        return invokeFreeAutocomplete!fn(ctx, focusedName, focusedValue, options);
+    };
+    return executor;
+}
+
+private Result!(AutocompleteChoice[], string) delegate(CommandContext, string, string, string[string]) buildStatefulAutocompleteExecutor(T, string memberName)()
+{
+    mixin("alias memberSymbol = T." ~ memberName ~ ";");
+    Result!(AutocompleteChoice[], string) delegate(CommandContext, string, string, string[string]) executor;
+    executor = (CommandContext ctx, string focusedName, string focusedValue, string[string] options) {
+        auto _ = ctx.services.get!T();
+        return invokeFreeAutocomplete!memberSymbol(ctx, focusedName, focusedValue, options);
+    };
+    return executor;
+}
+
+private Result!(AutocompleteChoice[], string) invokeFreeAutocomplete(alias fn)(
+    CommandContext ctx,
+    string focusedName,
+    string focusedValue,
+    string[string] options
+)
+{
+    auto _ = options;
+
+    if (focusedName.length == 0)
+    {
+        return Result!(AutocompleteChoice[], string).err(formatError(
+            "commands",
+            "Autocomplete interactions require a focused option name.",
+            "Command `" ~ commandName!fn() ~ "` did not receive the focused option metadata.",
+            "Ensure the Discord interaction payload includes a focused option and call `receiveInteraction` with the raw interaction."
+        ));
+    }
+
+    static foreach (attr; __traits(getAttributes, fn))
+    {
+        static if (HasAutocompleteAttr!attr)
+        {
+            alias handler = AutocompleteAttrHandler!attr;
+
+            if (autocompleteAttrOptionName!attr.length == 0)
+                return runAutocompleteHandler!handler(ctx, focusedName, focusedValue);
+
+            auto targetName = autocompleteTargetName!fn(autocompleteAttrOptionName!attr);
+            if (targetName == focusedName)
+                return runAutocompleteHandler!handler(ctx, focusedName, focusedValue);
+        }
+    }
+
+    return Result!(AutocompleteChoice[], string).ok(null);
+}
+
+private Result!(AutocompleteChoice[], string) runAutocompleteHandler(alias handler)(
+    CommandContext ctx,
+    string focusedName,
+    string focusedValue
+)
+{
+    AutocompleteContext autocomplete;
+    autocomplete.focusedName = focusedName;
+    autocomplete.focusedValue = focusedValue;
+
+    try
+    {
+        alias HandlerParams = Parameters!handler;
+        static if (is(ReturnType!handler == void))
+        {
+            static if (HandlerParams.length == 1 && is(HandlerParams[0] == string))
+            {
+                handler(focusedValue);
+            }
+            else static if (HandlerParams.length == 1 && is(HandlerParams[0] == AutocompleteContext))
+            {
+                handler(autocomplete);
+            }
+            else static if (HandlerParams.length == 2 && is(HandlerParams[0] == string) && is(HandlerParams[1] == CommandContext))
+            {
+                handler(focusedValue, ctx);
+            }
+            else static if (HandlerParams.length == 2 &&
+                is(HandlerParams[0] == AutocompleteContext) &&
+                is(HandlerParams[1] == CommandContext))
+            {
+                handler(autocomplete, ctx);
+            }
+            else
+            {
+                static assert(
+                    false,
+                    "Unsupported autocomplete handler signature. Supported signatures are:\n"
+                    ~ "  void handler(string)\n"
+                    ~ "  void handler(string, CommandContext)\n"
+                    ~ "  void handler(AutocompleteContext)\n"
+                    ~ "  void handler(AutocompleteContext, CommandContext)\n"
+                    ~ "  AutocompleteChoice[] handler(string)\n"
+                    ~ "  AutocompleteChoice[] handler(string, CommandContext)\n"
+                    ~ "  AutocompleteChoice[] handler(AutocompleteContext)\n"
+                    ~ "  AutocompleteChoice[] handler(AutocompleteContext, CommandContext)"
+                );
+            }
+
+            return Result!(AutocompleteChoice[], string).ok(normalizeAutocompleteChoices(autocomplete.choices));
+        }
+        else static if (is(ReturnType!handler == AutocompleteChoice[]))
+        {
+            AutocompleteChoice[] choices;
+
+            static if (HandlerParams.length == 1 && is(HandlerParams[0] == string))
+            {
+                choices = handler(focusedValue);
+            }
+            else static if (HandlerParams.length == 1 && is(HandlerParams[0] == AutocompleteContext))
+            {
+                choices = handler(autocomplete);
+            }
+            else static if (HandlerParams.length == 2 && is(HandlerParams[0] == string) && is(HandlerParams[1] == CommandContext))
+            {
+                choices = handler(focusedValue, ctx);
+            }
+            else static if (HandlerParams.length == 2 &&
+                is(HandlerParams[0] == AutocompleteContext) &&
+                is(HandlerParams[1] == CommandContext))
+            {
+                choices = handler(autocomplete, ctx);
+            }
+            else
+            {
+                static assert(
+                    false,
+                    "Unsupported autocomplete handler signature. Supported signatures are:\n"
+                    ~ "  void handler(string)\n"
+                    ~ "  void handler(string, CommandContext)\n"
+                    ~ "  void handler(AutocompleteContext)\n"
+                    ~ "  void handler(AutocompleteContext, CommandContext)\n"
+                    ~ "  AutocompleteChoice[] handler(string)\n"
+                    ~ "  AutocompleteChoice[] handler(string, CommandContext)\n"
+                    ~ "  AutocompleteChoice[] handler(AutocompleteContext)\n"
+                    ~ "  AutocompleteChoice[] handler(AutocompleteContext, CommandContext)"
+                );
+            }
+
+            return Result!(AutocompleteChoice[], string).ok(normalizeAutocompleteChoices(choices));
+        }
+        else
+        {
+            static assert(
+                false,
+                "Autocomplete handlers must return `void` or `AutocompleteChoice[]`."
+            );
+        }
+    }
+    catch (Exception error)
+    {
+        return Result!(AutocompleteChoice[], string).err(formatError(
+            "commands",
+            "The autocomplete handler raised an exception.",
+            "Handler `" ~ __traits(identifier, handler) ~ "` failed with `" ~ error.msg ~ "`.",
+            "Catch domain errors inside your autocomplete handler or return an empty choice list on failure."
+        ));
+    }
 }
 
 private Result!(CommandExecution, string) invokeFreePrefix(alias fn)(
@@ -1798,6 +2346,54 @@ private Nullable!string lookupSlashOption(string[string] rawOptions, string name
     return Nullable!string.init;
 }
 
+private string implicitAutocompleteTargetName(alias fn)()
+{
+    alias ParamTypes = Parameters!fn;
+    alias ParamNames = ParameterIdentifierTuple!fn;
+
+    size_t optionCount = 0;
+    string onlyOptionName;
+
+    static foreach (index, ParamType; ParamTypes)
+    {
+        static if (!isCommandContextParameter!ParamType)
+        {
+            optionCount++;
+            if (optionCount == 1)
+                onlyOptionName = defaultOptionName(ParamNames[index]);
+        }
+    }
+
+    if (optionCount == 1)
+        return onlyOptionName;
+
+    return "";
+}
+
+private string autocompleteTargetName(alias fn)(string configuredOptionName)
+{
+    if (configuredOptionName.length != 0)
+        return defaultOptionName(configuredOptionName);
+    return implicitAutocompleteTargetName!fn();
+}
+
+private AutocompleteChoice[] normalizeAutocompleteChoices(scope const(AutocompleteChoice)[] choices)
+{
+    AutocompleteChoice[] normalized;
+
+    foreach (choice; choices)
+    {
+        if (choice.name.length == 0 || choice.value.length == 0)
+            continue;
+
+        normalized ~= choice;
+        if (normalized.length >= DiscordMaxAutocompleteChoices)
+            break;
+    }
+
+    return normalized;
+}
+
 private string commandName(alias fn)()
 {
     static foreach (attr; __traits(getAttributes, fn))
@@ -1897,6 +2493,32 @@ unittest
     auto parsed = registry.parsePrefix("!", "!ping").expect("parse failed");
     assert(parsed.name == "ping");
     assert(parsed.descriptor.get.displayName == "ping");
+}
+
+unittest
+{
+    @PrefixCommand("legacy")
+    void legacy(PrefixContext ctx)
+    {
+        auto _ = ctx;
+    }
+
+    @SlashCommand("modern")
+    void modern(SlashContext ctx)
+    {
+        auto _ = ctx;
+    }
+
+    auto registry = new CommandRegistry(new ServiceContainer);
+    registerHandlers!(legacy, modern)(registry);
+
+    assert(!registry.find("legacy", CommandRoute.Prefix).isNull);
+    assert(!registry.find("modern", CommandRoute.Slash).isNull);
+    assert(registry.find("modern", CommandRoute.Prefix).isNull);
+
+    registry.removeWhere((descriptor) => descriptor.displayName == "legacy");
+    assert(registry.find("legacy", CommandRoute.Prefix).isNull);
+    assert(!registry.find("modern", CommandRoute.Slash).isNull);
 }
 
 unittest
@@ -2286,6 +2908,186 @@ unittest
     }
 
     assert(threw);
+}
+
+unittest
+{
+    @HybridCommand("wrong-context")
+    void wrongContext(SlashContext ctx)
+    {
+        auto _ = ctx;
+    }
+
+    bool threw;
+    try
+    {
+        auto registry = new CommandRegistry(new ServiceContainer);
+        registerHandlers!(wrongContext)(registry);
+    }
+    catch (DdiscordException error)
+    {
+        threw = true;
+        assert(error.msg.canFind("Slash-only handler context"));
+    }
+
+    assert(threw);
+}
+
+unittest
+{
+    AutocompleteChoice[] completeSong(string partial, CommandContext ctx)
+    {
+        auto _ = ctx;
+        return [
+            AutocompleteChoice("Song " ~ partial, partial ~ "-1"),
+            AutocompleteChoice("Song " ~ partial ~ " 2", partial ~ "-2"),
+        ];
+    }
+
+    @SlashCommand("play", "Play a song")
+    @Autocomplete!completeSong("song")
+    void play(SlashContext ctx, string song)
+    {
+        auto _ = ctx;
+        auto __ = song;
+    }
+
+    auto services = new ServiceContainer;
+    auto registry = new CommandRegistry(services);
+    registerHandlers!(play)(registry);
+
+    CommandContext ctx;
+    ctx.services = services;
+    ctx.source = CommandSource.Slash;
+
+    bool handled;
+    auto result = registry.executeAutocomplete(ctx, "play", "song", "hel", null, &handled);
+    assert(result.isOk);
+    assert(handled);
+    assert(result.value.length == 2);
+    assert(result.value[0].name == "Song hel");
+
+    auto definitions = registry.applicationCommands;
+    assert(definitions.length == 1);
+    assert(definitions[0].options.length == 1);
+    assert(definitions[0].options[0].autocomplete);
+}
+
+unittest
+{
+    AutocompleteChoice[] completeSingle(string partial)
+    {
+        return [AutocompleteChoice("Echo " ~ partial, partial)];
+    }
+
+    @SlashCommand("echo-auto", "Autocomplete a single option")
+    @Autocomplete!completeSingle
+    void echoAuto(SlashContext ctx, string text)
+    {
+        auto _ = ctx;
+        auto __ = text;
+    }
+
+    auto services = new ServiceContainer;
+    auto registry = new CommandRegistry(services);
+    registerHandlers!(echoAuto)(registry);
+
+    CommandContext ctx;
+    ctx.services = services;
+    ctx.source = CommandSource.Slash;
+
+    bool handled;
+    auto result = registry.executeAutocomplete(ctx, "echo-auto", "text", "hi", null, &handled);
+    assert(result.isOk);
+    assert(handled);
+    assert(result.value.length == 1);
+    assert(result.value[0].value == "hi");
+}
+
+unittest
+{
+    AutocompleteChoice[] completeAny(string partial)
+    {
+        return [AutocompleteChoice(partial, partial)];
+    }
+
+    @SlashCommand("ambiguous", "Ambiguous implicit autocomplete")
+    @Autocomplete!completeAny
+    void ambiguous(SlashContext ctx, string first, string second)
+    {
+        auto _ = ctx;
+        auto __ = first;
+        auto ___ = second;
+    }
+
+    bool threw;
+    try
+    {
+        auto registry = new CommandRegistry(new ServiceContainer);
+        registerHandlers!(ambiguous)(registry);
+    }
+    catch (DdiscordException error)
+    {
+        threw = true;
+        assert(error.msg.canFind("Implicit autocomplete target is ambiguous"));
+    }
+
+    assert(threw);
+}
+
+unittest
+{
+    AutocompleteChoice[] prefixAutocomplete(string partial)
+    {
+        return [AutocompleteChoice(partial, partial)];
+    }
+
+    @PrefixCommand("prefix-auto")
+    @Autocomplete!prefixAutocomplete("query")
+    void prefixAuto(PrefixContext ctx, string query)
+    {
+        auto _ = ctx;
+        auto __ = query;
+    }
+
+    bool threw;
+    try
+    {
+        auto registry = new CommandRegistry(new ServiceContainer);
+        registerHandlers!(prefixAuto)(registry);
+    }
+    catch (DdiscordException error)
+    {
+        threw = true;
+        assert(error.msg.canFind("Autocomplete handlers require slash-capable command routes"));
+    }
+
+    assert(threw);
+}
+
+unittest
+{
+    @SlashCommand("install-combos")
+    @InstalledEverywhere
+    @GuildInstalledGuildOnly
+    @DmContextOnly
+    void installCombos(CommandContext ctx)
+    {
+        auto _ = ctx;
+    }
+
+    auto registry = new CommandRegistry(new ServiceContainer);
+    registerHandlers!(installCombos)(registry);
+    auto definitions = registry.applicationCommands;
+
+    assert(definitions.length == 1);
+    assert(definitions[0].integrationTypes.length == 2);
+    assert(definitions[0].integrationTypes.canFind(ApplicationIntegrationType.GuildInstall));
+    assert(definitions[0].integrationTypes.canFind(ApplicationIntegrationType.UserInstall));
+    assert(definitions[0].contexts.length == 3);
+    assert(definitions[0].contexts.canFind(InteractionContextType.Guild));
+    assert(definitions[0].contexts.canFind(InteractionContextType.BotDM));
+    assert(definitions[0].contexts.canFind(InteractionContextType.PrivateChannel));
 }
 
 unittest

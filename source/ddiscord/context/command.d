@@ -150,22 +150,48 @@ struct CommandContext
         return currentMember;
     }
 
+    /// Returns whether this command context was created from a prefix route.
+    bool isPrefix() const @property
+    {
+        return source == CommandSource.Prefix;
+    }
+
+    /// Returns whether this command context was created from a slash route.
+    bool isSlash() const @property
+    {
+        return source == CommandSource.Slash;
+    }
+
+    /// Returns whether this command context was created from a context-menu route.
+    bool isContextMenu() const @property
+    {
+        return source == CommandSource.ContextMenu;
+    }
+
+    /// Returns whether this context has an active interaction token.
+    bool isInteraction() const @property
+    {
+        return hasInteractionToken;
+    }
+
     /// Sends a message in the current command context.
     Task!void send(string content, bool ephemeral = false)
     {
         auto payload = MessageCreate(content);
-        if (ephemeral)
-            payload.setFlag(MessageFlags.Ephemeral);
         return send(payload, ephemeral);
     }
 
     /// Sends a payload in the current command context.
     Task!void send(MessageCreate payload, bool ephemeral = false)
     {
+        auto ephemeralError = validateEphemeralUsage(ephemeral, "send");
+        if (!ephemeralError.isNull)
+            return Task!void.failure(ephemeralError.get);
+
         if (ephemeral)
             payload.setFlag(MessageFlags.Ephemeral);
 
-        if (!interaction.isNull && interaction.get.token.length != 0)
+        if (hasInteractionToken)
         {
             if (interactionAcknowledged || interactionResponded)
             {
@@ -221,6 +247,10 @@ struct CommandContext
     /// Replies to the source message using Discord's native reply payload.
     Task!void reply(MessageCreate payload, bool mentionAuthor = false, bool ephemeral = false)
     {
+        auto ephemeralError = validateEphemeralUsage(ephemeral, "reply");
+        if (!ephemeralError.isNull)
+            return Task!void.failure(ephemeralError.get);
+
         if (ephemeral)
             payload.setFlag(MessageFlags.Ephemeral);
 
@@ -233,7 +263,11 @@ struct CommandContext
     /// Sends a deferred acknowledgement for interaction-based commands.
     Task!void defer(bool ephemeral = false)
     {
-        if (!interaction.isNull && interaction.get.token.length != 0)
+        auto ephemeralError = validateEphemeralUsage(ephemeral, "defer");
+        if (!ephemeralError.isNull)
+            return Task!void.failure(ephemeralError.get);
+
+        if (hasInteractionToken)
         {
             auto deferred = rest.interactions.defer(interaction.get.id, interaction.get.token, ephemeral).awaitResult();
             if (deferred.isErr)
@@ -249,7 +283,7 @@ struct CommandContext
     /// Triggers the typing indicator for message-based contexts.
     Task!void typing()
     {
-        if (!interaction.isNull && interaction.get.token.length != 0)
+        if (hasInteractionToken)
             return Task!void.success();
 
         auto channelId = currentChannelId();
@@ -273,7 +307,11 @@ struct CommandContext
     /// Shows a "thinking" state appropriate for the current command source.
     Task!void think(bool ephemeral = false)
     {
-        if (!interaction.isNull && interaction.get.token.length != 0)
+        auto ephemeralError = validateEphemeralUsage(ephemeral, "think");
+        if (!ephemeralError.isNull)
+            return Task!void.failure(ephemeralError.get);
+
+        if (hasInteractionToken)
         {
             if (interactionAcknowledged || interactionResponded)
                 return Task!void.success();
@@ -610,6 +648,24 @@ struct CommandContext
         return currentChannel.id;
     }
 
+    private bool hasInteractionToken() const @property
+    {
+        return !interaction.isNull && interaction.get.token.length != 0;
+    }
+
+    private Nullable!string validateEphemeralUsage(bool ephemeral, string operationName) const
+    {
+        if (!ephemeral || hasInteractionToken)
+            return Nullable!string.init;
+
+        return Nullable!string.of(formatError(
+            "context",
+            "Ephemeral responses require an active interaction token.",
+            "Attempted `" ~ operationName ~ "` with `ephemeral=true` on a non-interaction route.",
+            "Use slash/context-menu routes for ephemeral responses or call `" ~ operationName ~ "` without `ephemeral`."
+        ));
+    }
+
     private Nullable!MessageOperationTarget primaryMessageTarget() const
     {
         if (!message.isNull)
@@ -655,6 +711,24 @@ struct PrefixCommandContext
     {
         return command.source == CommandSource.Prefix;
     }
+
+    /// Prefix-friendly alias for `send`.
+    Task!void respond(string content)
+    {
+        return command.send(content);
+    }
+
+    /// Prefix-friendly alias for `send`.
+    Task!void respond(MessageCreate payload)
+    {
+        return command.send(payload);
+    }
+
+    /// Reply directly to the source message, mentioning by default.
+    Task!void replyToSource(string content, bool mentionAuthor = true)
+    {
+        return command.reply(content, mentionAuthor);
+    }
 }
 
 /// Slash command context.
@@ -671,6 +745,36 @@ struct SlashCommandContext
     bool isSlash() const @property
     {
         return command.source == CommandSource.Slash;
+    }
+
+    /// Slash-friendly alias for interaction responses.
+    Task!void respond(string content, bool ephemeral = false)
+    {
+        return command.send(content, ephemeral);
+    }
+
+    /// Slash-friendly alias for interaction responses.
+    Task!void respond(MessageCreate payload, bool ephemeral = false)
+    {
+        return command.send(payload, ephemeral);
+    }
+
+    /// Sends an ephemeral slash response.
+    Task!void respondEphemeral(string content)
+    {
+        return command.send(content, true);
+    }
+
+    /// Defers the interaction as ephemeral.
+    Task!void deferEphemeral()
+    {
+        return command.defer(true);
+    }
+
+    /// Marks the interaction as "thinking" in ephemeral mode.
+    Task!void thinkEphemeral()
+    {
+        return command.think(true);
     }
 }
 
@@ -720,7 +824,35 @@ struct HybridCommandContext
             return Nullable!SlashCommandContext.init;
         return Nullable!SlashCommandContext.of(command.asSlash());
     }
+
+    /// Unified response helper across prefix and slash routes.
+    Task!void respond(string content, bool ephemeralOnSlash = false)
+    {
+        if (fromSlash)
+            return command.send(content, ephemeralOnSlash);
+        return command.send(content);
+    }
+
+    /// Unified payload response helper across prefix and slash routes.
+    Task!void respond(MessageCreate payload, bool ephemeralOnSlash = false)
+    {
+        if (fromSlash)
+            return command.send(payload, ephemeralOnSlash);
+        return command.send(payload);
+    }
 }
+
+/// Short alias for prefix-only command handlers.
+alias PrefixContext = PrefixCommandContext;
+
+/// Short alias for slash-only command handlers.
+alias SlashContext = SlashCommandContext;
+
+/// Short alias for context-menu command handlers.
+alias ContextMenuContext = ContextMenuCommandContext;
+
+/// Short alias for hybrid prefix/slash command handlers.
+alias HybridContext = HybridCommandContext;
 
 unittest
 {
@@ -763,7 +895,7 @@ unittest
     import ddiscord.util.result : Result;
     import ddiscord.util.snowflake : Snowflake;
     import std.algorithm : canFind;
-    import std.json : JSONValue, parseJSON;
+    import std.json : JSONType, JSONValue, parseJSON;
 
     HttpRequest captured;
     HttpTransport transport = (request) {
@@ -895,4 +1027,92 @@ unittest
 
     auto crossposted = ctx.crosspost().awaitResult();
     assert(crossposted.isErr);
+}
+
+unittest
+{
+    import ddiscord.core.http.client : HttpError, HttpRequest, HttpResponse, HttpTransport;
+    import ddiscord.rest : RestClientConfig;
+    import ddiscord.util.result : Result;
+    import ddiscord.util.snowflake : Snowflake;
+    import std.algorithm : canFind;
+    import std.json : JSONType, JSONValue, parseJSON;
+
+    HttpRequest[] captured;
+    HttpTransport transport = (request) {
+        captured ~= request;
+
+        HttpResponse response;
+        response.statusCode = 200;
+        response.body = cast(ubyte[]) `{"id":"1","channel_id":"99","content":"ok","author":{"id":"2","username":"bot","bot":true}}`.dup;
+        return Result!(HttpResponse, HttpError).ok(response);
+    };
+
+    RestClientConfig config;
+    config.token = "token";
+    config.transport = Nullable!HttpTransport.of(transport);
+
+    CommandContext prefixCtx;
+    prefixCtx.rest = new RestClient(config);
+    prefixCtx.currentChannel.id = Snowflake(99);
+    prefixCtx.source = CommandSource.Prefix;
+
+    auto denied = prefixCtx.send("secret", true).awaitResult();
+    assert(denied.isErr);
+    assert(denied.error.canFind("Ephemeral responses require an active interaction token"));
+    assert(captured.length == 0);
+
+    CommandContext slashCtx;
+    slashCtx.rest = new RestClient(config);
+    slashCtx.source = CommandSource.Slash;
+    Interaction interaction;
+    interaction.id = Snowflake(33);
+    interaction.token = "abc";
+    slashCtx.interaction = Nullable!Interaction.of(interaction);
+
+    auto responded = slashCtx.asSlash().respondEphemeral("secret").awaitResult();
+    assert(responded.isOk);
+    assert(captured.length == 1);
+    assert(captured[0].url.canFind("/interactions/33/abc/callback"));
+
+    auto payload = parseJSON(cast(string) captured[0].body);
+    auto data = payload.object.get("data", JSONValue.init);
+    assert(data.object.get("flags", JSONValue.init).integer == cast(long) MessageFlags.Ephemeral);
+}
+
+unittest
+{
+    import ddiscord.core.http.client : HttpError, HttpRequest, HttpResponse, HttpTransport;
+    import ddiscord.rest : RestClientConfig;
+    import ddiscord.util.result : Result;
+    import ddiscord.util.snowflake : Snowflake;
+    import std.algorithm : canFind;
+    import std.json : JSONType, JSONValue, parseJSON;
+
+    HttpRequest captured;
+    HttpTransport transport = (request) {
+        captured = request;
+
+        HttpResponse response;
+        response.statusCode = 200;
+        response.body = cast(ubyte[]) `{"id":"1","channel_id":"99","content":"ok","author":{"id":"2","username":"bot","bot":true}}`.dup;
+        return Result!(HttpResponse, HttpError).ok(response);
+    };
+
+    RestClientConfig config;
+    config.token = "token";
+    config.transport = Nullable!HttpTransport.of(transport);
+
+    CommandContext ctx;
+    ctx.rest = new RestClient(config);
+    ctx.currentChannel.id = Snowflake(99);
+    ctx.source = CommandSource.Prefix;
+
+    auto sent = ctx.asHybrid().respond("hello", true).awaitResult();
+    assert(sent.isOk);
+    assert(captured.url.canFind("/channels/99/messages"));
+
+    auto payload = parseJSON(cast(string) captured.body);
+    auto dataFlags = payload.object.get("flags", JSONValue.init);
+    assert(dataFlags.type == JSONType.null_);
 }

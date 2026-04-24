@@ -26,7 +26,7 @@ private string submittedValue(InteractionSubmittedComponent[] components, string
 }
 
 @SlashCommand("panel", "Send a feedback button panel")
-void panel(CommandContext ctx)
+void panel(SlashContext ctx)
 {
     MessageCreate payload;
     payload = payload.withContent("Press the button to open a feedback modal.");
@@ -37,7 +37,7 @@ void panel(CommandContext ctx)
 }
 
 @SlashCommand("feedback", "Open feedback modal directly")
-void feedback(CommandContext ctx)
+void feedback(SlashContext ctx)
 {
     ctx.showModal(feedbackModal()).await();
 }

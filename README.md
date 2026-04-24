@@ -99,7 +99,7 @@ void main()
 
 ```d
 @SlashCommand("userinfo", "Show information about a user")
-void handleUserInfo(CommandContext ctx, Nullable!User target = Nullable!User.init)
+void handleUserInfo(SlashContext ctx, Nullable!User target = Nullable!User.init)
 {
     auto resolved = target.isNull ? ctx.user : target.get;
     ctx.send("User: " ~ resolved.mention, ephemeral: true).await();
@@ -110,7 +110,7 @@ void handleUserInfo(CommandContext ctx, Nullable!User target = Nullable!User.ini
 
 ```d
 @HybridCommand("hello", "Reply to the caller")
-void handleHello(CommandContext ctx)
+void handleHello(HybridContext ctx)
 {
     if (ctx.source == CommandSource.Prefix)
         ctx.reply("Hello there.", mentionAuthor: true).await();
@@ -148,11 +148,36 @@ void handleReport(CommandContext ctx)
 ```d
 @SlashCommand("inbox", "Open your DM inbox")
 @UserInstalledDmOnly
-void handleInbox(CommandContext ctx)
+void handleInbox(SlashContext ctx)
 {
     ctx.send("Inbox ready.", ephemeral: true).await();
 }
 ```
+
+### Slash autocomplete with `@Autocomplete`
+
+```d
+AutocompleteChoice[] songAutocomplete(string partial)
+{
+    return [
+        AutocompleteChoice("Song " ~ partial, partial ~ "-1"),
+        AutocompleteChoice("Song " ~ partial ~ " 2", partial ~ "-2")
+    ];
+}
+
+@SlashCommand("play", "Play a song")
+@Autocomplete!songAutocomplete("song")
+void handlePlay(SlashContext ctx, string song)
+{
+    auto _ = ctx;
+    ctx.send("Playing " ~ song).await();
+}
+```
+
+Route-specific context aliases are available for clearer signatures:
+`PrefixContext`, `SlashContext`, `HybridContext`, and `ContextMenuContext`.
+They also include route-aware helpers (for example `SlashContext.respondEphemeral(...)` and
+`PrefixContext.replyToSource(...)`) to keep handlers concise.
 
 ### Event handlers with `@Event`
 

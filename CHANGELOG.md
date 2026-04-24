@@ -11,6 +11,10 @@ All notable changes to `ddiscord` should be documented in this file.
 - New `@LuaApi(...)` UDA for namespaced API tables (default `api`) with global-export control.
 - Command-route shorthand UDAs: `@SlashCommand(...)` and `@PrefixCommand(...)`.
 - Application-command install/context UDAs: `@CommandInstallTypes(...)`, `@CommandContexts(...)`, `@GuildInstalled`, `@UserInstalled`, `@GuildContextOnly`, `@BotDmOnly`, `@PrivateChannelOnly`, `@UserInstalledDmOnly`, and `@UserInstalledPrivateOnly`.
+- Additional install/context convenience UDAs: `@DmContextOnly`, `@GuildInstalledGuildOnly`, `@UserInstalledEverywhere`, and `@InstalledEverywhere`.
+- Route-specific command context aliases: `PrefixContext`, `SlashContext`, `HybridContext`, and `ContextMenuContext`.
+- Typed slash autocomplete routing via `@Autocomplete!handler("option")`, including automatic callback responses in `Client.receiveInteraction(...)`.
+- Route-focused fluent context helpers: `PrefixContext.respond/replyToSource`, `SlashContext.respond/respondEphemeral/deferEphemeral/thinkEphemeral`, and `HybridContext.respond`.
 - Value-style Lua exports through `LuaExposeMode.Value`, enabling direct access patterns like `author.username` in scripts.
 - Value-export mutability policies via `LuaValueMutability` (`Auto`, `Mutable`, `ReadOnly`) with automatic readonly inference for `const/immutable LuaTable` exports.
 - Lua export introspection helpers: `hasValue`, `callableExportNames`, and `valueExportNames`.
@@ -54,6 +58,9 @@ All notable changes to `ddiscord` should be documented in this file.
 - `@LuaApi(...)` no longer injects Lua helper functions automatically; scripts now use native `coroutine.yield(...)` patterns explicitly.
 - Application-command sync now serializes/parses Discord `integration_types` and `contexts` metadata.
 - `@GuildOnly` and `@DirectMessageOnly` are now projected to application command `contexts` automatically when no explicit context UDA is provided.
+- Command registration now validates route/context signature mismatches (for example, `SlashContext` on non-slash routes) and ambiguous implicit autocomplete configuration.
+- `CommandRegistry.find(...)` now uses route-specific lookup caches for prefix/slash/context-menu routes to reduce per-invocation lookup cost.
+- `CommandContext` now rejects `ephemeral=true` on non-interaction routes with explicit guidance instead of silently sending invalid payload flags.
 - Guild delete gateway handling now evicts guild cache entries when Discord indicates a true removal (`unavailable=false`).
 - Channel and message delete gateway handling now evict cache entries during runtime dispatch processing.
 - Gateway/event typing surface now covers startup lifecycle plus core guild/presence/member dispatches.

@@ -23,7 +23,7 @@ import ddiscord.client_text : attemptedPrefixCommandName;
 import ddiscord.client_types : HelpRequest, RegistrationCandidate;
 import ddiscord.commands : Command, CommandCategory, CommandDescriptor, CommandExecution,
     CommandExecutionSettings, CommandMiddleware, CommandOptionDescriptor, CommandRegistry,
-    CommandRoute, HideFromHelp, HybridCommand, MessageCommand, ParsedCommand, PrefixCommand,
+    CommandRoute, Autocomplete, HideFromHelp, HybridCommand, MessageCommand, ParsedCommand, PrefixCommand,
     RequireOwner, RequirePermissions, SlashCommand, UserCommand, directMessageOnlyMiddleware,
     guildOnlyMiddleware, ownerOnlyMiddleware;
 import ddiscord.context.command : CommandContext, CommandSource;
@@ -63,7 +63,7 @@ import ddiscord.help.navigation : BuiltInHelpCustomIdPrefix, BuiltInHelpDefaultP
 import ddiscord.help.rendering : defaultComponentsHelpPage, defaultEmbeddedHelpPage;
 import ddiscord.logging : LogLevel, Logger;
 import ddiscord.models.application_command : ApplicationCommandDefinition, ApplicationCommandOption,
-    ApplicationCommandOptionType, ApplicationCommandType, InteractionType;
+    ApplicationCommandOptionType, ApplicationCommandType, AutocompleteChoice, InteractionType;
 import ddiscord.models.channel : Channel;
 import ddiscord.models.guild : Guild, UnavailableGuild;
 import ddiscord.models.interaction : Interaction, InteractionOption;
@@ -74,7 +74,7 @@ import ddiscord.models.role : Permissions, Role;
 import ddiscord.models.user : User;
 import ddiscord.plugins : LuaPlugin, PluginRegistry;
 import ddiscord.permissions : computeEffectivePermissions;
-import ddiscord.core.http.client : HttpError, HttpErrorKind, HttpResponse, HttpTransport;
+import ddiscord.core.http.client : HttpError, HttpErrorKind, HttpRequest, HttpResponse, HttpTransport;
 import ddiscord.rest : ApplicationCommandsEndpoints, ApplicationsEndpoints, ChannelsEndpoints,
     GatewayBotInfo, GatewayEndpoints, GuildsEndpoints, InteractionsEndpoints, MessagesEndpoints,
     ReactionsEndpoints, RestClient, RestClientConfig, ThreadsEndpoints, UsersEndpoints,
@@ -442,7 +442,8 @@ final class Client
     CommandContext interactionContext(Interaction interaction, Channel channel = Channel.init)
     {
         CommandContext ctx;
-        ctx.source = interaction.type == InteractionType.ApplicationCommand
+        ctx.source = interaction.type == InteractionType.ApplicationCommand ||
+            interaction.type == InteractionType.ApplicationCommandAutocomplete
             ? CommandSource.Slash
             : CommandSource.ContextMenu;
         ctx.rest = rest;
@@ -738,12 +739,73 @@ final class Client
 
         if (interaction.type == InteractionType.ApplicationCommandAutocomplete)
         {
+            auto ctx = interactionContext(interaction, channel);
+            ctx.permissions = permissions;
+            ctx.receiveLatencyMilliseconds = snowflakeLatencyMilliseconds(interaction.id);
+
+            string[string] options;
+            foreach (option; interaction.options)
+                options[option.name] = option.value;
+
             AutocompleteInteractionEvent autocompleteEvent;
             autocompleteEvent.interaction = interaction;
             autocompleteEvent.context = buildAutocompleteInteractionEventContext(interaction, channel);
             emit!AutocompleteInteractionEvent(autocompleteEvent);
-            CommandExecution ignored;
-            return Result!(CommandExecution, string).ok(ignored);
+
+            bool handledAutocomplete;
+            auto autocompleteResult = commands.executeAutocomplete(
+                ctx,
+                interaction.commandName,
+                autocompleteEvent.context.focusedName,
+                autocompleteEvent.context.focusedValue,
+                options,
+                &handledAutocomplete
+            );
+
+            if (autocompleteResult.isErr)
+            {
+                surfaceInteractionFailure(ctx, interaction.commandName, autocompleteResult.error);
+                emitCommandOutcome(
+                    Result!(CommandExecution, string).err(autocompleteResult.error),
+                    interaction.commandName,
+                    ctx,
+                    Message.init,
+                    interaction.user
+                );
+                return Result!(CommandExecution, string).err(autocompleteResult.error);
+            }
+
+            if (!handledAutocomplete)
+            {
+                CommandExecution ignored;
+                return Result!(CommandExecution, string).ok(ignored);
+            }
+
+            auto sent = ctx.autocomplete(autocompleteResult.value).awaitResult();
+            if (sent.isErr)
+            {
+                surfaceInteractionFailure(ctx, interaction.commandName, sent.error);
+                emitCommandOutcome(
+                    Result!(CommandExecution, string).err(sent.error),
+                    interaction.commandName,
+                    ctx,
+                    Message.init,
+                    interaction.user
+                );
+                return Result!(CommandExecution, string).err(sent.error);
+            }
+
+            CommandExecution execution;
+            execution.commandName = interaction.commandName;
+            execution.replyCount = autocompleteResult.value.length;
+            emitCommandOutcome(
+                Result!(CommandExecution, string).ok(execution),
+                interaction.commandName,
+                ctx,
+                Message.init,
+                interaction.user
+            );
+            return Result!(CommandExecution, string).ok(execution);
         }
 
         if (interaction.type == InteractionType.MessageComponent)
@@ -3344,6 +3406,22 @@ void clientUnittestHiddenAlpha(CommandContext ctx)
     ctx.send("hidden").await();
 }
 
+private AutocompleteChoice[] clientUnittestSongAutocomplete(string partial)
+{
+    return [
+        AutocompleteChoice("Song " ~ partial, partial ~ "-1"),
+        AutocompleteChoice("Song " ~ partial ~ " 2", partial ~ "-2"),
+    ];
+}
+
+@SlashCommand("play")
+@Autocomplete!clientUnittestSongAutocomplete("song")
+private void clientUnittestPlayAutocomplete(CommandContext ctx, string song)
+{
+    auto _ = ctx;
+    auto __ = song;
+}
+
 private bool clientUnittestReadyEventSeen;
 
 private @Event
@@ -3621,6 +3699,52 @@ unittest
     assert(result.isOk);
     assert(sawAutocomplete);
     assert(!sawCommandFailure);
+}
+
+unittest
+{
+    import std.json : JSONValue, parseJSON;
+
+    HttpRequest[] captured;
+    HttpTransport transport = (request) {
+        captured ~= request;
+
+        HttpResponse response;
+        response.statusCode = 204;
+        return Result!(HttpResponse, HttpError).ok(response);
+    };
+
+    auto client = new Client(ClientConfig(
+        "token",
+        cast(uint) GatewayIntent.Guilds,
+        transport: Nullable!HttpTransport.of(transport)
+    ));
+    client.registerCommands!clientUnittestPlayAutocomplete();
+
+    Interaction interaction;
+    interaction.id = Snowflake(1);
+    interaction.type = InteractionType.ApplicationCommandAutocomplete;
+    interaction.commandName = "play";
+    interaction.token = "autocomplete-token";
+    interaction.user.id = Snowflake(100);
+    interaction.user.username = "autocomplete-user";
+
+    InteractionOption option;
+    option.name = "song";
+    option.value = "hea";
+    option.focused = true;
+    interaction.options = [option];
+
+    auto result = client.receiveInteraction(interaction);
+    assert(result.isOk);
+
+    assert(captured.length == 1);
+    assert(captured[0].url.canFind("/interactions/1/autocomplete-token/callback"));
+    auto payload = parseJSON(cast(string) captured[0].body);
+    assert(payload.object.get("type", JSONValue.init).integer == 8);
+    auto choices = payload.object.get("data", JSONValue.init).object.get("choices", JSONValue.init).array;
+    assert(choices.length == 2);
+    assert(choices[0].object.get("name", JSONValue.init).str == "Song hea");
 }
 
 unittest
