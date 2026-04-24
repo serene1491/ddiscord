@@ -31,6 +31,8 @@ void handlePing(CommandContext ctx)
 }
 
 @Command("info", description: "Show information about a user", routes: CommandRoute.Slash)
+@GuildInstalled
+@UserInstalled
 void handleInfo(CommandContext ctx, Nullable!User target = Nullable!User.init)
 {
     auto resolved = target.isNull ? ctx.user : target.get;

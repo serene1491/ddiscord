@@ -20,7 +20,9 @@ For production-style hardening, this console can toggle:
 Useful things to try:
 
 - `!plugin-status`
-- `!eval return author().username`
+- `!eval return author.username`
+- `!eval return api.author.username`
+- `!eval author.username = "x"` (fails because `author` is exported as readonly value)
 - `!eval send("hello from lua")`
 
 The bundled `counter` plugin demonstrates host APIs available from Lua:

@@ -25,7 +25,7 @@ private string submittedValue(InteractionSubmittedComponent[] components, string
     return "";
 }
 
-@Command("panel", description: "Send a feedback button panel", routes: CommandRoute.Slash)
+@SlashCommand("panel", "Send a feedback button panel")
 void panel(CommandContext ctx)
 {
     MessageCreate payload;
@@ -36,7 +36,7 @@ void panel(CommandContext ctx)
     ctx.send(payload).await();
 }
 
-@Command("feedback", description: "Open feedback modal directly", routes: CommandRoute.Slash)
+@SlashCommand("feedback", "Open feedback modal directly")
 void feedback(CommandContext ctx)
 {
     ctx.showModal(feedbackModal()).await();

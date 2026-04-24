@@ -5,6 +5,7 @@ import std.conv : to;
 import std.path : buildPath;
 import std.stdio : writeln;
 
+@LuaApi()
 struct EvalLuaApi
 {
     CommandContext ctx;
@@ -15,7 +16,12 @@ struct EvalLuaApi
         ctx.send(content).await();
     }
 
-    @LuaExpose("author", LuaCapability.ContextRead)
+    @LuaExpose(
+        "author",
+        LuaCapability.ContextRead,
+        LuaExposeMode.Value,
+        LuaValueMutability.ReadOnly
+    )
     LuaTable author()
     {
         return LuaTable.safe(

@@ -7,8 +7,8 @@
 module ddiscord.plugins;
 
 import ddiscord.logging : Logger;
-import ddiscord.scripting : LuaCapability, LuaExpose, LuaRuntime, LuaSandboxProfile, ScriptingEngine,
-    allLuaCapabilities;
+import ddiscord.scripting : LuaApi, LuaCapability, LuaExpose, LuaRuntime, LuaSandboxProfile,
+    ScriptingEngine, allLuaCapabilities;
 import ddiscord.state : StateStore;
 import ddiscord.util.errors : formatError;
 import ddiscord.util.optional : Nullable;
@@ -75,6 +75,7 @@ struct PluginSecurityPolicy
     size_t maxManifestBytes = 256 * 1024;
 }
 
+@LuaApi()
 private struct PluginHostApi
 {
     string pluginName;

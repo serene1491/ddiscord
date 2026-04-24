@@ -5,7 +5,7 @@
 ## Prefix command
 
 ```d
-@Command("ping", description: "Reply with Pong", routes: CommandRoute.Prefix)
+@PrefixCommand("ping", "Reply with Pong")
 void ping(CommandContext ctx)
 {
     ctx.reply("Pong!").await();
@@ -15,7 +15,7 @@ void ping(CommandContext ctx)
 ## Slash command
 
 ```d
-@Command("info", description: "Show info", routes: CommandRoute.Slash)
+@SlashCommand("info", "Show info")
 void info(CommandContext ctx, Nullable!User target = Nullable!User.init)
 {
     auto user = target.isNull ? ctx.user : target.get;
@@ -71,6 +71,54 @@ Additional UDA policies are also available:
 - `@GuildOnly` for server-only commands
 - `@DirectMessageOnly` for DM-only commands
 - `@UseMiddleware("name")` for named middleware hooks
+
+## Install targets and interaction contexts
+
+Discord application commands also support:
+
+- install targets (`integration_types`)
+- interaction contexts (`contexts`)
+
+You can configure both directly with UDAs:
+
+```d
+@SlashCommand("profile", "Inspect profile")
+@CommandInstallTypes(
+    ApplicationIntegrationType.GuildInstall,
+    ApplicationIntegrationType.UserInstall
+)
+@CommandContexts(
+    InteractionContextType.Guild,
+    InteractionContextType.PrivateChannel
+)
+void profile(CommandContext ctx)
+{
+    ctx.reply("profile").await();
+}
+```
+
+Convenience UDAs:
+
+- install targets: `@GuildInstalled`, `@UserInstalled`
+- contexts: `@GuildContextOnly`, `@BotDmOnly`, `@PrivateChannelOnly`
+- combos: `@UserInstalledDmOnly`, `@UserInstalledPrivateOnly`
+
+Example:
+
+```d
+@SlashCommand("inbox", "Open personal inbox")
+@UserInstalledDmOnly
+void inbox(CommandContext ctx)
+{
+    ctx.reply("inbox ready", ephemeral: true).await();
+}
+```
+
+When no explicit command context UDA is provided, `@GuildOnly` and `@DirectMessageOnly`
+are projected to Discord `contexts` automatically for slash/context-menu sync:
+
+- `@GuildOnly` -> `contexts = [Guild]`
+- `@DirectMessageOnly` -> `contexts = [BotDM, PrivateChannel]`
 
 Example:
 

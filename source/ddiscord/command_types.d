@@ -8,7 +8,8 @@ module ddiscord.command_types;
 
 import core.time : Duration;
 import ddiscord.context.command : CommandContext;
-import ddiscord.models.application_command : ApplicationCommandOptionType, ApplicationCommandType;
+import ddiscord.models.application_command : ApplicationCommandOptionType, ApplicationCommandType,
+    ApplicationIntegrationType, InteractionContextType;
 public import ddiscord.models.application_command : CommandRoute;
 import ddiscord.models.channel : ChannelType;
 import ddiscord.util.optional : Nullable;
@@ -35,6 +36,32 @@ struct Command
 
 /// Marks an explicit hybrid command handler.
 struct HybridCommand
+{
+    string name;
+    string description;
+
+    this(string name, string description = "")
+    {
+        this.name = name;
+        this.description = description;
+    }
+}
+
+/// Marks an explicit slash-only command handler.
+struct SlashCommand
+{
+    string name;
+    string description;
+
+    this(string name, string description = "")
+    {
+        this.name = name;
+        this.description = description;
+    }
+}
+
+/// Marks an explicit prefix-only command handler.
+struct PrefixCommand
 {
     string name;
     string description;
@@ -161,6 +188,63 @@ struct DirectMessageOnly
 {
 }
 
+/// Sets explicit Discord installation targets (`integration_types`) for a command.
+struct CommandInstallTypes
+{
+    ApplicationIntegrationType[] values;
+
+    this(ApplicationIntegrationType[] values...)
+    {
+        this.values = values.dup;
+    }
+}
+
+/// Restricts command install target to guild installations.
+struct GuildInstalled
+{
+}
+
+/// Restricts command install target to user installations.
+struct UserInstalled
+{
+}
+
+/// Sets explicit Discord interaction contexts (`contexts`) for a command.
+struct CommandContexts
+{
+    InteractionContextType[] values;
+
+    this(InteractionContextType[] values...)
+    {
+        this.values = values.dup;
+    }
+}
+
+/// Restricts command contexts to guild invocations only.
+struct GuildContextOnly
+{
+}
+
+/// Restricts command contexts to bot DMs only.
+struct BotDmOnly
+{
+}
+
+/// Restricts command contexts to private channels only.
+struct PrivateChannelOnly
+{
+}
+
+/// Convenience combo for user-installed commands available only in bot DMs.
+struct UserInstalledDmOnly
+{
+}
+
+/// Convenience combo for user-installed commands available only in private channels.
+struct UserInstalledPrivateOnly
+{
+}
+
 /// Marks a command module for future module-level auto-discovery.
 struct BotModule
 {
@@ -230,6 +314,8 @@ struct CommandDescriptor
     string description;
     CommandRoute routes = CommandRoute.Hybrid;
     ApplicationCommandType applicationType = ApplicationCommandType.ChatInput;
+    ApplicationIntegrationType[] integrationTypes;
+    InteractionContextType[] contexts;
     bool stateful;
     string ownerType;
     string ownerQualifiedName;

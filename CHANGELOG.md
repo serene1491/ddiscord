@@ -6,6 +6,17 @@ All notable changes to `ddiscord` should be documented in this file.
 
 ### Added
 
+- Coroutine-aware Lua runtime stepping APIs: `evalStep*`, `evalFileStep*`, `callStep*`, `resumeStep*`, `canResume`, and `cancelSuspension`.
+- Auto-resume Lua helpers: `evalAutoResume*` and `callAutoResume*` for host-driven continuation flows.
+- New `@LuaApi(...)` UDA for namespaced API tables (default `api`) with global-export control.
+- Command-route shorthand UDAs: `@SlashCommand(...)` and `@PrefixCommand(...)`.
+- Application-command install/context UDAs: `@CommandInstallTypes(...)`, `@CommandContexts(...)`, `@GuildInstalled`, `@UserInstalled`, `@GuildContextOnly`, `@BotDmOnly`, `@PrivateChannelOnly`, `@UserInstalledDmOnly`, and `@UserInstalledPrivateOnly`.
+- Value-style Lua exports through `LuaExposeMode.Value`, enabling direct access patterns like `author.username` in scripts.
+- Value-export mutability policies via `LuaValueMutability` (`Auto`, `Mutable`, `ReadOnly`) with automatic readonly inference for `const/immutable LuaTable` exports.
+- Lua export introspection helpers: `hasValue`, `callableExportNames`, and `valueExportNames`.
+- Lua value-export introspection helper `valueExportReadOnly(name)` and startup validation for duplicate export names.
+- Coroutine payload inspection helpers: `yieldedSignalKind(...)` and `yieldedTableField(...)`.
+- `resumeStepTyped` / `resumeStep` overloads that accept a single `LuaValue` without manual array wrapping.
 - Multipart form-data helper module (`ddiscord.core.http.multipart`) for binary upload payloads.
 - Message attachment payload support via `MessageCreate.attach(...)` / `attachBytes(...)`.
 - REST support for multipart attachments in channel messages and interaction responses.
@@ -39,6 +50,10 @@ All notable changes to `ddiscord` should be documented in this file.
 
 ### Changed
 
+- `LuaRuntime.eval*` and `LuaRuntime.call*` now run on coroutine-backed execution and return explicit guidance when scripts yield unexpectedly.
+- `@LuaApi(...)` no longer injects Lua helper functions automatically; scripts now use native `coroutine.yield(...)` patterns explicitly.
+- Application-command sync now serializes/parses Discord `integration_types` and `contexts` metadata.
+- `@GuildOnly` and `@DirectMessageOnly` are now projected to application command `contexts` automatically when no explicit context UDA is provided.
 - Guild delete gateway handling now evicts guild cache entries when Discord indicates a true removal (`unavailable=false`).
 - Channel and message delete gateway handling now evict cache entries during runtime dispatch processing.
 - Gateway/event typing surface now covers startup lifecycle plus core guild/presence/member dispatches.

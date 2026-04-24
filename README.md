@@ -19,6 +19,7 @@ This library is also used in personal projects, so changes may be frequent and o
 - Guild moderation, thread management, and webhook execution REST surfaces
 - Components V2 coverage with runnable examples
 - State, cache, rate limiting, services, tasks, and Lua/plugin support
+- Coroutine-aware Lua runtime stepping (`evalStep` / `resumeStep`) with auto-resume helpers
 - Production-minded runtime controls (dispatch backpressure, error surfacing, and telemetry)
   with built-in queue health and real uptime tracking
 - Runtime safety guardrails for large bots (worker-loop crash isolation, stricter REST validation, and configurable retry controls)
@@ -70,7 +71,7 @@ Runnable example consoles live under [`examples/`](examples/README.md).
 import ddiscord;
 import std.path : buildPath;
 
-@Command("ping", description: "Check the bot latency", routes: CommandRoute.Prefix)
+@PrefixCommand("ping", "Check the bot latency")
 void handlePing(CommandContext ctx)
 {
     ctx.send("Pong!").await();
@@ -97,7 +98,7 @@ void main()
 ### Slash command with an ephemeral response
 
 ```d
-@Command("userinfo", description: "Show information about a user", routes: CommandRoute.Slash)
+@SlashCommand("userinfo", "Show information about a user")
 void handleUserInfo(CommandContext ctx, Nullable!User target = Nullable!User.init)
 {
     auto resolved = target.isNull ? ctx.user : target.get;
@@ -132,13 +133,24 @@ void handleBuild(CommandContext ctx)
 ### Opening a modal
 
 ```d
-@Command("report", description: "Open a report modal", routes: CommandRoute.Slash)
+@SlashCommand("report", "Open a report modal")
 void handleReport(CommandContext ctx)
 {
     auto modal = Modal("report_modal", "Report User")
         .addTextInput(TextInput("reason", "Reason"));
 
     ctx.showModal(modal).await();
+}
+```
+
+### User-installed slash command
+
+```d
+@SlashCommand("inbox", "Open your DM inbox")
+@UserInstalledDmOnly
+void handleInbox(CommandContext ctx)
+{
+    ctx.send("Inbox ready.", ephemeral: true).await();
 }
 ```
 
@@ -289,6 +301,14 @@ Lua host APIs include:
 - state helpers: `state_get`, `state_set`, `state_has`, `state_del`
 - plugin-scoped logging helpers: `log_info`, `log_warn`, `log_error`
 - plugin context metadata: `plugin_name`, `plugin_version`, `plugin_api_version`, `plugin_entrypoint`, `plugin_sandbox`
+
+Lua runtime helpers now also include:
+
+- namespaced API UDAs via `@LuaApi(...)` (default namespace `api`)
+- direct value exports through `@LuaExpose(..., mode: LuaExposeMode.Value)` (for `author.username` style access)
+- value-export mutability policy (`Auto`, `Mutable`, `ReadOnly`) with automatic readonly inference from `const/immutable LuaTable`
+- yield/resume orchestration via `evalStep*`, `callStep*`, and `resumeStep*`
+- coroutine payload inspection helpers: `yieldedSignalKind(...)` and `yieldedTableField(...)`
 
 For file-based plugins with `sandbox: "untrusted"` and no explicit `permissions`, the default
 capability set is intentionally minimal (`context.read`) to reduce accidental overexposure.

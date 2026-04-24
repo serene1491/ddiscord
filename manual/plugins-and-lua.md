@@ -47,6 +47,7 @@ During `run()`, the client:
 ## Exposing host APIs
 
 ```d
+@LuaApi()
 struct EvalLuaApi
 {
     CommandContext ctx;
@@ -57,7 +58,12 @@ struct EvalLuaApi
         ctx.reply(content).await();
     }
 
-    @LuaExpose("author", LuaCapability.ContextRead)
+    @LuaExpose(
+        "author",
+        LuaCapability.ContextRead,
+        LuaExposeMode.Value,
+        LuaValueMutability.ReadOnly
+    )
     LuaTable author()
     {
         return LuaTable.safe("username", ctx.user.username);
@@ -74,6 +80,59 @@ auto runtime = client.openLuaRuntime(
     [LuaCapability.ContextRead, LuaCapability.DiscordReply]
 );
 ```
+
+`@LuaApi()` creates a namespaced table (default `api`) with your exports only.
+The runtime does not inject built-in Lua helper functions; use native Lua primitives
+like `coroutine.yield(...)` directly when scripting yield/resume flows.
+
+With `LuaExposeMode.Value`, scripts can read exports directly:
+
+```lua
+-- no parentheses:
+return author.username
+-- or namespaced:
+return api.author.username
+```
+
+Value mutability is configurable:
+
+- `LuaValueMutability.Auto` (default): inferred from D type qualifiers for `LuaTable` exports.
+  - `LuaTable` -> mutable in Lua
+  - `const(LuaTable)` / `immutable(LuaTable)` -> readonly in Lua
+- `LuaValueMutability.Mutable`: always mutable in Lua
+- `LuaValueMutability.ReadOnly`: always readonly in Lua
+
+You can also configure `@LuaApi`:
+
+```d
+@LuaApi(namespaceName: "api", exportGlobals: false)
+struct MyLuaApi
+{
+    // ...
+}
+```
+
+## Yield / Resume
+
+`LuaRuntime` supports coroutine stepping:
+
+```d
+auto step = runtime.evalStepTyped(
+    "local answer = coroutine.yield({ kind = 'ask_user', prompt = 'Name?' }); return 'hi ' .. answer"
+);
+if (step.isOk && step.value.yielded)
+{
+    auto resumed = runtime.resumeStepTyped(LuaValue.from("Ada"));
+    // resumed.value.completed == true
+}
+```
+
+Helpers:
+
+- `evalStepTyped`, `evalFileStepTyped`, `callStepTyped`
+- `resumeStepTyped` (`LuaValue[]` or single `LuaValue`), `canResume`, `cancelSuspension`
+- `evalAutoResumeTyped` / `callAutoResumeTyped` (host callback handles yielded payloads)
+- `yieldedSignalKind` / `yieldedTableField` (inspect yielded table payloads safely)
 
 ## Sandbox model
 

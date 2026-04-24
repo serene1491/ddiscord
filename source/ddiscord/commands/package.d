@@ -16,14 +16,15 @@ import ddiscord.context.command : CommandContext, CommandSource, ContextMenuComm
     HybridCommandContext, PrefixCommandContext, SlashCommandContext;
 import ddiscord.models.guild : Guild;
 import ddiscord.models.application_command : ApplicationCommandDefinition, ApplicationCommandOption,
-    ApplicationCommandOptionType, ApplicationCommandType;
+    ApplicationCommandOptionType, ApplicationCommandType, ApplicationIntegrationType,
+    InteractionContextType;
 import ddiscord.models.channel : Channel;
 import ddiscord.models.member : GuildMember;
 import ddiscord.permissions : missingPermissions, permissionNames;
 import ddiscord.models.role : Role;
 import ddiscord.models.user : User;
 import ddiscord.rest : RestClient, RestClientConfig;
-import ddiscord.util.errors : formatError;
+import ddiscord.util.errors : DdiscordException, formatError;
 import ddiscord.util.optional : Nullable;
 import ddiscord.util.result : Result;
 import ddiscord.util.snowflake : Snowflake;
@@ -129,6 +130,7 @@ final class CommandRegistry
     {
         if (descriptor.displayName.length == 0)
             return;
+        validateDescriptorMetadata(descriptor);
         _descriptors ~= descriptor;
     }
 
@@ -194,7 +196,10 @@ final class CommandRegistry
 
         auto descriptor = describeMember!(T, memberName)();
         if (descriptor.displayName.length != 0)
+        {
+            validateDescriptorMetadata(descriptor);
             _descriptors ~= descriptor;
+        }
     }
 
     /// Returns the registered descriptors.
@@ -352,6 +357,12 @@ final class CommandRegistry
             ApplicationCommandDefinition definition;
             definition.name = descriptor.displayName;
             definition.type = descriptor.applicationType;
+            definition.integrationTypes = normalizedIntegrationTypes(descriptor.integrationTypes);
+
+            auto resolvedContexts = normalizedInteractionContexts(descriptor.contexts);
+            if (resolvedContexts.length == 0)
+                resolvedContexts = projectedContextsFromPolicy(descriptor.policy);
+            definition.contexts = resolvedContexts;
 
             if (descriptor.applicationType == ApplicationCommandType.ChatInput)
             {
@@ -608,15 +619,16 @@ private void registerHandlers(handlers...)(CommandRegistry registry)
     static foreach (handler; handlers)
     {
         {
-            auto descriptor = describeHandler!handler();
-            if (descriptor.displayName.length != 0)
-            {
-                descriptor.prefixExecutor = buildFreePrefixExecutor!handler();
-                descriptor.slashExecutor = buildFreeSlashExecutor!handler();
-                registry._descriptors ~= descriptor;
+                auto descriptor = describeHandler!handler();
+                if (descriptor.displayName.length != 0)
+                {
+                    descriptor.prefixExecutor = buildFreePrefixExecutor!handler();
+                    descriptor.slashExecutor = buildFreeSlashExecutor!handler();
+                    validateDescriptorMetadata(descriptor);
+                    registry._descriptors ~= descriptor;
+                }
             }
         }
-    }
 }
 
 private CommandDescriptor describeHandler(alias fn)()
@@ -646,6 +658,20 @@ private CommandDescriptor describeHandler(alias fn)()
             descriptor.routes = CommandRoute.Hybrid;
             descriptor.applicationType = ApplicationCommandType.ChatInput;
         }
+        else static if (is(typeof(attr) == SlashCommand))
+        {
+            descriptor.displayName = attr.name;
+            descriptor.description = attr.description;
+            descriptor.routes = CommandRoute.Slash;
+            descriptor.applicationType = ApplicationCommandType.ChatInput;
+        }
+        else static if (is(typeof(attr) == PrefixCommand))
+        {
+            descriptor.displayName = attr.name;
+            descriptor.description = attr.description;
+            descriptor.routes = CommandRoute.Prefix;
+            descriptor.applicationType = ApplicationCommandType.ChatInput;
+        }
         else static if (is(typeof(attr) == MessageCommand))
         {
             descriptor.displayName = attr.name;
@@ -657,6 +683,44 @@ private CommandDescriptor describeHandler(alias fn)()
             descriptor.displayName = attr.name;
             descriptor.routes = CommandRoute.ContextMenu;
             descriptor.applicationType = ApplicationCommandType.User;
+        }
+        else static if (is(typeof(attr) == CommandInstallTypes))
+        {
+            appendIntegrationTypes(descriptor.integrationTypes, attr.values);
+        }
+        else static if (AttrIs!(attr, GuildInstalled))
+        {
+            appendIntegrationTypes(descriptor.integrationTypes, [ApplicationIntegrationType.GuildInstall]);
+        }
+        else static if (AttrIs!(attr, UserInstalled))
+        {
+            appendIntegrationTypes(descriptor.integrationTypes, [ApplicationIntegrationType.UserInstall]);
+        }
+        else static if (is(typeof(attr) == CommandContexts))
+        {
+            appendInteractionContexts(descriptor.contexts, attr.values);
+        }
+        else static if (AttrIs!(attr, GuildContextOnly))
+        {
+            appendInteractionContexts(descriptor.contexts, [InteractionContextType.Guild]);
+        }
+        else static if (AttrIs!(attr, BotDmOnly))
+        {
+            appendInteractionContexts(descriptor.contexts, [InteractionContextType.BotDM]);
+        }
+        else static if (AttrIs!(attr, PrivateChannelOnly))
+        {
+            appendInteractionContexts(descriptor.contexts, [InteractionContextType.PrivateChannel]);
+        }
+        else static if (AttrIs!(attr, UserInstalledDmOnly))
+        {
+            appendIntegrationTypes(descriptor.integrationTypes, [ApplicationIntegrationType.UserInstall]);
+            appendInteractionContexts(descriptor.contexts, [InteractionContextType.BotDM]);
+        }
+        else static if (AttrIs!(attr, UserInstalledPrivateOnly))
+        {
+            appendIntegrationTypes(descriptor.integrationTypes, [ApplicationIntegrationType.UserInstall]);
+            appendInteractionContexts(descriptor.contexts, [InteractionContextType.PrivateChannel]);
         }
         else static if (AttrIs!(attr, RequireOwner))
         {
@@ -770,6 +834,8 @@ private bool hasCommandAttr(alias fn)()
         static if (
             is(typeof(attr) == Command) ||
             is(typeof(attr) == HybridCommand) ||
+            is(typeof(attr) == SlashCommand) ||
+            is(typeof(attr) == PrefixCommand) ||
             is(typeof(attr) == MessageCommand) ||
             is(typeof(attr) == UserCommand)
         )
@@ -862,6 +928,125 @@ private Result!(T, string) resolveCommandContextParameter(T)(CommandContext ctx)
 private bool routeEnabled(CommandRoute available, CommandRoute requested)
 {
     return (cast(uint) available & cast(uint) requested) != 0;
+}
+
+private bool descriptorHasApplicationSyncRoute(CommandDescriptor descriptor)
+{
+    if (descriptor.applicationType == ApplicationCommandType.ChatInput)
+        return routeEnabled(descriptor.routes, CommandRoute.Slash);
+    return routeEnabled(descriptor.routes, CommandRoute.ContextMenu);
+}
+
+private void validateDescriptorMetadata(CommandDescriptor descriptor)
+{
+    if (descriptor.policy.guildOnly && descriptor.policy.directMessageOnly)
+    {
+        throw new DdiscordException(formatError(
+            "commands",
+            "A command cannot be both guild-only and direct-message-only.",
+            "Command `" ~ descriptor.displayName ~ "` defines `@GuildOnly` and `@DirectMessageOnly` together.",
+            "Remove one of these policy UDAs so the command has a valid execution scope."
+        ));
+    }
+
+    auto explicitContexts = normalizedInteractionContexts(descriptor.contexts);
+    if (descriptor.policy.guildOnly && explicitContexts.length != 0)
+    {
+        foreach (context; explicitContexts)
+        {
+            if (context != InteractionContextType.Guild)
+            {
+                throw new DdiscordException(formatError(
+                    "commands",
+                    "A guild-only command cannot expose DM/private command contexts.",
+                    "Command `" ~ descriptor.displayName ~ "` uses `@GuildOnly` with non-guild `@CommandContexts` values.",
+                    "Keep only `InteractionContextType.Guild` or remove `@GuildOnly`."
+                ));
+            }
+        }
+    }
+
+    if (descriptor.policy.directMessageOnly && explicitContexts.length != 0)
+    {
+        foreach (context; explicitContexts)
+        {
+            if (context == InteractionContextType.Guild)
+            {
+                throw new DdiscordException(formatError(
+                    "commands",
+                    "A DM-only command cannot expose guild command contexts.",
+                    "Command `" ~ descriptor.displayName ~ "` uses `@DirectMessageOnly` with `InteractionContextType.Guild`.",
+                    "Use only `InteractionContextType.BotDM`/`PrivateChannel` or remove `@DirectMessageOnly`."
+                ));
+            }
+        }
+    }
+
+    if (
+        !descriptorHasApplicationSyncRoute(descriptor) &&
+        (descriptor.integrationTypes.length != 0 || descriptor.contexts.length != 0)
+    )
+    {
+        throw new DdiscordException(formatError(
+            "commands",
+            "Command install/context UDAs require an application-command route.",
+            "Command `" ~ descriptor.displayName ~ "` is prefix-only but defines install/context metadata.",
+            "Use `@SlashCommand`/`@Command(..., routes: CommandRoute.Slash|Hybrid)` or remove install/context UDAs."
+        ));
+    }
+}
+
+private void appendIntegrationTypes(
+    ref ApplicationIntegrationType[] destination,
+    scope const(ApplicationIntegrationType)[] values
+)
+{
+    foreach (value; values)
+    {
+        if (!destination.canFind(value))
+            destination ~= value;
+    }
+}
+
+private ApplicationIntegrationType[] normalizedIntegrationTypes(
+    scope const(ApplicationIntegrationType)[] values
+)
+{
+    ApplicationIntegrationType[] normalized;
+    appendIntegrationTypes(normalized, values);
+    return normalized;
+}
+
+private void appendInteractionContexts(
+    ref InteractionContextType[] destination,
+    scope const(InteractionContextType)[] values
+)
+{
+    foreach (value; values)
+    {
+        if (!destination.canFind(value))
+            destination ~= value;
+    }
+}
+
+private InteractionContextType[] normalizedInteractionContexts(
+    scope const(InteractionContextType)[] values
+)
+{
+    InteractionContextType[] normalized;
+    appendInteractionContexts(normalized, values);
+    return normalized;
+}
+
+private InteractionContextType[] projectedContextsFromPolicy(CommandPolicyDescriptor policy)
+{
+    if (policy.guildOnly)
+        return [InteractionContextType.Guild];
+
+    if (policy.directMessageOnly)
+        return [InteractionContextType.BotDM, InteractionContextType.PrivateChannel];
+
+    return null;
 }
 
 private string defaultOptionName(string parameterName)
@@ -1621,6 +1806,10 @@ private string commandName(alias fn)()
             return attr.name;
         else static if (is(typeof(attr) == HybridCommand))
             return attr.name;
+        else static if (is(typeof(attr) == SlashCommand))
+            return attr.name;
+        else static if (is(typeof(attr) == PrefixCommand))
+            return attr.name;
         else static if (is(typeof(attr) == MessageCommand))
             return attr.name;
         else static if (is(typeof(attr) == UserCommand))
@@ -1951,6 +2140,152 @@ unittest
     assert(definitions[0].type == ApplicationCommandType.ChatInput);
     assert(definitions[0].options.length == 1);
     assert(definitions[1].type == ApplicationCommandType.Message);
+}
+
+unittest
+{
+    @SlashCommand("whoami", "Inspect user command install/context metadata")
+    @UserInstalled
+    @GuildInstalled
+    @CommandContexts(InteractionContextType.Guild, InteractionContextType.PrivateChannel)
+    void whoami(CommandContext ctx)
+    {
+        auto _ = ctx;
+    }
+
+    auto registry = new CommandRegistry(new ServiceContainer);
+    registerHandlers!(whoami)(registry);
+
+    auto definitions = registry.applicationCommands;
+    assert(definitions.length == 1);
+    assert(definitions[0].name == "whoami");
+    assert(definitions[0].integrationTypes.length == 2);
+    assert(definitions[0].integrationTypes.canFind(ApplicationIntegrationType.GuildInstall));
+    assert(definitions[0].integrationTypes.canFind(ApplicationIntegrationType.UserInstall));
+    assert(definitions[0].contexts.length == 2);
+    assert(definitions[0].contexts[0] == InteractionContextType.Guild);
+    assert(definitions[0].contexts[1] == InteractionContextType.PrivateChannel);
+}
+
+unittest
+{
+    @PrefixCommand("guild-maint")
+    @GuildOnly
+    void guildMaint(CommandContext ctx)
+    {
+        auto _ = ctx;
+    }
+
+    @SlashCommand("dm-utility")
+    @DirectMessageOnly
+    void dmUtility(CommandContext ctx)
+    {
+        auto _ = ctx;
+    }
+
+    auto registry = new CommandRegistry(new ServiceContainer);
+    registerHandlers!(guildMaint, dmUtility)(registry);
+
+    auto definitions = registry.applicationCommands;
+    assert(definitions.length == 1);
+    assert(definitions[0].name == "dm-utility");
+    assert(definitions[0].contexts.length == 2);
+    assert(definitions[0].contexts.canFind(InteractionContextType.BotDM));
+    assert(definitions[0].contexts.canFind(InteractionContextType.PrivateChannel));
+}
+
+unittest
+{
+    @SlashCommand("dm-only-install")
+    @UserInstalledDmOnly
+    void dmInstall(CommandContext ctx)
+    {
+        auto _ = ctx;
+    }
+
+    auto registry = new CommandRegistry(new ServiceContainer);
+    registerHandlers!(dmInstall)(registry);
+
+    auto definitions = registry.applicationCommands;
+    assert(definitions.length == 1);
+    assert(definitions[0].integrationTypes.length == 1);
+    assert(definitions[0].integrationTypes[0] == ApplicationIntegrationType.UserInstall);
+    assert(definitions[0].contexts.length == 1);
+    assert(definitions[0].contexts[0] == InteractionContextType.BotDM);
+}
+
+unittest
+{
+    @PrefixCommand("broken")
+    @UserInstalled
+    void broken(CommandContext ctx)
+    {
+        auto _ = ctx;
+    }
+
+    bool threw;
+    try
+    {
+        auto registry = new CommandRegistry(new ServiceContainer);
+        registerHandlers!(broken)(registry);
+    }
+    catch (DdiscordException error)
+    {
+        threw = true;
+        assert(error.msg.canFind("prefix-only"));
+    }
+
+    assert(threw);
+}
+
+unittest
+{
+    @SlashCommand("context-conflict")
+    @GuildOnly
+    @CommandContexts(InteractionContextType.BotDM)
+    void contextConflict(CommandContext ctx)
+    {
+        auto _ = ctx;
+    }
+
+    bool threw;
+    try
+    {
+        auto registry = new CommandRegistry(new ServiceContainer);
+        registerHandlers!(contextConflict)(registry);
+    }
+    catch (DdiscordException error)
+    {
+        threw = true;
+        assert(error.msg.canFind("cannot expose DM/private command contexts"));
+    }
+
+    assert(threw);
+}
+
+unittest
+{
+    @SlashCommand("conflicted")
+    @GuildOnly
+    @DirectMessageOnly
+    void conflicted(CommandContext ctx)
+    {
+        auto _ = ctx;
+    }
+
+    bool threw;
+    try
+    {
+        auto registry = new CommandRegistry(new ServiceContainer);
+        registerHandlers!(conflicted)(registry);
+    }
+    catch (DdiscordException error)
+    {
+        threw = true;
+        assert(error.msg.canFind("cannot be both guild-only and direct-message-only"));
+    }
+
+    assert(threw);
 }
 
 unittest

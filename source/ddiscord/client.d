@@ -23,9 +23,9 @@ import ddiscord.client_text : attemptedPrefixCommandName;
 import ddiscord.client_types : HelpRequest, RegistrationCandidate;
 import ddiscord.commands : Command, CommandCategory, CommandDescriptor, CommandExecution,
     CommandExecutionSettings, CommandMiddleware, CommandOptionDescriptor, CommandRegistry,
-    CommandRoute, HideFromHelp, HybridCommand, MessageCommand, ParsedCommand, RequireOwner,
-    RequirePermissions, UserCommand, directMessageOnlyMiddleware, guildOnlyMiddleware,
-    ownerOnlyMiddleware;
+    CommandRoute, HideFromHelp, HybridCommand, MessageCommand, ParsedCommand, PrefixCommand,
+    RequireOwner, RequirePermissions, SlashCommand, UserCommand, directMessageOnlyMiddleware,
+    guildOnlyMiddleware, ownerOnlyMiddleware;
 import ddiscord.context.command : CommandContext, CommandSource;
 import ddiscord.context.event : AutocompleteInteractionEventContext, CommandExecutedEventContext,
     ChannelCreateEventContext, ChannelDeleteEventContext, ChannelPinsUpdateEventContext,
@@ -2843,6 +2843,8 @@ private template hasCommandRegistrationAttrImpl(attrs...)
     else static if (
         is(typeof(attrs[0]) == Command) ||
         is(typeof(attrs[0]) == HybridCommand) ||
+        is(typeof(attrs[0]) == SlashCommand) ||
+        is(typeof(attrs[0]) == PrefixCommand) ||
         is(typeof(attrs[0]) == MessageCommand) ||
         is(typeof(attrs[0]) == UserCommand)
     )
@@ -2957,6 +2959,10 @@ private RegistrationCandidate describeCallableCandidate(alias fn)()
             candidate.commandName = attr.name;
         else static if (is(typeof(attr) == HybridCommand))
             candidate.commandName = attr.name;
+        else static if (is(typeof(attr) == SlashCommand))
+            candidate.commandName = attr.name;
+        else static if (is(typeof(attr) == PrefixCommand))
+            candidate.commandName = attr.name;
         else static if (is(typeof(attr) == MessageCommand))
             candidate.commandName = attr.name;
         else static if (is(typeof(attr) == UserCommand))
@@ -2994,6 +3000,10 @@ private RegistrationCandidate describeCommandMemberCandidate(T, string memberNam
         static if (is(typeof(attr) == Command))
             candidate.commandName = attr.name;
         else static if (is(typeof(attr) == HybridCommand))
+            candidate.commandName = attr.name;
+        else static if (is(typeof(attr) == SlashCommand))
+            candidate.commandName = attr.name;
+        else static if (is(typeof(attr) == PrefixCommand))
             candidate.commandName = attr.name;
         else static if (is(typeof(attr) == MessageCommand))
             candidate.commandName = attr.name;

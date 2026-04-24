@@ -21,6 +21,13 @@ The example loads Discord configuration from `examples/.env` and `examples/.env.
 
 On the first run it creates the SQLite schema with Dorm migrations, then starts the bot normally.
 
+`dorm@0.4.0` currently emits deprecation warnings on newer compilers, so this example
+uses a local debug build setting (`buildRequirements: ["silenceDeprecations"]`)
+to keep build output focused on actionable project warnings.
+
+You may still see a DUB resolver warning about `unit-threaded` version selection.
+That warning is expected in this dependency graph and does not block builds.
+
 ## Commands
 
 - `/save-script name:<name> scope:<user|server> source:<lua>`

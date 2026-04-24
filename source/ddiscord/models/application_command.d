@@ -36,6 +36,21 @@ enum ApplicationCommandType : int
     Message = 3,
 }
 
+/// Discord application integration install targets.
+enum ApplicationIntegrationType : int
+{
+    GuildInstall = 0,
+    UserInstall = 1,
+}
+
+/// Discord interaction contexts where a command can execute.
+enum InteractionContextType : int
+{
+    Guild = 0,
+    BotDM = 1,
+    PrivateChannel = 2,
+}
+
 /// Discord application command option types.
 enum ApplicationCommandOptionType : int
 {
@@ -178,6 +193,8 @@ struct ApplicationCommandDefinition
     string name;
     string description;
     ApplicationCommandType type = ApplicationCommandType.ChatInput;
+    ApplicationIntegrationType[] integrationTypes;
+    InteractionContextType[] contexts;
     ApplicationCommandOption[] options;
 
     JSONValue toJSON() const
@@ -198,6 +215,22 @@ struct ApplicationCommandDefinition
             foreach (option; options)
                 optionValues ~= option.toJSON();
             json["options"] = optionValues;
+        }
+
+        if (integrationTypes.length != 0)
+        {
+            JSONValue[] installValues;
+            foreach (installType; integrationTypes)
+                installValues ~= JSONValue(cast(int) installType);
+            json["integration_types"] = installValues;
+        }
+
+        if (contexts.length != 0)
+        {
+            JSONValue[] contextValues;
+            foreach (contextType; contexts)
+                contextValues ~= JSONValue(cast(int) contextType);
+            json["contexts"] = contextValues;
         }
 
         return json;
@@ -226,6 +259,20 @@ struct ApplicationCommandDefinition
                 definition.options ~= ApplicationCommandOption.fromJSON(item);
         }
 
+        auto integrationValue = json.object.get("integration_types", JSONValue.init);
+        if (integrationValue.type == JSONType.array)
+        {
+            foreach (item; integrationValue.array)
+                definition.integrationTypes ~= cast(ApplicationIntegrationType) cast(int) item.integer;
+        }
+
+        auto contextsValue = json.object.get("contexts", JSONValue.init);
+        if (contextsValue.type == JSONType.array)
+        {
+            foreach (item; contextsValue.array)
+                definition.contexts ~= cast(InteractionContextType) cast(int) item.integer;
+        }
+
         return definition;
     }
 }
@@ -250,4 +297,48 @@ unittest
 
     auto contextJson = contextMenu.toJSON();
     assert(contextJson.object.get("description", JSONValue.init).type == JSONType.null_);
+}
+
+unittest
+{
+    ApplicationCommandDefinition command;
+    command.name = "inspect";
+    command.type = ApplicationCommandType.User;
+    command.integrationTypes = [
+        ApplicationIntegrationType.GuildInstall,
+        ApplicationIntegrationType.UserInstall,
+    ];
+    command.contexts = [
+        InteractionContextType.Guild,
+        InteractionContextType.PrivateChannel,
+    ];
+
+    auto json = command.toJSON();
+    auto installs = json.object.get("integration_types", JSONValue.init);
+    auto contexts = json.object.get("contexts", JSONValue.init);
+    assert(installs.type == JSONType.array);
+    assert(contexts.type == JSONType.array);
+    assert(installs.array.length == 2);
+    assert(contexts.array.length == 2);
+}
+
+unittest
+{
+    JSONValue payload;
+    payload["name"] = "whois";
+    payload["type"] = cast(int) ApplicationCommandType.User;
+    payload["integration_types"] = [
+        JSONValue(cast(int) ApplicationIntegrationType.UserInstall),
+    ];
+    payload["contexts"] = [
+        JSONValue(cast(int) InteractionContextType.BotDM),
+        JSONValue(cast(int) InteractionContextType.PrivateChannel),
+    ];
+
+    auto parsed = ApplicationCommandDefinition.fromJSON(payload);
+    assert(parsed.integrationTypes.length == 1);
+    assert(parsed.integrationTypes[0] == ApplicationIntegrationType.UserInstall);
+    assert(parsed.contexts.length == 2);
+    assert(parsed.contexts[0] == InteractionContextType.BotDM);
+    assert(parsed.contexts[1] == InteractionContextType.PrivateChannel);
 }

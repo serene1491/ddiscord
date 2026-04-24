@@ -19,6 +19,7 @@ alias lua_KContext = long;
 alias lua_KFunction = int function(lua_State* L, int status, lua_KContext ctx);
 
 enum LuaOk = 0;
+enum LuaYield = 1;
 enum LuaMultRet = -1;
 
 enum LuaTypeNil = 0;
@@ -29,6 +30,8 @@ enum LuaTypeTable = 5;
 enum LuaTypeFunction = 6;
 
 enum LuaRegistryIndex = -1001000;
+enum LuaRefNil = -1;
+enum LuaNoRef = -2;
 
 lua_State* luaL_newstate();
 void luaL_openlibs(lua_State* L);
@@ -38,6 +41,11 @@ int luaL_loadstring(lua_State* L, const char* code);
 int luaL_loadfilex(lua_State* L, const char* filename, const char* mode);
 int lua_pcallk(lua_State* L, int nargs, int nresults, int errfunc, lua_KContext ctx, lua_KFunction k);
 int lua_error(lua_State* L);
+int lua_resume(lua_State* L, lua_State* from, int nargs, int* nresults);
+int lua_status(lua_State* L);
+int lua_yieldk(lua_State* L, int nresults, lua_KContext ctx, lua_KFunction k);
+lua_State* lua_newthread(lua_State* L);
+void lua_xmove(lua_State* from, lua_State* to, int n);
 
 int lua_gettop(lua_State* L);
 void lua_settop(lua_State* L, int idx);
@@ -65,6 +73,10 @@ int lua_getfield(lua_State* L, int idx, const(char)* k);
 void lua_setfield(lua_State* L, int idx, const(char)* k);
 void lua_createtable(lua_State* L, int narr, int nrec);
 int lua_next(lua_State* L, int idx);
+int lua_setmetatable(lua_State* L, int index);
+void lua_rawgeti(lua_State* L, int idx, lua_Integer n);
+int luaL_ref(lua_State* L, int t);
+void luaL_unref(lua_State* L, int t, int referenceId);
 
 int luaPCall(lua_State* L, int nargs, int nresults, int errfunc)
 {

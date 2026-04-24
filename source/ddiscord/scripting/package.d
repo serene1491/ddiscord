@@ -13,7 +13,7 @@ import std.algorithm : canFind;
 import std.array : join;
 import std.conv : ConvException, to;
 import std.string : indexOf, toStringz;
-import std.traits : Parameters, ReturnType, isCallable;
+import std.traits : Parameters, ReturnType, Unqual, isCallable, isFloatingPoint, isIntegral;
 
 /// Capability flags for Lua host APIs.
 enum LuaCapability
@@ -38,13 +38,49 @@ struct LuaExpose
 {
     string name;
     LuaCapability permission = LuaCapability.ContextRead;
+    LuaExposeMode mode = LuaExposeMode.Function;
+    LuaValueMutability valueMutability = LuaValueMutability.Auto;
 
-    this(string name, LuaCapability permission = LuaCapability.ContextRead)
+    this(
+        string name,
+        LuaCapability permission = LuaCapability.ContextRead,
+        LuaExposeMode mode = LuaExposeMode.Function,
+        LuaValueMutability valueMutability = LuaValueMutability.Auto
+    )
     {
         this.name = name;
         this.permission = permission;
+        this.mode = mode;
+        this.valueMutability = valueMutability;
     }
 }
+
+
+/// Export mode for `@LuaExpose` targets.
+enum LuaExposeMode
+{
+    Function,
+    Value,
+}
+
+/// Mutability policy for value-mode Lua exports.
+enum LuaValueMutability
+{
+    Auto,
+    Mutable,
+    ReadOnly,
+}
+
+
+/// UDA that configures a namespaced Lua API table for a binding type.
+struct LuaApi
+{
+    string namespaceName = DefaultLuaApiNamespace;
+    bool exportGlobals = true;
+}
+
+enum DefaultLuaApiNamespace = "api";
+enum LuaReadOnlyValueError = "Lua value export is readonly.";
 
 /// Error returned by script execution.
 struct ScriptError
@@ -53,12 +89,39 @@ struct ScriptError
     size_t line;
 }
 
-/// Metadata for a single exported Lua function.
+/// Metadata for a single exported Lua symbol.
 struct LuaExportDescriptor
 {
     string symbolName;
     string exportName;
     LuaCapability permission;
+    LuaExposeMode mode = LuaExposeMode.Function;
+    LuaValueMutability valueMutability = LuaValueMutability.Auto;
+    bool readonlyValue;
+}
+
+/// State reported after stepping a coroutine-backed Lua runtime.
+enum LuaStepState
+{
+    Completed,
+    Yielded,
+}
+
+/// Step payload returned by `evalStep*`, `callStep*`, and `resumeStep*`.
+struct LuaStepResult
+{
+    LuaStepState state = LuaStepState.Completed;
+    LuaValue value;
+
+    bool completed() const @property
+    {
+        return state == LuaStepState.Completed;
+    }
+
+    bool yielded() const @property
+    {
+        return state == LuaStepState.Yielded;
+    }
 }
 
 /// Safe Lua table projection.
@@ -184,7 +247,32 @@ private struct LuaCallableDescriptor
     string symbolName;
     string exportName;
     LuaCapability permission;
+    LuaExposeMode mode = LuaExposeMode.Function;
     Result!(LuaValue, ScriptError) delegate(LuaValue[]) invoke;
+}
+
+private struct LuaValueDescriptor
+{
+    string symbolName;
+    string exportName;
+    LuaCapability permission;
+    LuaExposeMode mode = LuaExposeMode.Value;
+    LuaValueMutability valueMutability = LuaValueMutability.Auto;
+    bool readonlyValue;
+    Result!(LuaValue, ScriptError) delegate() read;
+}
+
+private struct LuaCollectedExports
+{
+    LuaCallableDescriptor[] callables;
+    LuaValueDescriptor[] values;
+}
+
+private struct LuaApiDescriptor
+{
+    bool enabled;
+    string namespaceName = DefaultLuaApiNamespace;
+    bool exportGlobals = true;
 }
 
 private final class LuaCallableThunk
@@ -208,10 +296,16 @@ private final class LuaVm
     private LuaSandboxProfile _profile;
     private LuaCallableThunk[] _thunks;
     private LuaCapability[string] _restrictedExports;
+    private lua_State* _thread;
+    private int _threadRef = LuaNoRef;
+    private bool _suspended;
+    private string _suspendedChunkName;
 
     this(
         LuaSandboxProfile profile,
         LuaCallableDescriptor[] callables,
+        LuaValueDescriptor[] values = null,
+        LuaApiDescriptor apiDescriptor = LuaApiDescriptor.init,
         LuaExportDescriptor[] restrictedExports = null
     )
     {
@@ -232,11 +326,13 @@ private final class LuaVm
 
         luaL_openlibs(_state);
         applySandbox();
-        registerCallables(callables);
+        registerCallables(callables, apiDescriptor);
+        registerValues(values, apiDescriptor);
     }
 
     ~this()
     {
+        cancelSuspension();
         if (_state !is null)
             lua_close(_state);
         _state = null;
@@ -244,55 +340,32 @@ private final class LuaVm
 
     Result!(LuaValue, ScriptError) evalValue(string code)
     {
-        auto status = luaL_loadstring(_state, toStringz(code));
-        return execute(status, "[eval]");
+        auto step = evalStepValue(code);
+        if (step.isErr)
+            return Result!(LuaValue, ScriptError).err(step.error);
+        if (step.value.yielded)
+            return Result!(LuaValue, ScriptError).err(yieldedUnsupported("[eval]"));
+        return Result!(LuaValue, ScriptError).ok(step.value.value);
     }
 
     Result!(LuaValue, ScriptError) evalFileValue(string path)
     {
-        auto status = luaL_loadfilex(_state, toStringz(path), null);
-        return execute(status, path);
+        auto step = evalFileStepValue(path);
+        if (step.isErr)
+            return Result!(LuaValue, ScriptError).err(step.error);
+        if (step.value.yielded)
+            return Result!(LuaValue, ScriptError).err(yieldedUnsupported(path));
+        return Result!(LuaValue, ScriptError).ok(step.value.value);
     }
 
     Result!(LuaValue, ScriptError) callValue(string globalName, LuaValue[] args = null)
     {
-        lua_getglobal(_state, toStringz(globalName));
-
-        auto globalType = lua_type(_state, -1);
-        if (globalType == LuaTypeNil)
-        {
-            luaPop(_state, 1);
-            return Result!(LuaValue, ScriptError).err(ScriptError(
-                "Lua global `" ~ globalName ~ "` does not exist in this runtime.",
-                0
-            ));
-        }
-
-        if (globalType != LuaTypeFunction)
-        {
-            luaPop(_state, 1);
-            return Result!(LuaValue, ScriptError).err(ScriptError(
-                "Lua global `" ~ globalName ~ "` exists but is not callable.",
-                0
-            ));
-        }
-
-        foreach (arg; args)
-            pushValue(_state, arg);
-
-        auto status = luaPCall(_state, cast(int) args.length, 1, 0);
-        if (status != LuaOk)
-            return Result!(LuaValue, ScriptError).err(scriptError(enrichLuaError(lastErrorMessage()), globalName));
-
-        auto result = valueFromStack(_state, -1);
-        if (result.isErr)
-        {
-            luaPop(_state, 1);
-            return result;
-        }
-
-        luaPop(_state, 1);
-        return Result!(LuaValue, ScriptError).ok(result.value);
+        auto step = callStepValue(globalName, args);
+        if (step.isErr)
+            return Result!(LuaValue, ScriptError).err(step.error);
+        if (step.value.yielded)
+            return Result!(LuaValue, ScriptError).err(yieldedUnsupported(globalName));
+        return Result!(LuaValue, ScriptError).ok(step.value.value);
     }
 
     bool hasCallable(string globalName)
@@ -302,17 +375,107 @@ private final class LuaVm
         return lua_type(_state, -1) == LuaTypeFunction;
     }
 
-    private Result!(LuaValue, ScriptError) execute(int status, string chunkName)
+    bool canResume() const @property
     {
-        if (status != LuaOk)
-            return Result!(LuaValue, ScriptError).err(scriptError(enrichLuaError(lastErrorMessage()), chunkName));
+        return _suspended && _thread !is null;
+    }
 
-        status = luaPCall(_state, 0, 1, 0);
-        if (status != LuaOk)
-            return Result!(LuaValue, ScriptError).err(scriptError(enrichLuaError(lastErrorMessage()), chunkName));
+    void cancelSuspension()
+    {
+        releaseThread();
+    }
 
-        scope(exit) luaPop(_state, 1);
-        return valueFromStack(_state, -1);
+    Result!(LuaStepResult, ScriptError) evalStepValue(string code)
+    {
+        if (_suspended)
+        {
+            return Result!(LuaStepResult, ScriptError).err(ScriptError(
+                "Lua runtime has a suspended coroutine. Resume or cancel it before starting a new script.",
+                0
+            ));
+        }
+
+        auto chunkName = "[eval]";
+        auto thread = beginThread(chunkName);
+        auto status = luaL_loadstring(thread, toStringz(code));
+        if (status != LuaOk)
+            return loadErrorFromThread(thread, chunkName);
+
+        return resumeThread(cast(int) 0, chunkName);
+    }
+
+    Result!(LuaStepResult, ScriptError) evalFileStepValue(string path)
+    {
+        if (_suspended)
+        {
+            return Result!(LuaStepResult, ScriptError).err(ScriptError(
+                "Lua runtime has a suspended coroutine. Resume or cancel it before starting a new script.",
+                0
+            ));
+        }
+
+        auto thread = beginThread(path);
+        auto status = luaL_loadfilex(thread, toStringz(path), null);
+        if (status != LuaOk)
+            return loadErrorFromThread(thread, path);
+
+        return resumeThread(cast(int) 0, path);
+    }
+
+    Result!(LuaStepResult, ScriptError) callStepValue(string globalName, LuaValue[] args = null)
+    {
+        if (_suspended)
+        {
+            return Result!(LuaStepResult, ScriptError).err(ScriptError(
+                "Lua runtime has a suspended coroutine. Resume or cancel it before starting a new call.",
+                0
+            ));
+        }
+
+        auto thread = beginThread(globalName);
+        lua_getglobal(thread, toStringz(globalName));
+
+        auto globalType = lua_type(thread, -1);
+        if (globalType == LuaTypeNil)
+        {
+            lua_settop(thread, 0);
+            releaseThread();
+            return Result!(LuaStepResult, ScriptError).err(ScriptError(
+                "Lua global `" ~ globalName ~ "` does not exist in this runtime.",
+                0
+            ));
+        }
+
+        if (globalType != LuaTypeFunction)
+        {
+            lua_settop(thread, 0);
+            releaseThread();
+            return Result!(LuaStepResult, ScriptError).err(ScriptError(
+                "Lua global `" ~ globalName ~ "` exists but is not callable.",
+                0
+            ));
+        }
+
+        foreach (arg; args)
+            pushValue(thread, arg);
+
+        return resumeThread(cast(int) args.length, globalName);
+    }
+
+    Result!(LuaStepResult, ScriptError) resumeStepValue(LuaValue[] args = null)
+    {
+        if (!canResume)
+        {
+            return Result!(LuaStepResult, ScriptError).err(ScriptError(
+                "Lua runtime does not have a suspended coroutine to resume.",
+                0
+            ));
+        }
+
+        foreach (arg; args)
+            pushValue(_thread, arg);
+
+        return resumeThread(cast(int) args.length, _suspendedChunkName);
     }
 
     private void applySandbox()
@@ -338,17 +501,186 @@ private final class LuaVm
         }
     }
 
-    private void registerCallables(LuaCallableDescriptor[] callables)
+    private void registerCallables(LuaCallableDescriptor[] callables, LuaApiDescriptor apiDescriptor)
     {
+        auto apiTableIndex = ensureApiTable(apiDescriptor);
+        scope(exit)
+        {
+            if (apiTableIndex != 0)
+                luaPop(_state, 1);
+        }
+
         foreach (callable; callables)
         {
             auto thunk = new LuaCallableThunk(callable.exportName, callable.invoke);
             _thunks ~= thunk;
 
-            lua_pushlightuserdata(_state, cast(void*) thunk);
-            lua_pushcclosure(_state, &invokeLuaCallable, 1);
-            lua_setglobal(_state, toStringz(callable.exportName));
+            if (!apiDescriptor.enabled || apiDescriptor.exportGlobals)
+            {
+                pushCallable(thunk);
+                lua_setglobal(_state, toStringz(callable.exportName));
+            }
+
+            if (apiTableIndex != 0)
+            {
+                pushCallable(thunk);
+                lua_setfield(_state, apiTableIndex, toStringz(callable.exportName));
+            }
         }
+    }
+
+    private void registerValues(LuaValueDescriptor[] values, LuaApiDescriptor apiDescriptor)
+    {
+        auto apiTableIndex = ensureApiTable(apiDescriptor);
+        scope(exit)
+        {
+            if (apiTableIndex != 0)
+                luaPop(_state, 1);
+        }
+
+        foreach (valueDescriptor; values)
+        {
+            auto resolved = valueDescriptor.read();
+            if (resolved.isErr)
+            {
+                throw new DdiscordException(formatError(
+                    "scripting",
+                    "Could not expose a Lua value export.",
+                    resolved.error.message,
+                    "Check the exported symbol type and Lua value conversion support."
+                ));
+            }
+
+            if (!apiDescriptor.enabled || apiDescriptor.exportGlobals)
+            {
+                pushExportedValue(_state, resolved.value, valueDescriptor.readonlyValue);
+                lua_setglobal(_state, toStringz(valueDescriptor.exportName));
+            }
+
+            if (apiTableIndex != 0)
+            {
+                pushExportedValue(_state, resolved.value, valueDescriptor.readonlyValue);
+                lua_setfield(_state, apiTableIndex, toStringz(valueDescriptor.exportName));
+            }
+        }
+    }
+
+    private int ensureApiTable(LuaApiDescriptor apiDescriptor)
+    {
+        if (!apiDescriptor.enabled || apiDescriptor.namespaceName.length == 0)
+            return 0;
+
+        lua_getglobal(_state, toStringz(apiDescriptor.namespaceName));
+        if (lua_type(_state, -1) == LuaTypeTable)
+            return lua_absindex(_state, -1);
+
+        luaPop(_state, 1);
+        lua_createtable(_state, 0, 8);
+        lua_setglobal(_state, toStringz(apiDescriptor.namespaceName));
+        lua_getglobal(_state, toStringz(apiDescriptor.namespaceName));
+        return lua_absindex(_state, -1);
+    }
+
+    private lua_State* beginThread(string chunkName)
+    {
+        releaseThread();
+
+        _thread = lua_newthread(_state);
+        _threadRef = luaL_ref(_state, LuaRegistryIndex);
+        _suspended = false;
+        _suspendedChunkName = chunkName;
+        return _thread;
+    }
+
+    private Result!(LuaStepResult, ScriptError) loadErrorFromThread(lua_State* thread, string chunkName)
+    {
+        auto message = stackString(thread, -1);
+        lua_settop(thread, 0);
+        releaseThread();
+        return Result!(LuaStepResult, ScriptError).err(scriptError(enrichLuaError(message), chunkName));
+    }
+
+    private Result!(LuaStepResult, ScriptError) resumeThread(int nargs, string chunkName)
+    {
+        int nresults = 0;
+        auto status = lua_resume(_thread, _state, nargs, &nresults);
+
+        if (status == LuaYield)
+        {
+            auto value = firstResultFromThread(_thread, nresults);
+            lua_settop(_thread, 0);
+            if (value.isErr)
+            {
+                releaseThread();
+                return Result!(LuaStepResult, ScriptError).err(value.error);
+            }
+
+            _suspended = true;
+            _suspendedChunkName = chunkName;
+
+            LuaStepResult step;
+            step.state = LuaStepState.Yielded;
+            step.value = value.value;
+            return Result!(LuaStepResult, ScriptError).ok(step);
+        }
+
+        if (status == LuaOk)
+        {
+            auto value = firstResultFromThread(_thread, nresults);
+            lua_settop(_thread, 0);
+            if (value.isErr)
+            {
+                releaseThread();
+                return Result!(LuaStepResult, ScriptError).err(value.error);
+            }
+
+            LuaStepResult step;
+            step.state = LuaStepState.Completed;
+            step.value = value.value;
+            releaseThread();
+            return Result!(LuaStepResult, ScriptError).ok(step);
+        }
+
+        auto message = stackString(_thread, -1);
+        lua_settop(_thread, 0);
+        releaseThread();
+        return Result!(LuaStepResult, ScriptError).err(scriptError(enrichLuaError(message), chunkName));
+    }
+
+    private Result!(LuaValue, ScriptError) firstResultFromThread(lua_State* thread, int nresults)
+    {
+        if (nresults <= 0)
+            return Result!(LuaValue, ScriptError).ok(LuaValue.nil());
+
+        return valueFromStack(thread, -nresults);
+    }
+
+    private void releaseThread()
+    {
+        _suspended = false;
+        _suspendedChunkName = "";
+        _thread = null;
+
+        if (_state is null)
+            return;
+
+        if (_threadRef != LuaNoRef)
+            luaL_unref(_state, LuaRegistryIndex, _threadRef);
+        _threadRef = LuaNoRef;
+    }
+
+    private ScriptError yieldedUnsupported(string chunkName)
+    {
+        return ScriptError(
+            "Lua chunk `" ~ chunkName ~ "` yielded. Use `evalStep*`/`callStep*` plus `resumeStep*` to continue execution.",
+            0
+        );
+    }
+
+    private void pushCallable(LuaCallableThunk thunk)
+    {
+        lua_pushlightuserdata(_state, cast(void*) thunk);
+        lua_pushcclosure(_state, &invokeLuaCallable, 1);
     }
 
     private void removeGlobal(string name)
@@ -357,10 +689,10 @@ private final class LuaVm
         lua_setglobal(_state, toStringz(name));
     }
 
-    private string lastErrorMessage()
+    private string lastErrorMessage(lua_State* state)
     {
-        auto message = stackString(_state, -1);
-        luaPop(_state, 1);
+        auto message = stackString(state, -1);
+        luaPop(state, 1);
         return message;
     }
 
@@ -383,21 +715,28 @@ private final class LuaVm
 
     private string extractMissingGlobalName(string message)
     {
-        enum marker = "attempt to call a nil value (global '";
-        auto markerStart = message.indexOf(marker);
-        if (markerStart == -1)
-            return "";
+        foreach (marker; [
+            "attempt to call a nil value (global '",
+            "attempt to index a nil value (global '"
+        ])
+        {
+            auto markerStart = message.indexOf(marker);
+            if (markerStart == -1)
+                continue;
 
-        auto nameStart = cast(size_t) markerStart + marker.length;
-        if (nameStart >= message.length)
-            return "";
+            auto nameStart = cast(size_t) markerStart + marker.length;
+            if (nameStart >= message.length)
+                continue;
 
-        auto tail = message[nameStart .. $];
-        auto nameEnd = tail.indexOf("'");
-        if (nameEnd == -1)
-            return "";
+            auto tail = message[nameStart .. $];
+            auto nameEnd = tail.indexOf("'");
+            if (nameEnd == -1)
+                continue;
 
-        return tail[0 .. cast(size_t) nameEnd];
+            return tail[0 .. cast(size_t) nameEnd];
+        }
+
+        return "";
     }
 }
 
@@ -420,7 +759,7 @@ struct LuaRuntime
         return Result!(string, ScriptError).ok(result.value.toDisplayString());
     }
 
-    /// Evaluates Lua and returns the typed bridge value.
+    /// Evaluates Lua and returns the typed Lua value.
     Result!(LuaValue, ScriptError) evalTyped(string code)
     {
         if (code.length == 0)
@@ -430,6 +769,28 @@ struct LuaRuntime
             return Result!(LuaValue, ScriptError).err(ScriptError("runtime is not initialized", 0));
 
         return _vm.evalValue(code);
+    }
+
+    /// Evaluates Lua and returns either a completed value or a yielded payload.
+    Result!(LuaStepResult, ScriptError) evalStepTyped(string code)
+    {
+        if (code.length == 0)
+            return Result!(LuaStepResult, ScriptError).err(ScriptError("empty script", 0));
+
+        if (_vm is null)
+            return Result!(LuaStepResult, ScriptError).err(ScriptError("runtime is not initialized", 0));
+
+        return _vm.evalStepValue(code);
+    }
+
+    /// Evaluates Lua and returns either a completed display value or yielded display payload.
+    Result!(string, ScriptError) evalStep(string code)
+    {
+        auto result = evalStepTyped(code);
+        if (result.isErr)
+            return Result!(string, ScriptError).err(result.error);
+
+        return Result!(string, ScriptError).ok(result.value.value.toDisplayString());
     }
 
     /// Evaluates a Lua file from disk.
@@ -442,7 +803,7 @@ struct LuaRuntime
         return Result!(string, ScriptError).ok(result.value.toDisplayString());
     }
 
-    /// Evaluates a Lua file and returns the typed bridge value.
+    /// Evaluates a Lua file and returns the typed Lua value.
     Result!(LuaValue, ScriptError) evalFileTyped(string path)
     {
         if (path.length == 0)
@@ -452,6 +813,28 @@ struct LuaRuntime
             return Result!(LuaValue, ScriptError).err(ScriptError("runtime is not initialized", 0));
 
         return _vm.evalFileValue(path);
+    }
+
+    /// Evaluates a Lua file and returns either a completed value or yielded payload.
+    Result!(LuaStepResult, ScriptError) evalFileStepTyped(string path)
+    {
+        if (path.length == 0)
+            return Result!(LuaStepResult, ScriptError).err(ScriptError("empty path", 0));
+
+        if (_vm is null)
+            return Result!(LuaStepResult, ScriptError).err(ScriptError("runtime is not initialized", 0));
+
+        return _vm.evalFileStepValue(path);
+    }
+
+    /// Evaluates a Lua file and returns either a completed display value or yielded display payload.
+    Result!(string, ScriptError) evalFileStep(string path)
+    {
+        auto result = evalFileStepTyped(path);
+        if (result.isErr)
+            return Result!(string, ScriptError).err(result.error);
+
+        return Result!(string, ScriptError).ok(result.value.value.toDisplayString());
     }
 
     /// Calls an already-loaded global Lua function.
@@ -464,7 +847,7 @@ struct LuaRuntime
         return Result!(string, ScriptError).ok(result.value.toDisplayString());
     }
 
-    /// Calls an already-loaded global Lua function and returns typed bridge data.
+    /// Calls an already-loaded global Lua function and returns typed Lua data.
     Result!(LuaValue, ScriptError) callTyped(string globalName, LuaValue[] args = null)
     {
         if (globalName.length == 0)
@@ -474,6 +857,150 @@ struct LuaRuntime
             return Result!(LuaValue, ScriptError).err(ScriptError("runtime is not initialized", 0));
 
         return _vm.callValue(globalName, args);
+    }
+
+    /// Calls an already-loaded global Lua function and returns either a completed value or yielded payload.
+    Result!(LuaStepResult, ScriptError) callStepTyped(string globalName, LuaValue[] args = null)
+    {
+        if (globalName.length == 0)
+            return Result!(LuaStepResult, ScriptError).err(ScriptError("empty function name", 0));
+
+        if (_vm is null)
+            return Result!(LuaStepResult, ScriptError).err(ScriptError("runtime is not initialized", 0));
+
+        return _vm.callStepValue(globalName, args);
+    }
+
+    /// Calls an already-loaded global Lua function and returns either a completed display value or yielded payload.
+    Result!(string, ScriptError) callStep(string globalName, LuaValue[] args = null)
+    {
+        auto result = callStepTyped(globalName, args);
+        if (result.isErr)
+            return Result!(string, ScriptError).err(result.error);
+
+        return Result!(string, ScriptError).ok(result.value.value.toDisplayString());
+    }
+
+    /// Resumes a suspended Lua coroutine with optional resume arguments.
+    Result!(LuaStepResult, ScriptError) resumeStepTyped(LuaValue[] args = null)
+    {
+        if (_vm is null)
+            return Result!(LuaStepResult, ScriptError).err(ScriptError("runtime is not initialized", 0));
+
+        return _vm.resumeStepValue(args);
+    }
+
+    /// Resumes a suspended Lua coroutine with a single resume argument.
+    Result!(LuaStepResult, ScriptError) resumeStepTyped(LuaValue arg)
+    {
+        LuaValue[1] args;
+        args[0] = arg;
+        return resumeStepTyped(args[]);
+    }
+
+    /// Resumes a suspended Lua coroutine with optional resume arguments and stringifies the payload.
+    Result!(string, ScriptError) resumeStep(LuaValue[] args = null)
+    {
+        auto result = resumeStepTyped(args);
+        if (result.isErr)
+            return Result!(string, ScriptError).err(result.error);
+
+        return Result!(string, ScriptError).ok(result.value.value.toDisplayString());
+    }
+
+    /// Resumes a suspended Lua coroutine with a single resume argument and stringifies the payload.
+    Result!(string, ScriptError) resumeStep(LuaValue arg)
+    {
+        auto result = resumeStepTyped(arg);
+        if (result.isErr)
+            return Result!(string, ScriptError).err(result.error);
+
+        return Result!(string, ScriptError).ok(result.value.value.toDisplayString());
+    }
+
+    /// Returns whether this runtime currently has a suspended coroutine.
+    bool canResume() const @property
+    {
+        return _vm !is null && _vm.canResume;
+    }
+
+    /// Drops any suspended coroutine state.
+    void cancelSuspension()
+    {
+        if (_vm is null)
+            return;
+        _vm.cancelSuspension();
+    }
+
+    /// Runs a yield-aware script and auto-resumes when yielded payloads are handled by host code.
+    Result!(LuaValue, ScriptError) evalAutoResumeTyped(
+        string code,
+        Result!(LuaValue, string) delegate(LuaValue) onYield,
+        size_t maxYields = 32
+    )
+    {
+        auto step = evalStepTyped(code);
+        return autoResumeStep(step, onYield, maxYields);
+    }
+
+    /// Runs a yield-aware script and stringifies the completed output.
+    Result!(string, ScriptError) evalAutoResume(
+        string code,
+        Result!(LuaValue, string) delegate(LuaValue) onYield,
+        size_t maxYields = 32
+    )
+    {
+        auto result = evalAutoResumeTyped(code, onYield, maxYields);
+        if (result.isErr)
+            return Result!(string, ScriptError).err(result.error);
+        return Result!(string, ScriptError).ok(result.value.toDisplayString());
+    }
+
+    /// Calls a yield-aware Lua function and auto-resumes when yielded payloads are handled by host code.
+    Result!(LuaValue, ScriptError) callAutoResumeTyped(
+        string globalName,
+        Result!(LuaValue, string) delegate(LuaValue) onYield,
+        LuaValue[] args = null,
+        size_t maxYields = 32
+    )
+    {
+        auto step = callStepTyped(globalName, args);
+        return autoResumeStep(step, onYield, maxYields);
+    }
+
+    /// Calls a yield-aware Lua function and stringifies the completed output.
+    Result!(string, ScriptError) callAutoResume(
+        string globalName,
+        Result!(LuaValue, string) delegate(LuaValue) onYield,
+        LuaValue[] args = null,
+        size_t maxYields = 32
+    )
+    {
+        auto result = callAutoResumeTyped(globalName, onYield, args, maxYields);
+        if (result.isErr)
+            return Result!(string, ScriptError).err(result.error);
+        return Result!(string, ScriptError).ok(result.value.toDisplayString());
+    }
+
+    /// Returns true when a yielded value contains a table field and outputs that string value.
+    static bool yieldedTableField(LuaValue yielded, string field, out string value)
+    {
+        value = "";
+        if (yielded.kind != LuaValue.Kind.Table || field.length == 0)
+            return false;
+
+        auto resolved = field in yielded.tableValue.values;
+        if (resolved is null)
+            return false;
+
+        value = *resolved;
+        return true;
+    }
+
+    /// Returns true when a yielded table contains a `kind` field and outputs it.
+    static bool yieldedSignalKind(LuaValue yielded, out string kind)
+    {
+        return yieldedTableField(yielded, "kind", kind);
     }
 
     /// Returns whether a named Lua global exists and is callable.
@@ -504,6 +1031,90 @@ struct LuaRuntime
 
         return false;
     }
+
+    /// Returns whether a given value export is available.
+    bool hasValue(string name) const
+    {
+        foreach (descriptor; exports)
+        {
+            if (descriptor.mode == LuaExposeMode.Value && descriptor.exportName == name)
+                return true;
+        }
+        return false;
+    }
+
+    /// Returns whether a value export is readonly in this runtime.
+    bool valueExportReadOnly(string name) const
+    {
+        foreach (descriptor; exports)
+        {
+            if (descriptor.mode == LuaExposeMode.Value && descriptor.exportName == name)
+                return descriptor.readonlyValue;
+        }
+        return false;
+    }
+
+    /// Returns export names visible as callable functions.
+    string[] callableExportNames() const @property
+    {
+        string[] names;
+        foreach (descriptor; exports)
+        {
+            if (descriptor.mode == LuaExposeMode.Function)
+                names ~= descriptor.exportName;
+        }
+        return names;
+    }
+
+    /// Returns export names visible as direct values.
+    string[] valueExportNames() const @property
+    {
+        string[] names;
+        foreach (descriptor; exports)
+        {
+            if (descriptor.mode == LuaExposeMode.Value)
+                names ~= descriptor.exportName;
+        }
+        return names;
+    }
+
+    private Result!(LuaValue, ScriptError) autoResumeStep(
+        Result!(LuaStepResult, ScriptError) step,
+        Result!(LuaValue, string) delegate(LuaValue) onYield,
+        size_t maxYields
+    )
+    {
+        if (step.isErr)
+            return Result!(LuaValue, ScriptError).err(step.error);
+        if (onYield is null)
+            return Result!(LuaValue, ScriptError).err(ScriptError("Lua auto-resume handler must not be null.", 0));
+
+        size_t iterations;
+        auto current = step.value;
+        while (current.yielded)
+        {
+            if (iterations >= maxYields)
+            {
+                return Result!(LuaValue, ScriptError).err(ScriptError(
+                    "Lua auto-resume exceeded max yield count `" ~ maxYields.to!string ~ "`.",
+                    0
+                ));
+            }
+
+            auto resumedValue = onYield(current.value);
+            if (resumedValue.isErr)
+                return Result!(LuaValue, ScriptError).err(ScriptError(resumedValue.error, 0));
+
+            auto resumed = resumeStepTyped(resumedValue.value);
+            if (resumed.isErr)
+                return Result!(LuaValue, ScriptError).err(resumed.error);
+
+            current = resumed.value;
+            iterations++;
+        }
+
+        return Result!(LuaValue, ScriptError).ok(current.value);
+    }
 }
 
 /// Minimal scripting engine surface.
@@ -517,16 +1128,20 @@ final class ScriptingEngine
     )
     {
         auto box = new BindingBox!T(binding);
-        auto collected = collectCallables!T(box);
-        auto callables = filterCallables(collected, permissions);
-        auto restricted = restrictedCallables(collected, permissions);
+        auto collected = collectExports!T(box);
+        auto callables = filterCallables(collected.callables, permissions);
+        auto restrictedCallablesOnly = restrictedCallables(collected.callables, permissions);
+        auto values = filterValues(collected.values, permissions);
+        auto restrictedValuesOnly = restrictedValues(collected.values, permissions);
+        auto apiDescriptor = collectLuaApiDescriptor!T();
+        enforceUniqueExports(callables, values);
 
         LuaRuntime runtime;
         runtime.profile = profile;
         runtime.permissions = permissions.dup;
-        runtime.exports = toExportDescriptors(callables);
-        runtime.restrictedExports = toExportDescriptors(restricted);
-        runtime._vm = new LuaVm(profile, callables, runtime.restrictedExports);
+        runtime.exports = toExportDescriptors(callables, values);
+        runtime.restrictedExports = toExportDescriptors(restrictedCallablesOnly, restrictedValuesOnly);
+        runtime._vm = new LuaVm(profile, callables, values, apiDescriptor, runtime.restrictedExports);
         return runtime;
     }
 }
@@ -574,6 +1189,70 @@ private final class BindingBox(T)
     }
 }
 
+private string sanitizeLuaIdentifier(string candidate, string fallback)
+{
+    if (!isLuaIdentifier(candidate))
+        return fallback;
+    return candidate;
+}
+
+private bool isLuaIdentifier(string text)
+{
+    if (text.length == 0)
+        return false;
+    if (!isLuaIdentifierStart(text[0]))
+        return false;
+
+    foreach (ch; text[1 .. $])
+    {
+        if (!isLuaIdentifierBody(ch))
+            return false;
+    }
+
+    return true;
+}
+
+private bool isLuaIdentifierStart(char ch)
+{
+    return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || ch == '_';
+}
+
+private bool isLuaIdentifierBody(char ch)
+{
+    return isLuaIdentifierStart(ch) || (ch >= '0' && ch <= '9');
+}
+
+private bool inferLuaValueReadOnly(T)()
+{
+    static if (is(Unqual!T == LuaTable))
+        return typeHasConstQualifier!T || typeHasImmutableQualifier!T;
+    else
+        return false;
+}
+
+private bool typeHasConstQualifier(T)()
+{
+    return is(T == const U, U) || is(T == const shared U, U) || is(T == shared const U, U);
+}
+
+private bool typeHasImmutableQualifier(T)()
+{
+    return is(T == immutable U, U) || is(T == immutable shared U, U) || is(T == shared immutable U, U);
+}
+
+private bool resolveLuaValueReadOnly(LuaValueMutability mutability, bool inferred)
+{
+    final switch (mutability)
+    {
+        case LuaValueMutability.Auto:
+            return inferred;
+        case LuaValueMutability.Mutable:
+            return false;
+        case LuaValueMutability.ReadOnly:
+            return true;
+    }
+}
+
 private LuaCallableDescriptor[] filterCallables(
     LuaCallableDescriptor[] callables,
     LuaCapability[] permissions
@@ -584,6 +1263,23 @@ private LuaCallableDescriptor[] filterCallables(
 
     LuaCallableDescriptor[] filtered;
     foreach (descriptor; callables)
+    {
+        if (permissions.canFind(descriptor.permission))
+            filtered ~= descriptor;
+    }
+    return filtered;
+}
+
+private LuaValueDescriptor[] filterValues(
+    LuaValueDescriptor[] values,
+    LuaCapability[] permissions
+)
+{
+    if (permissions.length == 0)
+        return values;
+
+    LuaValueDescriptor[] filtered;
+    foreach (descriptor; values)
     {
         if (permissions.canFind(descriptor.permission))
             filtered ~= descriptor;
@@ -608,23 +1304,117 @@ private LuaCallableDescriptor[] restrictedCallables(
     return restricted;
 }
 
-private LuaExportDescriptor[] toExportDescriptors(LuaCallableDescriptor[] callables)
+private LuaValueDescriptor[] restrictedValues(
+    LuaValueDescriptor[] values,
+    LuaCapability[] permissions
+)
+{
+    if (permissions.length == 0)
+        return null;
+
+    LuaValueDescriptor[] restricted;
+    foreach (descriptor; values)
+    {
+        if (!permissions.canFind(descriptor.permission))
+            restricted ~= descriptor;
+    }
+    return restricted;
+}
+
+private void enforceUniqueExports(
+    LuaCallableDescriptor[] callables,
+    LuaValueDescriptor[] values
+)
+{
+    string[string] seen;
+
+    foreach (callable; callables)
+    {
+        auto existing = callable.exportName in seen;
+        if (existing !is null)
+        {
+            throw new DdiscordException(formatError(
+                "scripting",
+                "Duplicate Lua export names are not allowed.",
+                "Export `" ~ callable.exportName ~ "` is declared by both `" ~ *existing ~
+                    "` and `" ~ callable.symbolName ~ "`.",
+                "Rename one of the exports or set explicit `@LuaExpose(\"name\")` values."
+            ));
+        }
+        seen[callable.exportName] = callable.symbolName;
+    }
+
+    foreach (value; values)
+    {
+        auto existing = value.exportName in seen;
+        if (existing !is null)
+        {
+            throw new DdiscordException(formatError(
+                "scripting",
+                "Duplicate Lua export names are not allowed.",
+                "Export `" ~ value.exportName ~ "` is declared by both `" ~ *existing ~
+                    "` and `" ~ value.symbolName ~ "`.",
+                "Rename one of the exports or set explicit `@LuaExpose(\"name\")` values."
+            ));
+        }
+        seen[value.exportName] = value.symbolName;
+    }
+}
+
+private LuaExportDescriptor[] toExportDescriptors(
+    LuaCallableDescriptor[] callables,
+    LuaValueDescriptor[] values
+)
 {
     LuaExportDescriptor[] exports;
+
     foreach (callable; callables)
     {
         LuaExportDescriptor descriptor;
         descriptor.symbolName = callable.symbolName;
         descriptor.exportName = callable.exportName;
         descriptor.permission = callable.permission;
+        descriptor.mode = LuaExposeMode.Function;
+        descriptor.valueMutability = LuaValueMutability.Auto;
+        descriptor.readonlyValue = false;
         exports ~= descriptor;
     }
+
+    foreach (value; values)
+    {
+        LuaExportDescriptor descriptor;
+        descriptor.symbolName = value.symbolName;
+        descriptor.exportName = value.exportName;
+        descriptor.permission = value.permission;
+        descriptor.mode = LuaExposeMode.Value;
+        descriptor.valueMutability = value.valueMutability;
+        descriptor.readonlyValue = value.readonlyValue;
+        exports ~= descriptor;
+    }
+
     return exports;
 }
 
-private LuaCallableDescriptor[] collectCallables(T)(BindingBox!T box)
+private LuaApiDescriptor collectLuaApiDescriptor(T)()
 {
-    LuaCallableDescriptor[] exports;
+    LuaApiDescriptor descriptor;
+
+    static foreach (attr; __traits(getAttributes, T))
+    {
+        static if (is(typeof(attr) == LuaApi))
+        {
+            descriptor.enabled = true;
+            descriptor.namespaceName = sanitizeLuaIdentifier(attr.namespaceName, DefaultLuaApiNamespace);
+            descriptor.exportGlobals = attr.exportGlobals;
+        }
+    }
+
+    return descriptor;
+}
+
+private LuaCollectedExports collectExports(T)(BindingBox!T box)
+{
+    LuaCollectedExports collected;
 
     static foreach (memberName; __traits(allMembers, T))
     {
@@ -632,18 +1422,54 @@ private LuaCallableDescriptor[] collectCallables(T)(BindingBox!T box)
             static if (memberName != "__ctor" && memberName != "__xdtor")
             {
                 mixin("alias memberSymbol = T." ~ memberName ~ ";");
-                static if (isCallable!memberSymbol)
+                static foreach (attr; __traits(getAttributes, memberSymbol))
                 {
-                    static foreach (attr; __traits(getAttributes, memberSymbol))
+                    static if (is(typeof(attr) == LuaExpose))
                     {
-                        static if (is(typeof(attr) == LuaExpose))
+                        enum resolvedName = attr.name.length == 0 ? memberName : attr.name;
+                        static if (attr.mode == LuaExposeMode.Function)
                         {
-                            LuaCallableDescriptor descriptor;
+                            static if (!isCallable!memberSymbol)
+                            {
+                                static assert(
+                                    false,
+                                    "`@LuaExpose(..., mode: LuaExposeMode.Function)` requires a callable member."
+                                );
+                            }
+                            else
+                            {
+                                LuaCallableDescriptor descriptor;
+                                descriptor.symbolName = memberName;
+                                descriptor.exportName = resolvedName;
+                                descriptor.permission = attr.permission;
+                                descriptor.mode = LuaExposeMode.Function;
+                                descriptor.invoke = makeLuaInvoker!(T, memberName)(box);
+                                collected.callables ~= descriptor;
+                            }
+                        }
+                        else static if (attr.mode == LuaExposeMode.Value)
+                        {
+                            LuaValueDescriptor descriptor;
                             descriptor.symbolName = memberName;
-                            descriptor.exportName = attr.name.length == 0 ? memberName : attr.name;
+                            descriptor.exportName = resolvedName;
                             descriptor.permission = attr.permission;
-                            descriptor.invoke = makeLuaInvoker!(T, memberName)(box);
-                            exports ~= descriptor;
+                            descriptor.mode = LuaExposeMode.Value;
+                            descriptor.valueMutability = attr.valueMutability;
+
+                            static if (isCallable!memberSymbol)
+                            {
+                                enum inferredReadOnly = inferLuaValueReadOnly!(ReturnType!memberSymbol);
+                                descriptor.readonlyValue = resolveLuaValueReadOnly(attr.valueMutability, inferredReadOnly);
+                                descriptor.read = makeLuaValueGetterFromCallable!(T, memberName)(box);
+                            }
+                            else
+                            {
+                                mixin("alias FieldT = typeof(box.value." ~ memberName ~ ");");
+                                enum inferredReadOnly = inferLuaValueReadOnly!FieldT;
+                                descriptor.readonlyValue = resolveLuaValueReadOnly(attr.valueMutability, inferredReadOnly);
+                                descriptor.read = makeLuaValueGetterFromField!(T, memberName)(box);
+                            }
+                            collected.values ~= descriptor;
                         }
                     }
                 }
@@ -651,7 +1477,7 @@ private LuaCallableDescriptor[] collectCallables(T)(BindingBox!T box)
         }
     }
 
-    return exports;
+    return collected;
 }
 
 private Result!(LuaValue, ScriptError) delegate(LuaValue[]) makeLuaInvoker(T, string memberName)(
@@ -748,10 +1574,44 @@ private Result!(LuaValue, ScriptError) delegate(LuaValue[]) makeLuaInvoker(T, st
         else
         {
             return Result!(LuaValue, ScriptError).err(ScriptError(
-                "Lua-exposed function `" ~ memberName ~ "` has too many parameters for the current bridge.",
+                "Lua-exposed function `" ~ memberName ~ "` has too many parameters for the current Lua host bridge.",
                 0
             ));
         }
+    };
+}
+
+private Result!(LuaValue, ScriptError) delegate() makeLuaValueGetterFromCallable(T, string memberName)(
+    BindingBox!T box
+)
+{
+    mixin("alias memberSymbol = T." ~ memberName ~ ";");
+    alias ParamTypes = Parameters!memberSymbol;
+    alias ReturnT = ReturnType!memberSymbol;
+
+    static assert(
+        ParamTypes.length == 0,
+        "`@LuaExpose(..., mode: LuaExposeMode.Value)` callable exports must not have parameters."
+    );
+    static assert(
+        !is(ReturnT == void),
+        "`@LuaExpose(..., mode: LuaExposeMode.Value)` callable exports must return a Lua-compatible value type."
+    );
+
+    return () {
+        auto value = call0!(T, memberName)(box);
+        return toLuaReturn!ReturnT(value, memberName);
+    };
+}
+
+private Result!(LuaValue, ScriptError) delegate() makeLuaValueGetterFromField(T, string memberName)(
+    BindingBox!T box
+)
+{
+    mixin("alias FieldT = typeof(box.value." ~ memberName ~ ");");
+    return () {
+        auto value = mixin("box.value." ~ memberName);
+        return toLuaReturn!FieldT(value, memberName);
     };
 }
 
@@ -807,16 +1667,16 @@ private auto call3(T, string memberName, A0, A1, A2)(
 
 private Result!(LuaValue, ScriptError) toLuaReturn(T)(T value, string memberName)
 {
-    static if (is(T == string))
-        return Result!(LuaValue, ScriptError).ok(LuaValue.from(value));
-    else static if (is(T == bool))
-        return Result!(LuaValue, ScriptError).ok(LuaValue.from(value));
-    else static if (is(T == int) || is(T == long))
+    static if (is(T : string))
+        return Result!(LuaValue, ScriptError).ok(LuaValue.from(value.to!string));
+    else static if (is(Unqual!T == bool))
+        return Result!(LuaValue, ScriptError).ok(LuaValue.from(cast(bool) value));
+    else static if (isIntegral!T)
         return Result!(LuaValue, ScriptError).ok(LuaValue.from(cast(long) value));
-    else static if (is(T == double) || is(T == float))
+    else static if (isFloatingPoint!T)
         return Result!(LuaValue, ScriptError).ok(LuaValue.from(cast(double) value));
-    else static if (is(T == LuaTable))
-        return Result!(LuaValue, ScriptError).ok(LuaValue.from(value));
+    else static if (is(Unqual!T == LuaTable))
+        return Result!(LuaValue, ScriptError).ok(LuaValue.from(cast(LuaTable) value));
     else
         return Result!(LuaValue, ScriptError).err(ScriptError(
             "Lua-exposed function `" ~ memberName ~ "` returned unsupported type `" ~ T.stringof ~ "`.",
@@ -936,7 +1796,7 @@ private Result!(LuaValue, ScriptError) valueFromStack(lua_State* state, int inde
 
         default:
             return Result!(LuaValue, ScriptError).err(ScriptError(
-                "Lua value type `" ~ kind.to!string ~ "` is not supported by the bridge.",
+                "Lua value type `" ~ kind.to!string ~ "` is not supported by this Lua host bridge.",
                 0
             ));
     }
@@ -985,14 +1845,59 @@ private void pushValue(lua_State* state, LuaValue value) @trusted
             return;
 
         case LuaValue.Kind.Table:
-            lua_createtable(state, 0, cast(int) value.tableValue.values.length);
-            foreach (key, item; value.tableValue.values)
-            {
-                lua_pushlstring(state, item.ptr, item.length);
-                lua_setfield(state, -2, toStringz(key));
-            }
+            pushLuaTable(state, value.tableValue, false);
             return;
     }
+}
+
+private void pushExportedValue(lua_State* state, LuaValue value, bool readonlyTables) @trusted
+{
+    if (value.kind == LuaValue.Kind.Table)
+    {
+        pushLuaTable(state, value.tableValue, readonlyTables);
+        return;
+    }
+
+    pushValue(state, value);
+}
+
+private void pushLuaTable(lua_State* state, LuaTable value, bool readonly) @trusted
+{
+    if (!readonly)
+    {
+        lua_createtable(state, 0, cast(int) value.values.length);
+        foreach (key, item; value.values)
+        {
+            lua_pushlstring(state, item.ptr, item.length);
+            lua_setfield(state, -2, toStringz(key));
+        }
+        return;
+    }
+
+    // Readonly export: return a proxy that delegates reads to a hidden source table and blocks writes.
+    lua_createtable(state, 0, 0);
+    auto proxyIndex = lua_absindex(state, -1);
+
+    lua_createtable(state, 0, 3);
+    lua_createtable(state, 0, cast(int) value.values.length);
+    foreach (key, item; value.values)
+    {
+        lua_pushlstring(state, item.ptr, item.length);
+        lua_setfield(state, -2, toStringz(key));
+    }
+    lua_setfield(state, -2, toStringz("__index"));
+
+    lua_pushcclosure(state, &rejectReadOnlyTableMutation, 0);
+    lua_setfield(state, -2, toStringz("__newindex"));
+    lua_pushlstring(state, LuaReadOnlyValueError.ptr, LuaReadOnlyValueError.length);
+    lua_setfield(state, -2, toStringz("__metatable"));
+    lua_setmetatable(state, proxyIndex);
+}
+
+private extern (C) int rejectReadOnlyTableMutation(lua_State* state) @trusted
+{
+    lua_pushlstring(state, LuaReadOnlyValueError.ptr, LuaReadOnlyValueError.length);
+    return lua_error(state);
 }
 
 private string stackString(lua_State* state, int index) @trusted
@@ -1138,6 +2043,266 @@ unittest
 
     assert(result.isErr);
     assert(result.error.message.canFind("state.write"));
+}
+
+unittest
+{
+    struct ValueApi
+    {
+        @LuaExpose("author", LuaCapability.ContextRead, LuaExposeMode.Value)
+        LuaTable author()
+        {
+            return LuaTable.safe("username", "alice");
+        }
+    }
+
+    auto engine = new ScriptingEngine;
+    auto runtime = engine.open!ValueApi(ValueApi.init, permissions: [LuaCapability.ContextRead]);
+    auto result = runtime.eval("return author.username");
+
+    assert(result.isOk);
+    assert(result.value == "alice");
+    assert(runtime.hasExport("author"));
+    assert(runtime.hasValue("author"));
+    assert(!runtime.valueExportReadOnly("author"));
+    assert(!runtime.hasCallable("author"));
+}
+
+unittest
+{
+    @LuaApi(namespaceName: "botApi", exportGlobals: false)
+    struct NamespacedApi
+    {
+        @LuaExpose("double", LuaCapability.DiscordReply)
+        long doubleValue(long value)
+        {
+            return value * 2;
+        }
+
+        @LuaExpose("author", LuaCapability.ContextRead, LuaExposeMode.Value)
+        LuaTable author()
+        {
+            return LuaTable.safe("username", "eve");
+        }
+    }
+
+    auto engine = new ScriptingEngine;
+    auto runtime = engine.open!NamespacedApi(
+        NamespacedApi.init,
+        permissions: [LuaCapability.ContextRead, LuaCapability.DiscordReply]
+    );
+
+    auto doubled = runtime.eval("return botApi.double(21)");
+    assert(doubled.isOk);
+    assert(doubled.value == "42");
+
+    auto author = runtime.eval("return botApi.author.username");
+    assert(author.isOk);
+    assert(author.value == "eve");
+
+    auto missing = runtime.eval("return double(21)");
+    assert(missing.isErr);
+}
+
+unittest
+{
+    @LuaApi()
+    struct YieldApi
+    {
+    }
+
+    auto engine = new ScriptingEngine;
+    auto runtime = engine.open!YieldApi(YieldApi.init);
+
+    auto step = runtime.evalStepTyped(
+        "local answer = coroutine.yield({ kind = 'ask_user', prompt = 'name?' }); return 'hello ' .. answer"
+    );
+    assert(step.isOk);
+    assert(step.value.yielded);
+    assert(runtime.canResume);
+
+    string prompt;
+    string kind;
+    assert(LuaRuntime.yieldedSignalKind(step.value.value, kind));
+    assert(kind == "ask_user");
+    assert(LuaRuntime.yieldedTableField(step.value.value, "prompt", prompt));
+    assert(prompt == "name?");
+
+    auto resumed = runtime.resumeStepTyped(LuaValue.from("ada"));
+    assert(resumed.isOk);
+    assert(resumed.value.completed);
+    assert(resumed.value.value.kind == LuaValue.Kind.String);
+    assert(resumed.value.value.stringValue == "hello ada");
+    assert(!runtime.canResume);
+}
+
+unittest
+{
+    @LuaApi()
+    struct YieldApi
+    {
+    }
+
+    auto engine = new ScriptingEngine;
+    auto runtime = engine.open!YieldApi(YieldApi.init);
+
+    auto yielded = runtime.evalTyped("local value = coroutine.yield('pause'); return value");
+    assert(yielded.isErr);
+    assert(runtime.canResume);
+
+    auto resumed = runtime.resumeStep(LuaValue.from("resume-ok"));
+    assert(resumed.isOk);
+    assert(resumed.value == "resume-ok");
+}
+
+unittest
+{
+    @LuaApi()
+    struct AutoResumeApi
+    {
+    }
+
+    auto engine = new ScriptingEngine;
+    auto runtime = engine.open!AutoResumeApi(AutoResumeApi.init);
+    int askCalls;
+
+    auto result = runtime.evalAutoResumeTyped(
+        "local answer = coroutine.yield({ kind = 'ask_user', prompt = 'Which color?' }); return 'color=' .. answer",
+        (LuaValue yielded) {
+            askCalls++;
+            string kind;
+            string prompt;
+            assert(LuaRuntime.yieldedSignalKind(yielded, kind));
+            assert(kind == "ask_user");
+            assert(LuaRuntime.yieldedTableField(yielded, "prompt", prompt));
+            assert(prompt == "Which color?");
+            return Result!(LuaValue, string).ok(LuaValue.from("blue"));
+        }
+    );
+
+    assert(result.isOk);
+    assert(result.value.kind == LuaValue.Kind.String);
+    assert(result.value.stringValue == "color=blue");
+    assert(askCalls == 1);
+}
+
+unittest
+{
+    struct ReadOnlyValueApi
+    {
+        @LuaExpose(
+            "author",
+            LuaCapability.ContextRead,
+            LuaExposeMode.Value,
+            LuaValueMutability.ReadOnly
+        )
+        LuaTable author()
+        {
+            return LuaTable.safe("username", "readonly");
+        }
+    }
+
+    auto runtime = (new ScriptingEngine).open!ReadOnlyValueApi(ReadOnlyValueApi.init);
+    auto changed = runtime.eval("author.username = 'mutated'; return author.username");
+
+    assert(changed.isErr);
+    assert(changed.error.message.canFind("readonly"));
+    assert(runtime.valueExportReadOnly("author"));
+}
+
+unittest
+{
+    struct MutableValueApi
+    {
+        @LuaExpose(
+            "author",
+            LuaCapability.ContextRead,
+            LuaExposeMode.Value,
+            LuaValueMutability.Mutable
+        )
+        const(LuaTable) author()
+        {
+            auto table = LuaTable.safe("username", "const-backed");
+            return table;
+        }
+    }
+
+    auto runtime = (new ScriptingEngine).open!MutableValueApi(MutableValueApi.init);
+    auto changed = runtime.eval("author.username = 'changed'; return author.username");
+
+    assert(changed.isOk);
+    assert(changed.value == "changed");
+    assert(!runtime.valueExportReadOnly("author"));
+}
+
+unittest
+{
+    struct AutoReadOnlyConstTableApi
+    {
+        @LuaExpose("author", LuaCapability.ContextRead, LuaExposeMode.Value)
+        const(LuaTable) author()
+        {
+            auto table = LuaTable.safe("username", "const-auto");
+            return table;
+        }
+    }
+
+    auto runtime = (new ScriptingEngine).open!AutoReadOnlyConstTableApi(AutoReadOnlyConstTableApi.init);
+    auto changed = runtime.eval("author.username = 'changed'; return author.username");
+
+    assert(changed.isErr);
+    assert(changed.error.message.canFind("readonly"));
+    assert(runtime.valueExportReadOnly("author"));
+}
+
+unittest
+{
+    struct ConstantValueApi
+    {
+        immutable string apiVersion = "1.2.3";
+
+        @LuaExpose("version", LuaCapability.ContextRead, LuaExposeMode.Value)
+        string versionValue()
+        {
+            return apiVersion;
+        }
+    }
+
+    auto runtime = (new ScriptingEngine).open!ConstantValueApi(ConstantValueApi.init);
+    auto resolvedVersion = runtime.eval("return version");
+
+    assert(resolvedVersion.isOk);
+    assert(resolvedVersion.value == "1.2.3");
+}
+
+unittest
+{
+    struct DuplicateExportsApi
+    {
+        @LuaExpose("dup", LuaCapability.ContextRead)
+        void first()
+        {
+        }
+
+        @LuaExpose("dup", LuaCapability.ContextRead, LuaExposeMode.Value)
+        LuaTable second()
+        {
+            return LuaTable.safe("x", "1");
+        }
+    }
+
+    bool threw;
+    try
+    {
+        auto _ = (new ScriptingEngine).open!DuplicateExportsApi(DuplicateExportsApi.init);
+    }
+    catch (DdiscordException error)
+    {
+        threw = true;
+        assert(error.msg.canFind("Duplicate Lua export names"));
+    }
+
+    assert(threw);
 }
 
 unittest
