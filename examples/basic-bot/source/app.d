@@ -51,7 +51,7 @@ void handleInfo(CommandContext ctx, Nullable!User target = Nullable!User.init)
 }
 
 @HybridCommand("roll", "Roll a dice")
-void handleRoll(CommandContext ctx, long sides = 6)
+void handleRoll(HybridContext ctx, long sides = 6)
 {
     auto result = uniform(1L, sides + 1L);
     auto response = format!"Rolled %d on a d%d."(result, sides);

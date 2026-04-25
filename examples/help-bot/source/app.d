@@ -15,7 +15,7 @@ private Nullable!Snowflake optionalOwnerId(EnvLoader env)
 
 @CommandCategory("Utility")
 @HybridCommand("ping", "Check bot connectivity")
-void handlePing(CommandContext ctx)
+void handlePing(HybridContext ctx)
 {
     auto route = ctx.source == CommandSource.Slash ? "slash" : "prefix";
     ctx.send("pong from `" ~ route ~ "`", ctx.source == CommandSource.Slash).await();

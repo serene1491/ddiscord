@@ -41,3 +41,39 @@ client.tasks.every("heartbeat", dur!"minutes"(5), {
 ```
 
 The scheduler runs in its own loop after `client.run()`. Callback errors are captured so one failing task does not kill the bot.
+
+## `@Task` registration
+
+For recurring/background jobs tied to your bot modules, use `@Task` and register the group:
+
+```d
+@Stateful
+struct BackgroundTasks
+{
+    @Inject Logger logger;
+
+    @Task(dur!"minutes"(5), label: "status-heartbeat", runOnRegister: true)
+    void heartbeat()
+    {
+        logger.information("tasks", "heartbeat");
+    }
+}
+
+client.registerTaskGroup!BackgroundTasks();
+```
+
+`@Task` supports:
+
+- recurring tasks (`TaskMode.Every`, default)
+- delayed one-shot tasks (`TaskMode.Delay`)
+- cron-style `@every:<seconds>s` expressions via string constructor (`TaskMode.Cron`)
+- loop-style helper constructor inspired by discord.py:
+  `@Task.loop(seconds: ..., minutes: ..., hours: ..., label: "...", count: ..., reconnect: ...)`
+- explicit helpers for readability:
+  `@Task.every(...)`, `@Task.delay(...)`, and `@Task.cron(...)`
+
+You can also trigger any registered task label manually:
+
+```d
+client.runTaskNow("status-heartbeat");
+```

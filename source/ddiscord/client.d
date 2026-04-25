@@ -13,20 +13,22 @@ public import ddiscord.client_types : CommandErrorBehavior, CommandErrorContext,
 import core.sync.condition : Condition;
 import core.sync.mutex : Mutex;
 import core.thread : Thread;
-import core.time : MonoTime, dur;
+import core.time : Duration, MonoTime, dur;
 import ddiscord.cache : CacheStore;
 import ddiscord.client_errors : buildFailurePayload, classifyCommandFailure, shouldSurfaceFailure;
 import ddiscord.client_filters : matchesRegistrationFilter;
+import ddiscord.client_event_contexts : ClientEventContextBuilders;
 import ddiscord.client_queue : DispatchQueuePushOutcome, compactQueue, pushBounded, queueDepth;
 import ddiscord.client_runtime : UptimeSample, snowflakeLatencyMilliseconds;
 import ddiscord.client_text : attemptedPrefixCommandName;
 import ddiscord.client_types : HelpRequest, RegistrationCandidate;
 import ddiscord.commands : Command, CommandCategory, CommandDescriptor, CommandExecution,
     CommandExecutionSettings, CommandMiddleware, CommandOptionDescriptor, CommandRegistry,
-    CommandRoute, Autocomplete, HideFromHelp, HybridCommand, MessageCommand, ParsedCommand, PrefixCommand,
-    RequireOwner, RequirePermissions, SlashCommand, UserCommand, directMessageOnlyMiddleware,
+    CommandRoute, Autocomplete, HideFromHelp, HybridCommand, Inject, MessageCommand, ParsedCommand, PrefixCommand,
+    RequireOwner, RequirePermissions, SlashCommand, Task, TaskMode, UserCommand, directMessageOnlyMiddleware,
     guildOnlyMiddleware, ownerOnlyMiddleware;
-import ddiscord.context.command : CommandContext, CommandSource;
+import ddiscord.context.command : CommandContext, CommandSource, ContextMenuContext, HybridContext,
+    SlashContext;
 import ddiscord.context.event : AutocompleteInteractionEventContext, CommandExecutedEventContext,
     ChannelCreateEventContext, ChannelDeleteEventContext, ChannelPinsUpdateEventContext,
     ChannelUpdateEventContext, CommandFailedEventContext, EventContext, GuildCreateEventContext,
@@ -92,6 +94,7 @@ import std.ascii : toLower;
 import std.conv : ConvException, to;
 import std.string : startsWith, strip;
 import std.traits : Parameters, fullyQualifiedName, isCallable;
+import std.typecons : Tuple;
 
 /// Client configuration.
 private enum DefaultMaxDispatchQueueSize = 4096;
@@ -113,12 +116,25 @@ struct ClientConfig
     Nullable!HttpTransport transport;
     bool logUnhandledGatewayDispatchEvents = false;
     size_t gatewayUnhandledDispatchLogEvery = 100;
+    bool enableSharding;
+    bool autoSharding = true;
+    uint shardCount;
+    bool autoReshard;
+    Duration autoReshardCheckInterval = dur!"minutes"(10);
     size_t maxDispatchQueueSize = DefaultMaxDispatchQueueSize;
     bool dropOldestDispatchOnOverflow = true;
     size_t dispatchOverflowLogEvery = DefaultDispatchOverflowLogEvery;
 }
 
 private enum GatewayReadyWatchdogLabel = "gateway-ready-watchdog";
+private enum GatewayAutoReshardWatchdogLabel = "gateway-auto-reshard-watchdog";
+
+private struct ShardRuntime
+{
+    uint shardId;
+    GatewayClient gateway;
+    Thread thread;
+}
 
 private struct DispatchItem
 {
@@ -156,6 +172,7 @@ final class Client
     private Nullable!GatewayBotInfo _gatewayInfo;
     private GatewayClient _gateway;
     private Thread _gatewayThread;
+    private ShardRuntime[] _shards;
     private Thread _dispatchThread;
     private Thread _taskThread;
     private bool _taskLoopRunning;
@@ -194,6 +211,7 @@ final class Client
         _dispatchMutex = new Mutex;
         _dispatchAvailable = new Condition(_dispatchMutex);
 
+        services.add!Client(this);
         services.add!ServiceContainer(services);
         services.add!CommandRegistry(commands);
         services.add!EventDispatcher(events);
@@ -218,7 +236,7 @@ final class Client
     /// Starts the client.
     void run()
     {
-        if (_running || _gatewayThread !is null || _dispatchThread !is null || _taskThread !is null)
+        if (_running || _shards.length != 0 || _dispatchThread !is null || _taskThread !is null)
         {
             throw new DdiscordException(formatError(
                 "client",
@@ -265,7 +283,8 @@ final class Client
         logger.information("client", "Starting gateway and worker loops.");
         startDispatchLoop();
         startTaskLoop();
-        startGateway(gateway.value.url);
+        configureAutoReshardWatchdog();
+        startGateways(gateway.value.url);
     }
 
     /// Registers an event handler.
@@ -298,6 +317,50 @@ final class Client
         commands.registerMiddleware(name, middleware);
     }
 
+    /// Registers or replaces a runtime service instance.
+    void addService(T)(T instance)
+    {
+        services.add!T(instance);
+    }
+
+    /// Registers a default-constructed runtime service.
+    void addService(T)()
+        if (is(T == class) || is(T == struct))
+    {
+        services.add!T();
+    }
+
+    /// Registers a runtime service produced by a factory callback.
+    void addServiceFactory(T)(T delegate() factory)
+    {
+        services.addFactory!T(factory);
+    }
+
+    /// Registers multiple runtime services in declaration order.
+    void addServices(T...)(T instances)
+    {
+        static foreach (index, Service; T)
+            services.add!Service(instances[index]);
+    }
+
+    /// Returns a runtime service by type.
+    T service(T)()
+    {
+        return services.get!T();
+    }
+
+    /// Tries to resolve a runtime service by type.
+    bool tryService(T)(out T value)
+    {
+        return services.tryGet!T(value);
+    }
+
+    /// Removes a runtime service registration.
+    void removeService(T)()
+    {
+        services.remove!T();
+    }
+
     /// Returns dispatch-loop queue telemetry for production monitoring.
     DispatchQueueHealth dispatchQueueHealth() @property
     {
@@ -317,8 +380,11 @@ final class Client
     {
         _status = status;
         _activity = activity;
-        if (_gateway !is null)
-            _gateway.updatePresence(status, activity);
+        foreach (ref shard; _shards)
+        {
+            if (shard.gateway !is null)
+                shard.gateway.updatePresence(status, activity);
+        }
 
         PresenceUpdateEvent event;
         event.status = status;
@@ -442,10 +508,15 @@ final class Client
     CommandContext interactionContext(Interaction interaction, Channel channel = Channel.init)
     {
         CommandContext ctx;
-        ctx.source = interaction.type == InteractionType.ApplicationCommand ||
-            interaction.type == InteractionType.ApplicationCommandAutocomplete
-            ? CommandSource.Slash
-            : CommandSource.ContextMenu;
+        if (interaction.type == InteractionType.ApplicationCommandAutocomplete)
+            ctx.source = CommandSource.Slash;
+        else if (
+            interaction.type == InteractionType.ApplicationCommand &&
+            interaction.commandType != ApplicationCommandType.ChatInput
+        )
+            ctx.source = CommandSource.ContextMenu;
+        else
+            ctx.source = CommandSource.Slash;
         ctx.rest = rest;
         ctx.services = services;
         ctx.cache = cache;
@@ -512,7 +583,7 @@ final class Client
     /// Registers every command declared in the calling module, with optional filters.
     void registerCommands(string moduleName = __MODULE__)(CommandRegistrationFilter filter = CommandRegistrationFilter.init)
     {
-        registerModuleMembers!(moduleName, true, false, false)(filter);
+        registerModuleMembers!(moduleName, true, false, false, false)(filter);
         syncBuiltInCommandSystems();
     }
 
@@ -521,6 +592,13 @@ final class Client
     {
         static foreach (handler; handlers)
             registerFreeEvent!handler();
+    }
+
+    /// Registers free scheduled task handlers declared with `@Task`.
+    void registerTasks(handlers...)()
+    {
+        static foreach (handler; handlers)
+            registerFreeTask!handler();
     }
 
     /// Registers mixed command handlers, command groups, and plugin types.
@@ -532,13 +610,19 @@ final class Client
             {
                 static if (hasEventAttr!symbol)
                     registerEvents!symbol();
-                else
+                static if (hasTaskAttr!symbol)
+                    registerTasks!symbol();
+                static if (hasCommandRegistrationAttr!symbol)
                     registerCommands!symbol();
             }
             else static if (IsTypeSymbol!symbol)
             {
-                registerCommandGroup!symbol();
-                registerEventGroup!symbol();
+                static if (typeHasCommandMembers!symbol)
+                    registerCommandGroup!symbol();
+                static if (typeHasEventMembers!symbol)
+                    registerEventGroup!symbol();
+                static if (typeHasTaskMembers!symbol)
+                    registerTaskGroup!symbol();
                 static if (HasLuaPluginAttr!symbol)
                     registerPlugin!symbol();
             }
@@ -554,8 +638,14 @@ final class Client
     /// Registers every supported symbol declared in the calling module, with optional filters.
     void registerAllCommands(string moduleName = __MODULE__)(CommandRegistrationFilter filter = CommandRegistrationFilter.init)
     {
-        registerModuleMembers!(moduleName, true, true, true)(filter);
+        registerModuleMembers!(moduleName, true, true, true, true)(filter);
         syncBuiltInCommandSystems();
+    }
+
+    /// Registers every scheduled task declared in the calling module, with optional filters.
+    void registerTasks(string moduleName = __MODULE__)(CommandRegistrationFilter filter = CommandRegistrationFilter.init)
+    {
+        registerModuleMembers!(moduleName, false, false, false, true)(filter);
     }
 
     /// Registers a stateful command group.
@@ -569,6 +659,12 @@ final class Client
     void registerEventGroup(T)()
     {
         registerEventMembers!T();
+    }
+
+    /// Registers `@Task` methods from a stateful group type.
+    void registerTaskGroup(T)()
+    {
+        registerTaskMembers!T();
     }
 
     /// Registers a plugin descriptor type.
@@ -836,7 +932,9 @@ final class Client
         foreach (option; interaction.options)
             options[option.name] = option.value;
 
-        auto result = commands.executeSlash(ctx, interaction.commandName, options);
+        auto result = interaction.commandType == ApplicationCommandType.ChatInput
+            ? commands.executeSlash(ctx, interaction.commandName, options)
+            : commands.executeContextMenu(ctx, interaction.commandName, options);
         auto durationMs = (MonoTime.currTime - startedAt).total!"msecs";
 
         Message sourceMessage;
@@ -853,8 +951,7 @@ final class Client
     /// Blocks until the live gateway thread finishes.
     void wait()
     {
-        if (_gatewayThread !is null)
-            _gatewayThread.join();
+        joinShardThreads();
         if (_dispatchThread !is null)
         {
             _dispatchThread.join();
@@ -875,16 +972,11 @@ final class Client
         _dispatchLoopRunning = false;
         _taskLoopRunning = false;
         tasks.cancel(GatewayReadyWatchdogLabel);
+        tasks.cancel(GatewayAutoReshardWatchdogLabel);
         deactivatePluginsIfNeeded();
         logger.information("client", "Stopping the Discord client.");
         signalDispatchLoop();
-        if (_gateway !is null)
-            _gateway.stop();
-        if (_gatewayThread !is null)
-        {
-            _gatewayThread.join();
-            _gatewayThread = null;
-        }
+        stopAllGateways();
         if (_dispatchThread !is null)
         {
             _dispatchThread.join();
@@ -907,6 +999,63 @@ final class Client
     size_t runDueTasks()
     {
         return tasks.runDue();
+    }
+
+    /// Runs a registered task immediately by label.
+    bool runTaskNow(string label)
+    {
+        return tasks.runNow(label);
+    }
+
+    /// Returns the active gateway shard count.
+    uint activeShardCount() const @property
+    {
+        return cast(uint) _shards.length;
+    }
+
+    /// Reconfigures shard count at runtime without restarting the process.
+    void reshard(uint shardCount)
+    {
+        if (shardCount == 0)
+        {
+            throw new DdiscordException(formatError(
+                "sharding",
+                "Cannot reshard to zero shards.",
+                "",
+                "Provide a shard count >= 1."
+            ));
+        }
+
+        config.enableSharding = shardCount > 1;
+        config.autoSharding = false;
+        config.shardCount = shardCount;
+
+        if (!_running)
+            return;
+
+        restartGateways(activeGatewayUrl());
+    }
+
+    /// Refreshes shard topology from Discord recommendations and reapplies gateways when needed.
+    bool refreshShardTopology()
+    {
+        auto info = rest.gateway.bot().awaitResult();
+        if (info.isErr)
+            throw new DdiscordException(info.error);
+
+        _gatewayInfo = Nullable!GatewayBotInfo.of(info.value);
+        if (info.value.shards == 0)
+            return false;
+
+        auto targetShardCount = info.value.shards;
+        if (targetShardCount == cast(uint) _shards.length)
+            return false;
+
+        config.enableSharding = targetShardCount > 1;
+        config.shardCount = targetShardCount;
+        if (_running)
+            restartGateways(info.value.url.length == 0 ? activeGatewayUrl() : info.value.url);
+        return true;
     }
 
     /// Returns whether the client has been started.
@@ -977,6 +1126,14 @@ final class Client
         });
     }
 
+    private void registerFreeTask(alias handler)()
+    {
+        auto spec = taskSpec!handler();
+        scheduleTask(spec, __traits(identifier, handler), {
+            invokeFreeTask!handler(this);
+        });
+    }
+
     private void registerStatefulEvent(T, string memberName)()
     {
         mixin("alias memberSymbol = T." ~ memberName ~ ";");
@@ -984,6 +1141,16 @@ final class Client
         events.on!Subscription((event) {
             auto instance = services.get!T();
             invokeStatefulEvent!(T, memberSymbol)(instance, event);
+        });
+    }
+
+    private void registerStatefulTask(T, string memberName)()
+    {
+        mixin("alias memberSymbol = T." ~ memberName ~ ";");
+        auto spec = taskSpec!memberSymbol();
+        scheduleTask(spec, T.stringof ~ "." ~ memberName, {
+            auto instance = services.get!T();
+            invokeStatefulTask!(T, memberSymbol)(this, instance);
         });
     }
 
@@ -1004,554 +1171,127 @@ final class Client
         }
     }
 
-    private EventContext buildEventContext(
-        Nullable!User user = Nullable!User.init,
-        Nullable!Guild guild = Nullable!Guild.init,
-        Nullable!GuildMember member = Nullable!GuildMember.init,
-        Nullable!Channel channel = Nullable!Channel.init,
-        Nullable!Message message = Nullable!Message.init,
-        Nullable!Interaction interaction = Nullable!Interaction.init
-    )
+    private void registerTaskMembers(T)()
     {
-        EventContext ctx;
-        ctx.rest = rest;
-        ctx.services = services;
-        ctx.cache = cache;
-        ctx.state = state;
-        ctx.logger = logger;
-        ctx.currentUser = user;
-        ctx.currentGuild = guild;
-        ctx.currentMember = member;
-        ctx.currentChannel = channel;
-        ctx.currentMessage = message;
-        ctx.currentInteraction = interaction;
-        return ctx;
-    }
+        commands.register!T();
 
-    private ReadyEventContext buildReadyEventContext(User selfUser)
-    {
-        ReadyEventContext ctx;
-        ctx.event = buildEventContext(Nullable!User.of(selfUser));
-        ctx.selfUser = selfUser;
-        return ctx;
-    }
-
-    private ResumedEventContext buildResumedEventContext(User selfUser)
-    {
-        ResumedEventContext ctx;
-        ctx.event = buildEventContext(Nullable!User.of(selfUser));
-        ctx.selfUser = selfUser;
-        return ctx;
-    }
-
-    private GuildCreateEventContext buildGuildCreateEventContext(Guild guild)
-    {
-        GuildCreateEventContext ctx;
-        ctx.event = buildEventContext(Nullable!User.of(_selfUser), Nullable!Guild.of(guild));
-        ctx.guildData = guild;
-        return ctx;
-    }
-
-    private GuildDeleteEventContext buildGuildDeleteEventContext(UnavailableGuild guild)
-    {
-        GuildDeleteEventContext ctx;
-        ctx.event = buildEventContext(Nullable!User.of(_selfUser), lookupGuild(Nullable!Snowflake.of(guild.id)));
-        ctx.guildData = guild;
-        return ctx;
-    }
-
-    private GuildMemberRemoveEventContext buildGuildMemberRemoveEventContext(
-        User user,
-        Nullable!Snowflake guildId
-    )
-    {
-        GuildMemberRemoveEventContext ctx;
-        ctx.event = buildEventContext(Nullable!User.of(user), lookupGuild(guildId));
-        ctx.userData = user;
-        return ctx;
-    }
-
-    private GuildBanAddEventContext buildGuildBanAddEventContext(GatewayGuildBanInfo info)
-    {
-        GuildBanAddEventContext ctx;
-        ctx.event = buildEventContext(
-            Nullable!User.of(info.user),
-            lookupGuild(Nullable!Snowflake.of(info.guildId))
-        );
-        ctx.guildId = info.guildId;
-        ctx.userData = info.user;
-        return ctx;
-    }
-
-    private GuildBanRemoveEventContext buildGuildBanRemoveEventContext(GatewayGuildBanInfo info)
-    {
-        GuildBanRemoveEventContext ctx;
-        auto built = buildGuildBanAddEventContext(info);
-        ctx.event = built.event;
-        ctx.guildId = built.guildId;
-        ctx.userData = built.userData;
-        return ctx;
-    }
-
-    private ChannelCreateEventContext buildChannelCreateEventContext(Channel channel)
-    {
-        ChannelCreateEventContext ctx;
-        ctx.event = buildEventContext(
-            Nullable!User.of(_selfUser),
-            lookupGuild(channel.guildId),
-            Nullable!GuildMember.init,
-            nullableChannel(channel)
-        );
-        ctx.channelData = channel;
-        return ctx;
-    }
-
-    private ChannelUpdateEventContext buildChannelUpdateEventContext(Channel channel)
-    {
-        ChannelUpdateEventContext ctx;
-        ctx.event = buildChannelCreateEventContext(channel).event;
-        ctx.channelData = channel;
-        return ctx;
-    }
-
-    private ChannelDeleteEventContext buildChannelDeleteEventContext(Channel channel)
-    {
-        ChannelDeleteEventContext ctx;
-        ctx.event = buildChannelCreateEventContext(channel).event;
-        ctx.channelData = channel;
-        return ctx;
-    }
-
-    private ChannelPinsUpdateEventContext buildChannelPinsUpdateEventContext(
-        GatewayChannelPinsUpdateInfo info
-    )
-    {
-        ChannelPinsUpdateEventContext ctx;
-        ctx.event = buildEventContext(
-            Nullable!User.of(_selfUser),
-            lookupGuild(info.guildId),
-            Nullable!GuildMember.init,
-            lookupChannel(info.channelId)
-        );
-        ctx.channelId = info.channelId;
-        ctx.guildId = info.guildId;
-        ctx.lastPinTimestamp = info.lastPinTimestamp;
-        return ctx;
-    }
-
-    private MessageCreateEventContext buildMessageCreateEventContext(Message message, Channel channel)
-    {
-        MessageCreateEventContext ctx;
-        ctx.event = buildEventContext(
-            Nullable!User.of(message.author),
-            lookupGuild(message.guildId),
-            message.member,
-            nullableChannel(channel),
-            Nullable!Message.of(message)
-        );
-        ctx.message = message;
-        return ctx;
-    }
-
-    private MessageUpdateEventContext buildMessageUpdateEventContext(Message message)
-    {
-        Channel channel;
-        channel.id = message.channelId;
-        if (!message.guildId.isNull)
-            channel.guildId = message.guildId;
-
-        MessageUpdateEventContext ctx;
-        ctx.event = buildMessageCreateEventContext(message, channel).event;
-        ctx.message = message;
-        return ctx;
-    }
-
-    private MessageDeleteEventContext buildMessageDeleteEventContext(
-        GatewayMessageDeleteInfo info,
-        Nullable!Message cachedMessage
-    )
-    {
-        MessageDeleteEventContext ctx;
-        Nullable!User user;
-        Nullable!GuildMember member;
-        if (!cachedMessage.isNull)
+        static foreach (memberName; __traits(allMembers, T))
         {
-            user = Nullable!User.of(cachedMessage.get.author);
-            member = cachedMessage.get.member;
+            {
+                static if (memberName != "__ctor" && memberName != "__xdtor")
+                {
+                    mixin("alias memberSymbol = T." ~ memberName ~ ";");
+                    static if (isCallable!memberSymbol)
+                    {
+                        enum hasAttrs = __traits(getAttributes, memberSymbol).length > 0;
+                        static if (hasAttrs && hasTaskAttr!memberSymbol)
+                            registerStatefulTask!(T, memberName)();
+                    }
+                }
+            }
+        }
+    }
+
+    private void scheduleTask(Task spec, string fallbackLabel, void delegate() callback)
+    {
+        auto label = spec.label.strip.length == 0 ? fallbackLabel : spec.label.strip;
+        if (label.length == 0)
+            label = "task";
+
+        void delegate() wrapped = callback;
+
+        if (wrapped !is null && !spec.reconnect)
+        {
+            auto original = wrapped;
+            wrapped = {
+                try
+                {
+                    original();
+                }
+                catch (Throwable error)
+                {
+                    tasks.cancel(label);
+                    throw error;
+                }
+            };
         }
 
-        Channel channel;
-        if (!info.channelId.isNull)
-            channel.id = info.channelId.get;
-
-        ctx.event = buildEventContext(
-            user,
-            lookupGuild(info.guildId),
-            member,
-            nullableChannel(channel),
-            cachedMessage
-        );
-        ctx.messageId = info.messageId;
-        ctx.channelId = info.channelId;
-        ctx.guildId = info.guildId;
-        return ctx;
-    }
-
-    private MessageReactionAddEventContext buildMessageReactionAddEventContext(
-        GatewayMessageReactionInfo info
-    )
-    {
-        MessageReactionAddEventContext ctx;
-        auto user = cache.user(info.userId);
-        ctx.event = buildEventContext(
-            user,
-            lookupGuild(info.guildId),
-            Nullable!GuildMember.init,
-            lookupChannel(info.channelId),
-            cache.message(info.messageId)
-        );
-        ctx.userId = info.userId;
-        ctx.channelId = info.channelId;
-        ctx.messageId = info.messageId;
-        ctx.guildId = info.guildId;
-        ctx.emojiName = info.emojiName;
-        return ctx;
-    }
-
-    private MessageReactionRemoveEventContext buildMessageReactionRemoveEventContext(
-        GatewayMessageReactionInfo info
-    )
-    {
-        MessageReactionRemoveEventContext ctx;
-        auto built = buildMessageReactionAddEventContext(info);
-        ctx.event = built.event;
-        ctx.userId = built.userId;
-        ctx.channelId = built.channelId;
-        ctx.messageId = built.messageId;
-        ctx.guildId = built.guildId;
-        ctx.emojiName = built.emojiName;
-        return ctx;
-    }
-
-    private MessageReactionRemoveAllEventContext buildMessageReactionRemoveAllEventContext(
-        GatewayMessageReactionRemoveAllInfo info
-    )
-    {
-        MessageReactionRemoveAllEventContext ctx;
-        ctx.event = buildEventContext(
-            Nullable!User.of(_selfUser),
-            lookupGuild(info.guildId),
-            Nullable!GuildMember.init,
-            lookupChannel(info.channelId),
-            cache.message(info.messageId)
-        );
-        ctx.channelId = info.channelId;
-        ctx.messageId = info.messageId;
-        ctx.guildId = info.guildId;
-        return ctx;
-    }
-
-    private MessageReactionRemoveEmojiEventContext buildMessageReactionRemoveEmojiEventContext(
-        GatewayMessageReactionInfo info
-    )
-    {
-        MessageReactionRemoveEmojiEventContext ctx;
-        GatewayMessageReactionRemoveAllInfo removeAllInfo;
-        removeAllInfo.channelId = info.channelId;
-        removeAllInfo.messageId = info.messageId;
-        removeAllInfo.guildId = info.guildId;
-        auto removeAll = buildMessageReactionRemoveAllEventContext(removeAllInfo);
-        ctx.event = removeAll.event;
-        ctx.channelId = info.channelId;
-        ctx.messageId = info.messageId;
-        ctx.guildId = info.guildId;
-        ctx.emojiName = info.emojiName;
-        return ctx;
-    }
-
-    private InteractionCreateEventContext buildInteractionCreateEventContext(Interaction interaction, Channel channel)
-    {
-        InteractionCreateEventContext ctx;
-        ctx.event = buildEventContext(
-            Nullable!User.of(interaction.user),
-            lookupGuild(interaction.guildId),
-            interaction.member,
-            nullableChannel(channel),
-            interaction.targetMessage,
-            Nullable!Interaction.of(interaction)
-        );
-        ctx.interaction = interaction;
-        return ctx;
-    }
-
-    private GuildMemberAddEventContext buildGuildMemberAddEventContext(
-        GuildMember member,
-        Nullable!Snowflake guildId
-    )
-    {
-        GuildMemberAddEventContext ctx;
-        Nullable!User user;
-        if (!member.user.isNull)
-            user = Nullable!User.of(member.user.get);
-        ctx.event = buildEventContext(user, lookupGuild(guildId), Nullable!GuildMember.of(member));
-        ctx.memberData = member;
-        return ctx;
-    }
-
-    private AutocompleteInteractionEventContext buildAutocompleteInteractionEventContext(
-        Interaction interaction,
-        Channel channel
-    )
-    {
-        AutocompleteInteractionEventContext ctx;
-        ctx.event = buildInteractionCreateEventContext(interaction, channel).event;
-        ctx.interaction = interaction;
-        auto focused = focusedOption(interaction);
-        if (!focused.isNull)
+        if (wrapped !is null && spec.count > 0)
         {
-            ctx.focusedName = focused.get.name;
-            ctx.focusedValue = focused.get.value;
+            auto remaining = spec.count;
+            auto original = wrapped;
+            wrapped = {
+                if (remaining == 0)
+                    return;
+
+                original();
+                remaining--;
+                if (remaining == 0)
+                    tasks.cancel(label);
+            };
         }
-        return ctx;
+
+        if (spec.runOnRegister && wrapped !is null)
+            wrapped();
+
+        final switch (spec.mode)
+        {
+            case TaskMode.Every:
+                if (spec.interval <= Duration.zero)
+                {
+                    throw new DdiscordException(formatError(
+                        "tasks",
+                        "A scheduled task declared an invalid recurring interval.",
+                        "Task `" ~ label ~ "` must use an interval greater than zero.",
+                        "Use `@Task(dur!\"seconds\"(N))` with `N > 0` for recurring tasks."
+                    ));
+                }
+                if (spec.count == 1 && spec.runOnRegister)
+                    break;
+                tasks.every(label, spec.interval, wrapped);
+                break;
+            case TaskMode.Delay:
+                if (spec.interval < Duration.zero)
+                {
+                    throw new DdiscordException(formatError(
+                        "tasks",
+                        "A scheduled task declared a negative delay.",
+                        "Task `" ~ label ~ "` received delay `" ~ spec.interval.to!string ~ "`.",
+                        "Use `TaskMode.Delay` with a delay greater than or equal to zero."
+                    ));
+                }
+                if (spec.count > 1)
+                {
+                    throw new DdiscordException(formatError(
+                        "tasks",
+                        "Delay-mode tasks cannot run multiple times.",
+                        "Task `" ~ label ~ "` uses `TaskMode.Delay` with `count=" ~ spec.count.to!string ~ "`.",
+                        "Use recurring mode (`TaskMode.Every`) for multi-run tasks."
+                    ));
+                }
+                if (spec.count == 1 && spec.runOnRegister)
+                    break;
+                tasks.schedule(label, spec.interval, wrapped);
+                break;
+            case TaskMode.Cron:
+                auto expression = spec.expression.strip;
+                if (expression.length == 0)
+                {
+                    throw new DdiscordException(formatError(
+                        "tasks",
+                        "A scheduled task declared an empty cron expression.",
+                        "Task `" ~ label ~ "` uses `TaskMode.Cron` but did not set `expression`.",
+                        "Use `@Task(\"@every:30s\")` or set a valid cron expression string."
+                    ));
+                }
+                if (spec.count == 1 && spec.runOnRegister)
+                    break;
+                tasks.cron(label, expression, wrapped);
+                break;
+        }
     }
 
-    private MessageComponentEventContext buildMessageComponentEventContext(
-        Interaction interaction,
-        Channel channel
-    )
-    {
-        MessageComponentEventContext ctx;
-        ctx.event = buildInteractionCreateEventContext(interaction, channel).event;
-        ctx.interaction = interaction;
-        ctx.customId = interaction.customId;
-        return ctx;
-    }
-
-    private ModalSubmitEventContext buildModalSubmitEventContext(Interaction interaction, Channel channel)
-    {
-        ModalSubmitEventContext ctx;
-        ctx.event = buildInteractionCreateEventContext(interaction, channel).event;
-        ctx.interaction = interaction;
-        ctx.submittedComponents = interaction.submittedComponents.dup;
-        return ctx;
-    }
-
-    private PresenceUpdateEventContext buildPresenceUpdateEventContext(StatusType status, Activity activity)
-    {
-        return buildGatewayPresenceUpdateEventContext(
-            status,
-            activity,
-            Nullable!User.of(_selfUser),
-            Nullable!Snowflake.init,
-            Nullable!GuildMember.init
-        );
-    }
-
-    private PresenceUpdateEventContext buildGatewayPresenceUpdateEventContext(
-        StatusType status,
-        Activity activity,
-        Nullable!User user,
-        Nullable!Snowflake guildId,
-        Nullable!GuildMember member
-    )
-    {
-        PresenceUpdateEventContext ctx;
-        ctx.event = buildEventContext(user, lookupGuild(guildId), member);
-        ctx.status = status;
-        ctx.activity = activity;
-        return ctx;
-    }
-
-    private TypingStartEventContext buildTypingStartEventContext(GatewayTypingStartInfo info)
-    {
-        TypingStartEventContext ctx;
-        auto user = cache.user(info.userId);
-        ctx.event = buildEventContext(
-            user,
-            lookupGuild(info.guildId),
-            Nullable!GuildMember.init,
-            lookupChannel(info.channelId)
-        );
-        ctx.channelId = info.channelId;
-        ctx.guildId = info.guildId;
-        ctx.userId = info.userId;
-        ctx.timestampUnix = info.timestampUnix;
-        return ctx;
-    }
-
-    private GuildRoleCreateEventContext buildGuildRoleCreateEventContext(GatewayGuildRoleInfo info)
-    {
-        GuildRoleCreateEventContext ctx;
-        ctx.event = buildEventContext(
-            Nullable!User.of(_selfUser),
-            lookupGuild(Nullable!Snowflake.of(info.guildId))
-        );
-        ctx.guildId = info.guildId;
-        ctx.roleData = info.role;
-        return ctx;
-    }
-
-    private GuildRoleUpdateEventContext buildGuildRoleUpdateEventContext(GatewayGuildRoleInfo info)
-    {
-        GuildRoleUpdateEventContext ctx;
-        auto built = buildGuildRoleCreateEventContext(info);
-        ctx.event = built.event;
-        ctx.guildId = built.guildId;
-        ctx.roleData = built.roleData;
-        return ctx;
-    }
-
-    private GuildRoleDeleteEventContext buildGuildRoleDeleteEventContext(
-        GatewayGuildRoleDeleteInfo info
-    )
-    {
-        GuildRoleDeleteEventContext ctx;
-        ctx.event = buildEventContext(
-            Nullable!User.of(_selfUser),
-            lookupGuild(Nullable!Snowflake.of(info.guildId))
-        );
-        ctx.guildId = info.guildId;
-        ctx.roleId = info.roleId;
-        return ctx;
-    }
-
-    private InviteCreateEventContext buildInviteCreateEventContext(GatewayInviteInfo info)
-    {
-        InviteCreateEventContext ctx;
-        ctx.event = buildEventContext(
-            Nullable!User.of(_selfUser),
-            lookupGuild(info.guildId),
-            Nullable!GuildMember.init,
-            lookupChannel(info.channelId)
-        );
-        ctx.code = info.code;
-        ctx.channelId = info.channelId;
-        ctx.guildId = info.guildId;
-        return ctx;
-    }
-
-    private InviteDeleteEventContext buildInviteDeleteEventContext(GatewayInviteInfo info)
-    {
-        InviteDeleteEventContext ctx;
-        auto built = buildInviteCreateEventContext(info);
-        ctx.event = built.event;
-        ctx.code = built.code;
-        ctx.channelId = built.channelId;
-        ctx.guildId = built.guildId;
-        return ctx;
-    }
-
-    private WebhooksUpdateEventContext buildWebhooksUpdateEventContext(
-        GatewayWebhooksUpdateInfo info
-    )
-    {
-        WebhooksUpdateEventContext ctx;
-        ctx.event = buildEventContext(
-            Nullable!User.of(_selfUser),
-            lookupGuild(info.guildId),
-            Nullable!GuildMember.init,
-            lookupChannel(info.channelId)
-        );
-        ctx.channelId = info.channelId;
-        ctx.guildId = info.guildId;
-        return ctx;
-    }
-
-    private ThreadCreateEventContext buildThreadCreateEventContext(Channel thread)
-    {
-        ThreadCreateEventContext ctx;
-        ctx.event = buildEventContext(
-            Nullable!User.of(_selfUser),
-            lookupGuild(thread.guildId),
-            Nullable!GuildMember.init,
-            nullableChannel(thread)
-        );
-        ctx.threadData = thread;
-        return ctx;
-    }
-
-    private ThreadUpdateEventContext buildThreadUpdateEventContext(Channel thread)
-    {
-        ThreadUpdateEventContext ctx;
-        auto built = buildThreadCreateEventContext(thread);
-        ctx.event = built.event;
-        ctx.threadData = built.threadData;
-        return ctx;
-    }
-
-    private ThreadDeleteEventContext buildThreadDeleteEventContext(GatewayThreadDeleteInfo info)
-    {
-        ThreadDeleteEventContext ctx;
-        ctx.event = buildEventContext(
-            Nullable!User.of(_selfUser),
-            lookupGuild(info.guildId),
-            Nullable!GuildMember.init,
-            lookupChannel(info.threadId)
-        );
-        ctx.threadId = info.threadId;
-        ctx.guildId = info.guildId;
-        ctx.parentId = info.parentId;
-        return ctx;
-    }
-
-    private CommandExecutedEventContext buildCommandExecutedEventContext(
-        CommandContext command,
-        string commandName
-    )
-    {
-        CommandExecutedEventContext ctx;
-        ctx.event = buildEventContext(
-            Nullable!User.of(command.user),
-            command.guild,
-            command.member,
-            nullableChannel(command.currentChannel),
-            command.message,
-            command.interaction
-        );
-        ctx.commandName = commandName;
-        ctx.command = command;
-        return ctx;
-    }
-
-    private CommandFailedEventContext buildCommandFailedEventContext(
-        CommandContext command,
-        string commandName
-    )
-    {
-        CommandFailedEventContext ctx;
-        ctx.event = buildEventContext(
-            Nullable!User.of(command.user),
-            command.guild,
-            command.member,
-            nullableChannel(command.currentChannel),
-            command.message,
-            command.interaction
-        );
-        ctx.commandName = commandName;
-        ctx.command = command;
-        return ctx;
-    }
-
-    private Nullable!Guild lookupGuild(Nullable!Snowflake guildId)
-    {
-        if (guildId.isNull)
-            return Nullable!Guild.init;
-        return cache.guild(guildId.get);
-    }
-
-    private Nullable!Channel lookupChannel(Snowflake channelId)
-    {
-        if (channelId.value == 0)
-            return Nullable!Channel.init;
-        return cache.channel(channelId);
-    }
-
-    private Nullable!Channel nullableChannel(Channel channel)
-    {
-        if (channel.id.value == 0)
-            return Nullable!Channel.init;
-        return Nullable!Channel.of(channel);
-    }
+    mixin ClientEventContextBuilders;
 
     private Nullable!InteractionOption focusedOption(Interaction interaction)
     {
@@ -1584,25 +1324,104 @@ final class Client
         return true;
     }
 
-    private void startGateway(string url)
+    private void startGateways(string url)
+    {
+        stopAllGateways();
+
+        auto shardCount = resolvedShardCount();
+        _shards.length = 0;
+
+        foreach (shardId; 0 .. shardCount)
+            startGatewayShard(url, shardId, shardCount);
+
+        _gateway = _shards.length == 0 ? null : _shards[0].gateway;
+        _gatewayThread = _shards.length == 0 ? null : _shards[0].thread;
+
+        tasks.cancel(GatewayReadyWatchdogLabel);
+        tasks.schedule(GatewayReadyWatchdogLabel, dur!"seconds"(20), {
+            if (!allShardsReady())
+            {
+                logger.warning(
+                    "gateway",
+                    "One or more shard sessions are still waiting for READY/RESUMED 20 seconds after startup. Check intents, token validity, network reachability, and identify payload correctness."
+                );
+            }
+        });
+
+        logger.information(
+            "gateway",
+            "Started `" ~ shardCount.to!string ~ "` gateway shard(s)."
+        );
+    }
+
+    private void restartGateways(string url)
+    {
+        logger.warning(
+            "gateway",
+            "Restarting gateway shards with count `" ~ resolvedShardCount().to!string ~ "`."
+        );
+        startGateways(url);
+    }
+
+    private void startGatewayShard(string url, uint shardId, uint shardCount)
     {
         GatewayClientConfig gatewayConfig;
         gatewayConfig.token = config.token;
         gatewayConfig.intents = config.intents;
         gatewayConfig.url = url;
+        gatewayConfig.shardId = shardId;
+        gatewayConfig.shardCount = shardCount;
         gatewayConfig.logger = logger;
         gatewayConfig.pollTimeout = dur!"msecs"(250);
         gatewayConfig.logUnhandledDispatchEvents = config.logUnhandledGatewayDispatchEvents;
         gatewayConfig.unhandledDispatchLogEvery = config.gatewayUnhandledDispatchLogEvery;
 
-        _gateway = new GatewayClient(gatewayConfig);
-        _gateway.onReady = (GatewayReadyInfo ready) {
+        auto gateway = new GatewayClient(gatewayConfig);
+        wireGatewayCallbacks(gateway, shardId, shardCount);
+
+        ShardRuntime runtime;
+        runtime.shardId = shardId;
+        runtime.gateway = gateway;
+        runtime.thread = new Thread({
+            gateway.run();
+
+            synchronized (_dispatchMutex)
+            {
+                if (!_running)
+                    return;
+                _running = false;
+            }
+
+            uptime.markStopped();
+            _dispatchLoopRunning = false;
+            _taskLoopRunning = false;
             tasks.cancel(GatewayReadyWatchdogLabel);
+            tasks.cancel(GatewayAutoReshardWatchdogLabel);
+            stopGatewaysWithoutJoin();
+            signalDispatchLoop();
+            deactivatePluginsIfNeeded();
+            logger.warning(
+                "gateway",
+                "Gateway shard `" ~ shardId.to!string ~ "` loop exited."
+            );
+        });
+
+        _shards ~= runtime;
+        runtime.thread.start();
+        _shards[$ - 1].thread = runtime.thread;
+    }
+
+    private void wireGatewayCallbacks(GatewayClient gateway, uint shardId, uint shardCount)
+    {
+        gateway.onReady = (GatewayReadyInfo ready) {
             if (ready.selfUser.id.value != 0)
                 _selfUser = ready.selfUser;
 
             if (_selfUser.id.value != 0)
                 cache.store(_selfUser);
+
+            if (allShardsReady())
+                tasks.cancel(GatewayReadyWatchdogLabel);
 
             ReadyEvent event;
             event.gatewayVersion = ready.gatewayVersion;
@@ -1612,18 +1431,26 @@ final class Client
             event.resumeGatewayUrl = ready.resumeGatewayUrl;
             event.context = buildReadyEventContext(_selfUser);
             emit!ReadyEvent(event);
-            logger.information("gateway", "READY received for `" ~ _selfUser.username ~ "`.");
-            _gateway.updatePresence(_status, _activity);
+            logger.information(
+                "gateway",
+                "READY received for shard `" ~ shardId.to!string ~ "/" ~ shardCount.to!string ~ "`."
+            );
+            gateway.updatePresence(_status, _activity);
         };
-        _gateway.onResumed = () {
-            tasks.cancel(GatewayReadyWatchdogLabel);
+        gateway.onResumed = () {
+            if (allShardsReady())
+                tasks.cancel(GatewayReadyWatchdogLabel);
+
             ResumedEvent event;
             event.context = buildResumedEventContext(_selfUser);
             emit!ResumedEvent(event);
-            logger.information("gateway", "RESUMED received for `" ~ _selfUser.username ~ "`.");
-            _gateway.updatePresence(_status, _activity);
+            logger.information(
+                "gateway",
+                "RESUMED received for shard `" ~ shardId.to!string ~ "/" ~ shardCount.to!string ~ "`."
+            );
+            gateway.updatePresence(_status, _activity);
         };
-        _gateway.onGuildCreate = (Guild guild) {
+        gateway.onGuildCreate = (Guild guild) {
             if (guild.id.value != 0)
                 cache.store(guild);
 
@@ -1632,7 +1459,7 @@ final class Client
             event.context = buildGuildCreateEventContext(guild);
             emit!GuildCreateEvent(event);
         };
-        _gateway.onGuildDelete = (UnavailableGuild guild) {
+        gateway.onGuildDelete = (UnavailableGuild guild) {
             if (!guild.unavailable && guild.id.value != 0)
                 cache.evictGuild(guild.id);
 
@@ -1641,7 +1468,7 @@ final class Client
             event.context = buildGuildDeleteEventContext(guild);
             emit!GuildDeleteEvent(event);
         };
-        _gateway.onGuildMemberRemove = (GatewayGuildMemberRemoveInfo info) {
+        gateway.onGuildMemberRemove = (GatewayGuildMemberRemoveInfo info) {
             if (info.user.id.value != 0)
                 cache.store(info.user);
 
@@ -1651,7 +1478,7 @@ final class Client
             event.context = buildGuildMemberRemoveEventContext(info.user, info.guildId);
             emit!GuildMemberRemoveEvent(event);
         };
-        _gateway.onGuildBanAdd = (GatewayGuildBanInfo info) {
+        gateway.onGuildBanAdd = (GatewayGuildBanInfo info) {
             if (info.user.id.value != 0)
                 cache.store(info.user);
 
@@ -1661,7 +1488,7 @@ final class Client
             event.context = buildGuildBanAddEventContext(info);
             emit!GuildBanAddEvent(event);
         };
-        _gateway.onGuildBanRemove = (GatewayGuildBanInfo info) {
+        gateway.onGuildBanRemove = (GatewayGuildBanInfo info) {
             if (info.user.id.value != 0)
                 cache.store(info.user);
 
@@ -1671,7 +1498,7 @@ final class Client
             event.context = buildGuildBanRemoveEventContext(info);
             emit!GuildBanRemoveEvent(event);
         };
-        _gateway.onChannelCreate = (Channel channel) {
+        gateway.onChannelCreate = (Channel channel) {
             if (channel.id.value != 0)
                 cache.store(channel);
 
@@ -1680,7 +1507,7 @@ final class Client
             event.context = buildChannelCreateEventContext(channel);
             emit!ChannelCreateEvent(event);
         };
-        _gateway.onChannelUpdate = (Channel channel) {
+        gateway.onChannelUpdate = (Channel channel) {
             if (channel.id.value != 0)
                 cache.store(channel);
 
@@ -1689,7 +1516,7 @@ final class Client
             event.context = buildChannelUpdateEventContext(channel);
             emit!ChannelUpdateEvent(event);
         };
-        _gateway.onChannelDelete = (Channel channel) {
+        gateway.onChannelDelete = (Channel channel) {
             if (channel.id.value != 0)
                 cache.evictChannel(channel.id);
 
@@ -1698,7 +1525,7 @@ final class Client
             event.context = buildChannelDeleteEventContext(channel);
             emit!ChannelDeleteEvent(event);
         };
-        _gateway.onChannelPinsUpdate = (GatewayChannelPinsUpdateInfo info) {
+        gateway.onChannelPinsUpdate = (GatewayChannelPinsUpdateInfo info) {
             ChannelPinsUpdateEvent event;
             event.channelId = info.channelId;
             event.guildId = info.guildId;
@@ -1706,10 +1533,10 @@ final class Client
             event.context = buildChannelPinsUpdateEventContext(info);
             emit!ChannelPinsUpdateEvent(event);
         };
-        _gateway.onMessageCreate = (Message message) {
+        gateway.onMessageCreate = (Message message) {
             enqueueMessage(message);
         };
-        _gateway.onMessageUpdate = (Message message) {
+        gateway.onMessageUpdate = (Message message) {
             if (message.id.value != 0)
                 cache.store(message);
             if (message.author.id.value != 0)
@@ -1720,7 +1547,7 @@ final class Client
             event.context = buildMessageUpdateEventContext(message);
             emit!MessageUpdateEvent(event);
         };
-        _gateway.onMessageDelete = (GatewayMessageDeleteInfo info) {
+        gateway.onMessageDelete = (GatewayMessageDeleteInfo info) {
             auto cached = cache.message(info.messageId);
             if (info.messageId.value != 0)
                 cache.evictMessage(info.messageId);
@@ -1732,7 +1559,7 @@ final class Client
             event.context = buildMessageDeleteEventContext(info, cached);
             emit!MessageDeleteEvent(event);
         };
-        _gateway.onMessageReactionAdd = (GatewayMessageReactionInfo info) {
+        gateway.onMessageReactionAdd = (GatewayMessageReactionInfo info) {
             MessageReactionAddEvent event;
             event.userId = info.userId;
             event.channelId = info.channelId;
@@ -1742,7 +1569,7 @@ final class Client
             event.context = buildMessageReactionAddEventContext(info);
             emit!MessageReactionAddEvent(event);
         };
-        _gateway.onMessageReactionRemove = (GatewayMessageReactionInfo info) {
+        gateway.onMessageReactionRemove = (GatewayMessageReactionInfo info) {
             MessageReactionRemoveEvent event;
             event.userId = info.userId;
             event.channelId = info.channelId;
@@ -1752,7 +1579,7 @@ final class Client
             event.context = buildMessageReactionRemoveEventContext(info);
             emit!MessageReactionRemoveEvent(event);
         };
-        _gateway.onMessageReactionRemoveAll = (GatewayMessageReactionRemoveAllInfo info) {
+        gateway.onMessageReactionRemoveAll = (GatewayMessageReactionRemoveAllInfo info) {
             MessageReactionRemoveAllEvent event;
             event.channelId = info.channelId;
             event.messageId = info.messageId;
@@ -1760,7 +1587,7 @@ final class Client
             event.context = buildMessageReactionRemoveAllEventContext(info);
             emit!MessageReactionRemoveAllEvent(event);
         };
-        _gateway.onMessageReactionRemoveEmoji = (GatewayMessageReactionInfo info) {
+        gateway.onMessageReactionRemoveEmoji = (GatewayMessageReactionInfo info) {
             MessageReactionRemoveEmojiEvent event;
             event.channelId = info.channelId;
             event.messageId = info.messageId;
@@ -1769,7 +1596,7 @@ final class Client
             event.context = buildMessageReactionRemoveEmojiEventContext(info);
             emit!MessageReactionRemoveEmojiEvent(event);
         };
-        _gateway.onTypingStart = (GatewayTypingStartInfo info) {
+        gateway.onTypingStart = (GatewayTypingStartInfo info) {
             TypingStartEvent event;
             event.channelId = info.channelId;
             event.guildId = info.guildId;
@@ -1778,7 +1605,7 @@ final class Client
             event.context = buildTypingStartEventContext(info);
             emit!TypingStartEvent(event);
         };
-        _gateway.onGuildRoleCreate = (GatewayGuildRoleInfo info) {
+        gateway.onGuildRoleCreate = (GatewayGuildRoleInfo info) {
             if (info.role.id.value != 0)
                 cache.store(info.role);
 
@@ -1788,7 +1615,7 @@ final class Client
             event.context = buildGuildRoleCreateEventContext(info);
             emit!GuildRoleCreateEvent(event);
         };
-        _gateway.onGuildRoleUpdate = (GatewayGuildRoleInfo info) {
+        gateway.onGuildRoleUpdate = (GatewayGuildRoleInfo info) {
             if (info.role.id.value != 0)
                 cache.store(info.role);
 
@@ -1798,7 +1625,7 @@ final class Client
             event.context = buildGuildRoleUpdateEventContext(info);
             emit!GuildRoleUpdateEvent(event);
         };
-        _gateway.onGuildRoleDelete = (GatewayGuildRoleDeleteInfo info) {
+        gateway.onGuildRoleDelete = (GatewayGuildRoleDeleteInfo info) {
             if (info.roleId.value != 0)
                 cache.evictRole(info.roleId);
 
@@ -1808,7 +1635,7 @@ final class Client
             event.context = buildGuildRoleDeleteEventContext(info);
             emit!GuildRoleDeleteEvent(event);
         };
-        _gateway.onInviteCreate = (GatewayInviteInfo info) {
+        gateway.onInviteCreate = (GatewayInviteInfo info) {
             InviteCreateEvent event;
             event.code = info.code;
             event.channelId = info.channelId;
@@ -1816,7 +1643,7 @@ final class Client
             event.context = buildInviteCreateEventContext(info);
             emit!InviteCreateEvent(event);
         };
-        _gateway.onInviteDelete = (GatewayInviteInfo info) {
+        gateway.onInviteDelete = (GatewayInviteInfo info) {
             InviteDeleteEvent event;
             event.code = info.code;
             event.channelId = info.channelId;
@@ -1824,14 +1651,14 @@ final class Client
             event.context = buildInviteDeleteEventContext(info);
             emit!InviteDeleteEvent(event);
         };
-        _gateway.onWebhooksUpdate = (GatewayWebhooksUpdateInfo info) {
+        gateway.onWebhooksUpdate = (GatewayWebhooksUpdateInfo info) {
             WebhooksUpdateEvent event;
             event.channelId = info.channelId;
             event.guildId = info.guildId;
             event.context = buildWebhooksUpdateEventContext(info);
             emit!WebhooksUpdateEvent(event);
         };
-        _gateway.onThreadCreate = (Channel thread) {
+        gateway.onThreadCreate = (Channel thread) {
             if (thread.id.value != 0)
                 cache.store(thread);
 
@@ -1840,7 +1667,7 @@ final class Client
             event.context = buildThreadCreateEventContext(thread);
             emit!ThreadCreateEvent(event);
         };
-        _gateway.onThreadUpdate = (Channel thread) {
+        gateway.onThreadUpdate = (Channel thread) {
             if (thread.id.value != 0)
                 cache.store(thread);
 
@@ -1849,7 +1676,7 @@ final class Client
             event.context = buildThreadUpdateEventContext(thread);
             emit!ThreadUpdateEvent(event);
         };
-        _gateway.onThreadDelete = (GatewayThreadDeleteInfo info) {
+        gateway.onThreadDelete = (GatewayThreadDeleteInfo info) {
             if (info.threadId.value != 0)
                 cache.evictChannel(info.threadId);
 
@@ -1860,12 +1687,12 @@ final class Client
             event.context = buildThreadDeleteEventContext(info);
             emit!ThreadDeleteEvent(event);
         };
-        _gateway.onInteractionCreate = (Interaction interaction) {
+        gateway.onInteractionCreate = (Interaction interaction) {
             Channel channel;
             channel.id = interaction.channelId;
             enqueueInteraction(interaction, channel);
         };
-        _gateway.onGuildMemberAdd = (GatewayGuildMemberAddInfo info) {
+        gateway.onGuildMemberAdd = (GatewayGuildMemberAddInfo info) {
             if (!info.member.user.isNull)
                 cache.store(info.member.user.get);
 
@@ -1875,7 +1702,7 @@ final class Client
             event.context = buildGuildMemberAddEventContext(info.member, info.guildId);
             emit!GuildMemberAddEvent(event);
         };
-        _gateway.onPresenceUpdate = (GatewayPresenceUpdateInfo info) {
+        gateway.onPresenceUpdate = (GatewayPresenceUpdateInfo info) {
             if (info.user.id.value != 0)
                 cache.store(info.user);
 
@@ -1891,7 +1718,7 @@ final class Client
             );
             emit!PresenceUpdateEvent(event);
         };
-        _gateway.onError = (string message) {
+        gateway.onError = (string message) {
             CommandFailedEvent event;
             event.attemptedName = "[gateway]";
             event.error = message;
@@ -1905,30 +1732,103 @@ final class Client
             event.context = buildCommandFailedEventContext(ctx, "[gateway]");
             emit!CommandFailedEvent(event);
         };
+    }
 
-        tasks.cancel(GatewayReadyWatchdogLabel);
-        tasks.schedule(GatewayReadyWatchdogLabel, dur!"seconds"(20), {
-            if (_gateway !is null && !_gateway.isReady)
+    private uint resolvedShardCount() const
+    {
+        if (config.shardCount > 0)
+            return config.shardCount;
+
+        if (config.enableSharding && config.autoSharding && !_gatewayInfo.isNull && _gatewayInfo.get.shards > 0)
+            return _gatewayInfo.get.shards;
+
+        return 1;
+    }
+
+    private bool allShardsReady() const
+    {
+        if (_shards.length == 0)
+            return false;
+
+        foreach (ref shard; _shards)
+        {
+            if (shard.gateway is null || !shard.gateway.isReady)
+                return false;
+        }
+
+        return true;
+    }
+
+    private void stopGatewaysWithoutJoin()
+    {
+        foreach (ref shard; _shards)
+        {
+            if (shard.gateway !is null)
+                shard.gateway.stop();
+        }
+    }
+
+    private void stopAllGateways()
+    {
+        stopGatewaysWithoutJoin();
+        joinShardThreads();
+    }
+
+    private void joinShardThreads()
+    {
+        foreach (ref shard; _shards)
+        {
+            if (shard.thread !is null)
             {
-                logger.warning(
-                    "gateway",
-                    "The gateway session is still waiting for READY or RESUMED 20 seconds after startup. Check intents, token validity, network reachability, and whether Discord is accepting the IDENTIFY payload."
-                );
+                shard.thread.join();
+                shard.thread = null;
             }
-        });
+        }
 
-        _gatewayThread = new Thread({
-            _gateway.run();
-            _running = false;
-            uptime.markStopped();
-            _dispatchLoopRunning = false;
-            _taskLoopRunning = false;
-            tasks.cancel(GatewayReadyWatchdogLabel);
-            signalDispatchLoop();
-            deactivatePluginsIfNeeded();
-            logger.warning("gateway", "Gateway loop exited.");
+        _shards.length = 0;
+        _gateway = null;
+        _gatewayThread = null;
+    }
+
+    private string activeGatewayUrl() const
+    {
+        if (!_gatewayInfo.isNull && _gatewayInfo.get.url.length != 0)
+            return _gatewayInfo.get.url;
+
+        if (_shards.length != 0 && _shards[0].gateway !is null)
+            return _shards[0].gateway.config.url;
+
+        return "wss://gateway.discord.gg";
+    }
+
+    private void configureAutoReshardWatchdog()
+    {
+        tasks.cancel(GatewayAutoReshardWatchdogLabel);
+        if (!config.enableSharding || !config.autoReshard)
+            return;
+
+        auto interval = config.autoReshardCheckInterval <= Duration.zero
+            ? dur!"minutes"(10)
+            : config.autoReshardCheckInterval;
+
+        tasks.every(GatewayAutoReshardWatchdogLabel, interval, {
+            if (!_running)
+                return;
+
+            bool changed;
+            try
+            {
+                changed = refreshShardTopology();
+            }
+            catch (DdiscordException error)
+            {
+                logger.warning("gateway", "Auto-reshard check failed: " ~ error.msg);
+                return;
+            }
+
+            if (changed)
+                logger.warning("gateway", "Auto-reshard applied a new shard topology.");
         });
-        _gatewayThread.start();
     }
 
     private void startDispatchLoop()
@@ -2713,7 +2613,8 @@ final class Client
         string moduleName,
         bool includeCommands,
         bool includeEvents,
-        bool includePlugins
+        bool includePlugins,
+        bool includeTasks
     )(CommandRegistrationFilter filter = CommandRegistrationFilter.init)
     {
         mixin("import " ~ moduleName ~ ";");
@@ -2731,7 +2632,8 @@ final class Client
                         {
                             enum bool commandLike = hasCommandRegistrationAttr!memberSymbol;
                             enum bool eventLike = hasEventAttr!memberSymbol;
-                            static if (commandLike || eventLike)
+                            enum bool taskLike = hasTaskAttr!memberSymbol;
+                            static if (commandLike || eventLike || taskLike)
                             {
                                 enum candidate = describeCallableCandidate!memberSymbol();
                                 if (matchesRegistrationFilter(filter, candidate))
@@ -2743,6 +2645,11 @@ final class Client
                                         if (filter.includeEvents)
                                             registerEvents!memberSymbol();
                                     }
+                                    static if (includeTasks && taskLike)
+                                    {
+                                        if (filter.includeTasks)
+                                            registerTasks!memberSymbol();
+                                    }
                                 }
                             }
                         }
@@ -2751,7 +2658,8 @@ final class Client
                             enum bool pluginLike = HasLuaPluginAttr!memberSymbol;
                             enum bool commandMembers = typeHasCommandMembers!memberSymbol;
                             enum bool eventMembers = typeHasEventMembers!memberSymbol;
-                            static if (pluginLike || commandMembers || eventMembers)
+                            enum bool taskMembers = typeHasTaskMembers!memberSymbol;
+                            static if (pluginLike || commandMembers || eventMembers || taskMembers)
                             {
                                 enum candidate = describeTypeCandidate!memberSymbol();
                                 if (matchesRegistrationFilter(filter, candidate))
@@ -2767,6 +2675,11 @@ final class Client
                                     {
                                         if (filter.includePlugins)
                                             registerPlugin!memberSymbol();
+                                    }
+                                    static if (includeTasks && taskMembers)
+                                    {
+                                        if (filter.includeTasks)
+                                            registerTaskMembersFiltered!memberSymbol(filter);
                                     }
                                 }
                             }
@@ -2816,6 +2729,31 @@ final class Client
                             enum candidate = describeEventMemberCandidate!(T, memberName)();
                             if (matchesRegistrationFilter(filter, candidate))
                                 registerStatefulEvent!(T, memberName)();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private void registerTaskMembersFiltered(T)(CommandRegistrationFilter filter)
+    {
+        commands.register!T();
+
+        static foreach (memberName; __traits(allMembers, T))
+        {
+            {
+                static if (memberName != "__ctor" && memberName != "__xdtor")
+                {
+                    mixin("alias memberSymbol = T." ~ memberName ~ ";");
+                    static if (isCallable!memberSymbol)
+                    {
+                        enum hasAttrs = __traits(getAttributes, memberSymbol).length > 0;
+                        static if (hasAttrs && hasTaskAttr!memberSymbol)
+                        {
+                            enum candidate = describeTaskMemberCandidate!(T, memberName)();
+                            if (matchesRegistrationFilter(filter, candidate))
+                                registerStatefulTask!(T, memberName)();
                         }
                     }
                 }
@@ -2977,6 +2915,35 @@ private template typeHasEventMembersImpl(T, members...)
     }
 }
 
+private template typeHasTaskMembers(T)
+{
+    enum bool typeHasTaskMembers = typeHasTaskMembersImpl!(T, __traits(allMembers, T));
+}
+
+private template typeHasTaskMembersImpl(T, members...)
+{
+    static if (members.length == 0)
+    {
+        enum bool typeHasTaskMembersImpl = false;
+    }
+    else static if (members[0] == "__ctor" || members[0] == "__xdtor")
+    {
+        enum bool typeHasTaskMembersImpl = typeHasTaskMembersImpl!(T, members[1 .. $]);
+    }
+    else
+    {
+        mixin("alias memberSymbol = T." ~ members[0] ~ ";");
+        static if (isCallable!memberSymbol && __traits(getAttributes, memberSymbol).length > 0 && hasTaskAttr!memberSymbol)
+        {
+            enum bool typeHasTaskMembersImpl = true;
+        }
+        else
+        {
+            enum bool typeHasTaskMembersImpl = typeHasTaskMembersImpl!(T, members[1 .. $]);
+        }
+    }
+}
+
 private string moduleFromQualifiedName(string qualifiedName)
 {
     size_t lastDot = size_t.max;
@@ -3013,6 +2980,7 @@ private RegistrationCandidate describeCallableCandidate(alias fn)()
     candidate.freeFunction = true;
     candidate.command = hasCommandRegistrationAttr!fn;
     candidate.event = hasEventAttr!fn;
+    candidate.task = hasTaskAttr!fn;
     candidate.category = categoryFromAttrs!(__traits(getAttributes, fn))();
 
     static foreach (attr; __traits(getAttributes, fn))
@@ -3029,6 +2997,12 @@ private RegistrationCandidate describeCallableCandidate(alias fn)()
             candidate.commandName = attr.name;
         else static if (is(typeof(attr) == UserCommand))
             candidate.commandName = attr.name;
+        else static if (is(typeof(attr) == Task))
+        {
+            auto label = attr.label.strip;
+            if (label.length != 0)
+                candidate.commandName = label;
+        }
     }
 
     return candidate;
@@ -3044,6 +3018,7 @@ private RegistrationCandidate describeTypeCandidate(T)()
     candidate.command = typeHasCommandMembers!T;
     candidate.event = typeHasEventMembers!T;
     candidate.plugin = HasLuaPluginAttr!T;
+    candidate.task = typeHasTaskMembers!T;
     return candidate;
 }
 
@@ -3071,6 +3046,29 @@ private RegistrationCandidate describeCommandMemberCandidate(T, string memberNam
             candidate.commandName = attr.name;
         else static if (is(typeof(attr) == UserCommand))
             candidate.commandName = attr.name;
+    }
+
+    return candidate;
+}
+
+private RegistrationCandidate describeTaskMemberCandidate(T, string memberName)()
+{
+    mixin("alias memberSymbol = T." ~ memberName ~ ";");
+    auto candidate = describeTypeCandidate!T();
+    candidate.symbolName = memberName;
+    candidate.command = false;
+    candidate.event = false;
+    candidate.task = true;
+    candidate.commandName = memberName;
+
+    static foreach (attr; __traits(getAttributes, memberSymbol))
+    {
+        static if (is(typeof(attr) == Task))
+        {
+            auto label = attr.label.strip;
+            if (label.length != 0)
+                candidate.commandName = label;
+        }
     }
 
     return candidate;
@@ -3216,6 +3214,49 @@ private template hasEventAttr(alias fn)
     }
 }
 
+private template hasTaskAttr(alias fn)
+{
+    static if (__traits(getAttributes, fn).length == 0)
+    {
+        enum bool hasTaskAttr = false;
+    }
+    else
+    {
+        enum bool hasTaskAttr = hasTaskAttrImpl!(__traits(getAttributes, fn));
+    }
+}
+
+private template hasTaskAttrImpl(attrs...)
+{
+    static if (attrs.length == 0)
+    {
+        enum bool hasTaskAttrImpl = false;
+    }
+    else static if (is(typeof(attrs[0]) == Task))
+    {
+        enum bool hasTaskAttrImpl = true;
+    }
+    else
+    {
+        enum bool hasTaskAttrImpl = hasTaskAttrImpl!(attrs[1 .. $]);
+    }
+}
+
+private Task taskSpec(alias fn)()
+{
+    Task spec;
+
+    static foreach (attr; __traits(getAttributes, fn))
+    {
+        static if (is(typeof(attr) == Task))
+        {
+            spec = attr;
+        }
+    }
+
+    return spec;
+}
+
 private template hasEventAttrImpl(attrs...)
 {
     static if (attrs.length == 0)
@@ -3353,6 +3394,68 @@ private void invokeStatefulEvent(T, alias member, E)(T instance, E event)
     }
 }
 
+private Arg resolveTaskArgument(Arg)(Client client)
+{
+    static if (is(Arg == Client))
+    {
+        return client;
+    }
+    else static if (is(Arg == ServiceContainer))
+    {
+        return client.services;
+    }
+    else static if (is(Arg == TaskScheduler))
+    {
+        return client.tasks;
+    }
+    else static if (is(Arg == RestClient))
+    {
+        return client.rest;
+    }
+    else static if (is(Arg == CacheStore))
+    {
+        return client.cache;
+    }
+    else static if (is(Arg == StateStore))
+    {
+        return client.state;
+    }
+    else static if (is(Arg == Logger))
+    {
+        return client.logger;
+    }
+    else
+    {
+        return client.services.get!Arg();
+    }
+}
+
+private void invokeFreeTask(alias handler)(Client client)
+{
+    alias Params = Parameters!handler;
+    Tuple!Params bound;
+
+    static foreach (index, Param; Params)
+    {
+        bound[index] = resolveTaskArgument!Param(client);
+    }
+
+    handler(bound.expand);
+}
+
+private void invokeStatefulTask(T, alias member)(Client client, T instance)
+{
+    alias Params = Parameters!member;
+    Tuple!Params bound;
+
+    static foreach (index, Param; Params)
+    {
+        bound[index] = resolveTaskArgument!Param(client);
+    }
+
+    mixin("instance." ~ __traits(identifier, member) ~ "(bound.expand);");
+}
+
 private template IsTypeSymbol(alias symbol)
 {
     enum bool IsTypeSymbol = is(symbol == class) || is(symbol == struct) || is(symbol == interface);
@@ -3392,9 +3495,16 @@ void clientUnittestPing(CommandContext ctx)
     ctx.send("pong").await();
 }
 
+@UserCommand("inspect-user")
+private void clientUnittestInspectUser(ContextMenuContext ctx)
+{
+    assert(ctx.isContextMenu);
+    ctx.send("inspected").await();
+}
+
 @CommandCategory("Testing")
 private @HybridCommand("alpha", "Alpha command for builtin help")
-void clientUnittestAlpha(CommandContext ctx)
+void clientUnittestAlpha(HybridContext ctx)
 {
     ctx.send("alpha").await();
 }
@@ -3416,18 +3526,42 @@ private AutocompleteChoice[] clientUnittestSongAutocomplete(string partial)
 
 @SlashCommand("play")
 @Autocomplete!clientUnittestSongAutocomplete("song")
-private void clientUnittestPlayAutocomplete(CommandContext ctx, string song)
+private void clientUnittestPlayAutocomplete(SlashContext ctx, string song)
 {
     auto _ = ctx;
     auto __ = song;
 }
 
 private bool clientUnittestReadyEventSeen;
+private int clientUnittestTaskCalls;
+private bool clientUnittestTaskResolved;
 
 private @Event
 void clientUnittestOnReady(ReadyEventContext ctx)
 {
     clientUnittestReadyEventSeen = ctx.selfUser.username == "tester";
+}
+
+@Task(dur!"seconds"(30), label: "free-task")
+private void clientUnittestFreeTask()
+{
+    clientUnittestTaskCalls++;
+}
+
+@Task(dur!"seconds"(30), label: "task-with-params")
+private void clientUnittestTaskWithParams(
+    TaskScheduler scheduler,
+    ServiceContainer services,
+    Client client
+)
+{
+    clientUnittestTaskResolved = scheduler !is null && services !is null && client !is null;
+}
+
+@Task(dur!"seconds"(1), label: "counted-task", count: 2)
+private void clientUnittestCountedTask()
+{
+    clientUnittestTaskCalls++;
 }
 
 static assert(hasEventAttr!clientUnittestOnReady);
@@ -3485,6 +3619,22 @@ private struct ClientUnittestAutoGroup
     void run(CommandContext ctx)
     {
         ctx.send("group-auto").await();
+    }
+}
+
+private final class CounterService
+{
+    size_t hits;
+}
+
+private struct ClientUnittestTaskGroup
+{
+    @Inject CounterService counter;
+
+    @Task(dur!"seconds"(30), label: "group-task")
+    void tick()
+    {
+        counter.hits++;
     }
 }
 
@@ -3749,6 +3899,45 @@ unittest
 
 unittest
 {
+    import std.json : JSONValue, parseJSON;
+
+    HttpRequest[] captured;
+    HttpTransport transport = (request) {
+        captured ~= request;
+
+        HttpResponse response;
+        response.statusCode = 204;
+        return Result!(HttpResponse, HttpError).ok(response);
+    };
+
+    auto client = new Client(ClientConfig(
+        "token",
+        cast(uint) GatewayIntent.Guilds,
+        transport: Nullable!HttpTransport.of(transport)
+    ));
+    client.registerCommands!clientUnittestInspectUser();
+
+    Interaction interaction;
+    interaction.id = Snowflake(42);
+    interaction.type = InteractionType.ApplicationCommand;
+    interaction.commandType = ApplicationCommandType.User;
+    interaction.commandName = "inspect-user";
+    interaction.token = "context-token";
+    interaction.user.id = Snowflake(101);
+    interaction.user.username = "context-user";
+
+    auto result = client.receiveInteraction(interaction);
+    assert(result.isOk);
+    assert(captured.length == 1);
+    assert(captured[0].url.canFind("/interactions/42/context-token/callback"));
+
+    auto payload = parseJSON(cast(string) captured[0].body);
+    assert(payload.object.get("type", JSONValue.init).integer == 4);
+    assert(payload.object.get("data", JSONValue.init).object.get("content", JSONValue.init).str == "inspected");
+}
+
+unittest
+{
     HttpTransport transport = (request) {
         HttpResponse response;
 
@@ -3866,6 +4055,97 @@ unittest
     assert(!client.commands.find("ping", CommandRoute.Prefix).isNull);
     assert(!client.commands.find("group-ping", CommandRoute.Prefix).isNull);
     assert(client.plugins.registeredNames.canFind("counter"));
+}
+
+unittest
+{
+    clientUnittestTaskCalls = 0;
+
+    auto client = new Client(ClientConfig("token", cast(uint) GatewayIntent.Guilds));
+    client.registerTasks!clientUnittestFreeTask();
+
+    assert(client.runTaskNow("free-task"));
+    assert(clientUnittestTaskCalls == 1);
+}
+
+unittest
+{
+    clientUnittestTaskResolved = false;
+
+    auto client = new Client(ClientConfig("token", cast(uint) GatewayIntent.Guilds));
+    client.registerTasks!clientUnittestTaskWithParams();
+
+    assert(client.runTaskNow("task-with-params"));
+    assert(clientUnittestTaskResolved);
+}
+
+unittest
+{
+    auto client = new Client(ClientConfig("token", cast(uint) GatewayIntent.Guilds));
+    client.addService!CounterService(new CounterService);
+    client.registerTaskGroup!ClientUnittestTaskGroup();
+
+    assert(client.runTaskNow("group-task"));
+    assert(client.service!CounterService().hits == 1);
+}
+
+unittest
+{
+    clientUnittestTaskCalls = 0;
+
+    auto client = new Client(ClientConfig("token", cast(uint) GatewayIntent.Guilds));
+    client.registerAllCommands!clientUnittestFreeTask();
+
+    assert(client.runTaskNow("free-task"));
+    assert(clientUnittestTaskCalls == 1);
+}
+
+unittest
+{
+    clientUnittestTaskCalls = 0;
+
+    auto client = new Client(ClientConfig("token", cast(uint) GatewayIntent.Guilds));
+    auto filter = CommandRegistrationFilter.names("free-task").withoutTasks();
+    client.registerAllCommands(filter);
+
+    assert(!client.runTaskNow("free-task"));
+}
+
+unittest
+{
+    clientUnittestTaskCalls = 0;
+
+    auto client = new Client(ClientConfig("token", cast(uint) GatewayIntent.Guilds));
+    client.registerTasks!clientUnittestCountedTask();
+
+    assert(client.runTaskNow("counted-task"));
+    assert(client.runTaskNow("counted-task"));
+    assert(!client.runTaskNow("counted-task"));
+    assert(clientUnittestTaskCalls == 2);
+}
+
+unittest
+{
+    auto client = new Client(ClientConfig("token", cast(uint) GatewayIntent.Guilds));
+    client.config.enableSharding = true;
+    client.config.autoSharding = true;
+
+    GatewayBotInfo info;
+    info.shards = 4;
+    info.url = "wss://gateway.discord.gg";
+    client._gatewayInfo = Nullable!GatewayBotInfo.of(info);
+
+    assert(client.resolvedShardCount() == 4);
+}
+
+unittest
+{
+    auto client = new Client(ClientConfig("token", cast(uint) GatewayIntent.Guilds));
+    client.reshard(3);
+
+    assert(client.config.enableSharding);
+    assert(!client.config.autoSharding);
+    assert(client.config.shardCount == 3);
 }
 
 unittest

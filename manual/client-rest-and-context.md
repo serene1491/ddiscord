@@ -35,6 +35,57 @@ Useful additions include:
 - `client.webhooks.execute(...)` for webhook-token message dispatch
 - `client.slash.sync(...)` when you want direct command-manifest sync
 
+## Service container shortcuts
+
+`Client` now exposes thin wrappers around `client.services` for cleaner setup:
+
+```d
+client.addService!GreetingService(new GreetingService("Hello"));
+client.addServices(
+    new GreetingService("Hello"),
+    new MetricsService()
+);
+client.addServiceFactory!Database(() => new Database("bot.db"));
+
+auto db = client.service!Database();
+Database maybeDb;
+if (client.tryService!Database(maybeDb))
+{
+    // use maybeDb
+}
+```
+
+Available helpers:
+
+- `addService!T(instance)`
+- `addServices(instanceA, instanceB, ...)`
+- `addService!T()` for default construction
+- `addServiceFactory!T(factory)`
+- `service!T()`
+- `tryService!T(out value)`
+- `removeService!T()`
+
+## Sharding controls
+
+`Client` now supports runtime shard management without restarting the bot process:
+
+```d
+client.reshard(4);                 // force 4 shards now
+client.refreshShardTopology();     // pull recommended shard count from Discord
+auto running = client.activeShardCount;
+```
+
+For automatic topology adjustment, configure `ClientConfig`:
+
+```d
+auto client = new Client(ClientConfig(
+    // ...
+    enableSharding: true,
+    autoSharding: true,
+    autoReshard: true
+));
+```
+
 ## Sending and thinking helpers
 
 `CommandContext` has helpers for common UX flows:
@@ -69,10 +120,10 @@ These map to the same REST endpoints with thin wrappers, so you keep ergonomics 
 
 The command layer also exposes route-specific context shapes when you want tighter typing:
 
-- `PrefixCommandContext`
-- `SlashCommandContext`
-- `ContextMenuCommandContext`
-- `HybridCommandContext`
+- `PrefixContext`
+- `SlashContext`
+- `ContextMenuContext`
+- `HybridContext`
 
 You can annotate commands for the default help system:
 

@@ -8,7 +8,7 @@
 - `events-bot/`: focused typed event handling (`READY`, message create, command outcomes)
 - `interactions-bot/`: button + modal interaction flow
 - `services-bot/`: `@Stateful` command groups with `@Inject` service usage
-- `tasks-bot/`: one-shot and recurring scheduler usage from real commands
+- `tasks-bot/`: one-shot reminders plus recurring `@Task` scheduler usage
 - `plugin-bot/`: plugin descriptors, service injection, `@LuaExpose`, and owner-only command flow
 - `full-bot/`: permissions, rate limits, state, components, prefix + slash orchestration
 - `test-bot/`: integration-focused gateway, REST, prefix, slash, and event validation

@@ -6,16 +6,25 @@ The shortest entrypoints auto-scan the calling module:
 
 ```d
 client.registerCommands();
+client.registerTasks();
 client.registerAllCommands();
 ```
 
 - `registerCommands()` registers only command handlers from the current module
-- `registerAllCommands()` also includes `@Event` handlers, stateful command groups, and plugin descriptor types
+- `registerTasks()` registers only `@Task` handlers from the current module
+- `registerAllCommands()` also includes `@Event`, `@Task`, stateful groups, and plugin descriptor types
 
 Template registration is also available:
 
 ```d
 client.registerAllCommands!(ping, onReady, AdminCommands, CounterPlugin);
+```
+
+`@Task` can be registered explicitly too:
+
+```d
+client.registerTasks!(cleanupTask);
+client.registerTaskGroup!BackgroundTasks();
 ```
 
 Automatic registration accepts filters when you want something between “everything here” and
@@ -36,7 +45,7 @@ Available filter targets include:
 - owner/group type names
 - command names
 - `@CommandCategory` values
-- whether free functions, types, events, or plugins should be considered
+- whether free functions, types, events, plugins, or tasks should be considered
 
 ## Events
 

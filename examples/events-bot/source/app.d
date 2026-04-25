@@ -39,7 +39,7 @@ void handleCommandExecuted(CommandExecutedEvent event)
 }
 
 @HybridCommand("ping-events", "Trigger command + event logs")
-void handlePingEvents(CommandContext ctx)
+void handlePingEvents(HybridContext ctx)
 {
     auto route = ctx.source == CommandSource.Slash ? "slash" : "prefix";
     ctx.send("events alive from `" ~ route ~ "`", ctx.source == CommandSource.Slash).await();

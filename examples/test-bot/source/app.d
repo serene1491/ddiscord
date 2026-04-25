@@ -120,7 +120,7 @@ void handleStatus(CommandContext ctx)
 }
 
 @HybridCommand("echo", "Echo text through prefix or slash")
-void handleEcho(CommandContext ctx, string text = "hello from ddiscord")
+void handleEcho(HybridContext ctx, string text = "hello from ddiscord")
 {
     auto route = ctx.source == CommandSource.Slash ? "slash" : "prefix";
     auto content = "echo (" ~ route ~ "): " ~ text;

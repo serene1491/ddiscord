@@ -72,7 +72,7 @@ import ddiscord;
 import std.path : buildPath;
 
 @PrefixCommand("ping", "Check the bot latency")
-void handlePing(CommandContext ctx)
+void handlePing(PrefixContext ctx)
 {
     ctx.send("Pong!").await();
 }
@@ -134,7 +134,7 @@ void handleBuild(CommandContext ctx)
 
 ```d
 @SlashCommand("report", "Open a report modal")
-void handleReport(CommandContext ctx)
+void handleReport(SlashContext ctx)
 {
     auto modal = Modal("report_modal", "Report User")
         .addTextInput(TextInput("reason", "Reason"));
@@ -214,7 +214,7 @@ void auditMessage(MessageCreateEventContext ctx)
 
 ```d
 @HybridCommand("where", "Show how the command was invoked")
-void handleWhere(HybridCommandContext ctx)
+void handleWhere(HybridContext ctx)
 {
     if (ctx.fromPrefix)
         ctx.reply("You used the prefix route.").await();
@@ -257,7 +257,7 @@ supports pagination, and can be fully customized by swapping how entries and pag
 ```d
 @CommandCategory("Utility")
 @HybridCommand("ping", "Check the bot latency")
-void handlePing(CommandContext ctx)
+void handlePing(HybridContext ctx)
 {
     ctx.send("Pong!").await();
 }

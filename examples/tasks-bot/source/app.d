@@ -54,6 +54,18 @@ void onReady(ReadyEventContext ctx)
     writeln("[tasks] ready as ", ctx.selfUser.username);
 }
 
+@Stateful
+struct BackgroundTasks
+{
+    @Inject Logger logger;
+
+    @Task(dur!"minutes"(5), label: "tasks-heartbeat", runOnRegister: true)
+    void heartbeat()
+    {
+        logger.information("tasks-example", "scheduler heartbeat still running");
+    }
+}
+
 void main()
 {
     auto env = loadEnv(buildPath(".."));
@@ -64,11 +76,8 @@ void main()
         prefix: env.get!string("BOT_PREFIX", "!")
     ));
 
-    client.tasks.every("tasks-heartbeat", dur!"minutes"(5), {
-        writeln("[tasks] scheduler heartbeat labels=", client.tasks.labels.length.to!string);
-    });
-
     client.registerAllCommands();
+    client.registerTaskGroup!BackgroundTasks();
     client.setPresence(StatusType.Online, Activity(ActivityType.Playing, "task reminders"));
 
     client.run();

@@ -7,8 +7,8 @@
 module ddiscord.context.event;
 
 import ddiscord.cache : CacheStore;
-import ddiscord.context.command : CommandContext, CommandSource, ContextMenuCommandContext,
-    HybridCommandContext, PrefixCommandContext, SlashCommandContext;
+import ddiscord.context.command : CommandContext, CommandSource, ContextMenuContext,
+    HybridContext, PrefixContext, SlashContext;
 import ddiscord.logging : Logger;
 import ddiscord.models.channel : Channel;
 import ddiscord.models.guild : Guild, UnavailableGuild;
@@ -387,32 +387,32 @@ struct CommandExecutedEventContext
     string commandName;
     CommandContext command;
 
-    Nullable!PrefixCommandContext prefix() @property
+    Nullable!PrefixContext prefix() @property
     {
         if (command.source != CommandSource.Prefix)
-            return Nullable!PrefixCommandContext.init;
-        return Nullable!PrefixCommandContext.of(command.asPrefix());
+            return Nullable!PrefixContext.init;
+        return Nullable!PrefixContext.of(command.asPrefix());
     }
 
-    Nullable!SlashCommandContext slash() @property
+    Nullable!SlashContext slash() @property
     {
         if (command.source != CommandSource.Slash)
-            return Nullable!SlashCommandContext.init;
-        return Nullable!SlashCommandContext.of(command.asSlash());
+            return Nullable!SlashContext.init;
+        return Nullable!SlashContext.of(command.asSlash());
     }
 
-    Nullable!ContextMenuCommandContext contextMenu() @property
+    Nullable!ContextMenuContext contextMenu() @property
     {
         if (command.source != CommandSource.ContextMenu)
-            return Nullable!ContextMenuCommandContext.init;
-        return Nullable!ContextMenuCommandContext.of(command.asContextMenu());
+            return Nullable!ContextMenuContext.init;
+        return Nullable!ContextMenuContext.of(command.asContextMenu());
     }
 
-    Nullable!HybridCommandContext hybrid() @property
+    Nullable!HybridContext hybrid() @property
     {
         if (command.source == CommandSource.ContextMenu)
-            return Nullable!HybridCommandContext.init;
-        return Nullable!HybridCommandContext.of(command.asHybrid());
+            return Nullable!HybridContext.init;
+        return Nullable!HybridContext.of(command.asHybrid());
     }
 }
 
@@ -424,32 +424,32 @@ struct CommandFailedEventContext
     string commandName;
     CommandContext command;
 
-    Nullable!PrefixCommandContext prefix() @property
+    Nullable!PrefixContext prefix() @property
     {
         if (command.source != CommandSource.Prefix)
-            return Nullable!PrefixCommandContext.init;
-        return Nullable!PrefixCommandContext.of(command.asPrefix());
+            return Nullable!PrefixContext.init;
+        return Nullable!PrefixContext.of(command.asPrefix());
     }
 
-    Nullable!SlashCommandContext slash() @property
+    Nullable!SlashContext slash() @property
     {
         if (command.source != CommandSource.Slash)
-            return Nullable!SlashCommandContext.init;
-        return Nullable!SlashCommandContext.of(command.asSlash());
+            return Nullable!SlashContext.init;
+        return Nullable!SlashContext.of(command.asSlash());
     }
 
-    Nullable!ContextMenuCommandContext contextMenu() @property
+    Nullable!ContextMenuContext contextMenu() @property
     {
         if (command.source != CommandSource.ContextMenu)
-            return Nullable!ContextMenuCommandContext.init;
-        return Nullable!ContextMenuCommandContext.of(command.asContextMenu());
+            return Nullable!ContextMenuContext.init;
+        return Nullable!ContextMenuContext.of(command.asContextMenu());
     }
 
-    Nullable!HybridCommandContext hybrid() @property
+    Nullable!HybridContext hybrid() @property
     {
         if (command.source == CommandSource.ContextMenu)
-            return Nullable!HybridCommandContext.init;
-        return Nullable!HybridCommandContext.of(command.asHybrid());
+            return Nullable!HybridContext.init;
+        return Nullable!HybridContext.of(command.asHybrid());
     }
 }
 

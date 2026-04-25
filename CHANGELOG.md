@@ -51,6 +51,14 @@ All notable changes to `ddiscord` should be documented in this file.
 - Command-policy aliases for API ergonomics: `@RequirePermission(...)` and `@CooldownRate(...)`.
 - Command middleware runtime hooks: `client.useMiddleware(...)` and `client.registerMiddleware(...)`, including built-in names `guild_only`, `dm_only`, and `owner_only`.
 - Lua runtime capability-denial hints when scripts call globals filtered out by permissions.
+- Scheduled-task UDA `@Task(...)` with `TaskMode` (`Every`, `Delay`, `Cron`) for declarative recurring/delayed bot jobs.
+- Discord.py-style task constructors on the `Task` UDA payload: `Task.loop(...)`, `Task.every(...)`, `Task.delay(...)`, and `Task.cron(...)`.
+- Task auto-registration APIs: `client.registerTasks(...)`, `client.registerTaskGroup!T()`, plus module scanning support in `registerAllCommands(...)`.
+- Task filtering support in `CommandRegistrationFilter` (`withoutTasks`) and candidate matching.
+- Client service-container shortcuts: `addService`, `addServiceFactory`, `service`, `tryService`, and `removeService`.
+- Batched service registration helper: `client.addServices(...)`.
+- Manual task trigger helpers: `TaskScheduler.runNow(label)` and `client.runTaskNow(label)`.
+- Runtime sharding controls: `client.reshard(...)`, `client.refreshShardTopology()`, and `client.activeShardCount`.
 
 ### Changed
 
@@ -61,6 +69,8 @@ All notable changes to `ddiscord` should be documented in this file.
 - Command registration now validates route/context signature mismatches (for example, `SlashContext` on non-slash routes) and ambiguous implicit autocomplete configuration.
 - `CommandRegistry.find(...)` now uses route-specific lookup caches for prefix/slash/context-menu routes to reduce per-invocation lookup cost.
 - `CommandContext` now rejects `ephemeral=true` on non-interaction routes with explicit guidance instead of silently sending invalid payload flags.
+- Interaction command routing now honors Discord `data.type` (`ApplicationCommandType`) so chat-input and context-menu commands are dispatched through the correct command path.
+- Stateful command-group registration now rebuilds route lookup caches once per group registration pass instead of once per member.
 - Guild delete gateway handling now evicts guild cache entries when Discord indicates a true removal (`unavailable=false`).
 - Channel and message delete gateway handling now evict cache entries during runtime dispatch processing.
 - Gateway/event typing surface now covers startup lifecycle plus core guild/presence/member dispatches.
@@ -70,6 +80,10 @@ All notable changes to `ddiscord` should be documented in this file.
 - REST guardrails now validate moderation/thread arguments earlier (timeout range, ban delete window, thread type/name, auto-archive durations) for safer runtime behavior.
 - REST route hardening now validates empty reaction emojis and rejects empty webhook/interaction tokens before sending requests.
 - Audit-log reason headers are now sanitized and URL-encoded before sending `X-Audit-Log-Reason`.
+- Command install/context shorthand UDAs now use a canonical naming set (`@GuildInstalled`, `@UserInstalled`, `@GuildContextOnly`, `@BotDmOnly`, `@PrivateChannelOnly`, `@DmContextOnly`, `@UserInstalledDmOnly`, `@UserInstalledPrivateOnly`, `@GuildInstalledGuildOnly`, `@UserInstalledEverywhere`, `@InstalledEverywhere`).
+- Stateful service autowiring now prioritizes explicit `@Inject` fields and supports class-backed stateful groups with clearer missing-constructor guidance.
+- Async wrapper type was renamed from `Task!T` to `AsyncTask!T` to avoid symbol collisions with the new command/task UDA surface.
+- Gateway frame parsing now accepts binary data frames and attempts JSON decoding before failing with protocol-specific ETF/compression guidance.
 
 ### Fixed
 
@@ -135,6 +149,7 @@ All notable changes to `ddiscord` should be documented in this file.
 - Split client dispatch queue internals into `ddiscord.client_queue` to reduce `client.d` responsibility.
 - Split runtime helpers into `ddiscord.client_runtime` and registration filter matching into `ddiscord.client_filters`.
 - Split prefix-text parsing helpers into `ddiscord.client_text` to keep `client.d` focused on orchestration.
+- Split client event-context builders into `ddiscord.client_event_contexts` and command metadata/context typing helpers into `ddiscord.commands.metadata` / `ddiscord.commands.contexts`.
 
 ### Documentation
 

@@ -10,11 +10,15 @@ public import ddiscord.command_types;
 
 import core.sync.mutex : Mutex;
 import core.time : Duration, MonoTime, dur;
+import ddiscord.commands.contexts : CommandContextParameterCount, FirstCommandContextParameterType,
+    hasExplicitHybridAttr, hasExplicitPrefixAttr, hasExplicitSlashAttr, isCommandContextParameter,
+    resolveCommandContextParameter;
+import ddiscord.commands.metadata : appendIntegrationTypes, appendInteractionContexts,
+    normalizedIntegrationTypes, normalizedInteractionContexts, projectedContextsFromPolicy;
 import ddiscord.core.http.client : HttpError, HttpResponse, HttpTransport;
 import ddiscord.context.autocomplete : AutocompleteContext;
-import ddiscord.context.command : CommandContext, CommandSource, ContextMenuCommandContext,
-    ContextMenuContext, HybridCommandContext, HybridContext, PrefixCommandContext, PrefixContext,
-    SlashCommandContext, SlashContext;
+import ddiscord.context.command : CommandContext, CommandSource, ContextMenuContext, HybridContext,
+    PrefixContext, SlashContext;
 import ddiscord.models.guild : Guild;
 import ddiscord.models.application_command : ApplicationCommandDefinition, ApplicationCommandOption,
     ApplicationCommandOptionType, ApplicationCommandType, ApplicationIntegrationType,
@@ -178,6 +182,8 @@ final class CommandRegistry
     {
         injectServices!T();
 
+        bool appended;
+
         static foreach (memberName; __traits(allMembers, T))
         {
             {
@@ -189,16 +195,19 @@ final class CommandRegistry
                         enum hasAttrs = __traits(getAttributes, memberSymbol).length > 0;
                         static if (hasAttrs)
                         {
-                            registerMember!(T, memberName)();
+                            appended = registerMember!(T, memberName)(false) || appended;
                         }
                     }
                 }
             }
         }
+
+        if (appended)
+            rebuildLookupCaches();
     }
 
     /// Registers a single stateful command member.
-    void registerMember(T, string memberName)()
+    bool registerMember(T, string memberName)(bool refreshLookup = true)
     {
         injectServices!T();
 
@@ -207,8 +216,12 @@ final class CommandRegistry
         {
             validateDescriptorMetadata(descriptor);
             _descriptors ~= descriptor;
-            rebuildLookupCaches();
+            if (refreshLookup)
+                rebuildLookupCaches();
+            return true;
         }
+
+        return false;
     }
 
     /// Returns the registered descriptors.
@@ -336,8 +349,6 @@ final class CommandRegistry
     )
     {
         auto descriptor = find(name, CommandRoute.Slash);
-        if (descriptor.isNull)
-            descriptor = find(name, CommandRoute.ContextMenu);
 
         if (descriptor.isNull)
         {
@@ -359,6 +370,37 @@ final class CommandRegistry
             return Result!(CommandExecution, string).err(middlewareError.get);
 
         enforce(resolved.slashExecutor !is null, "Slash executor was not registered for " ~ resolved.displayName);
+        return resolved.slashExecutor(ctx, options);
+    }
+
+    /// Executes a context-menu command by name.
+    Result!(CommandExecution, string) executeContextMenu(
+        CommandContext ctx,
+        string name,
+        string[string] options = null
+    )
+    {
+        auto descriptor = find(name, CommandRoute.ContextMenu);
+        if (descriptor.isNull)
+        {
+            return Result!(CommandExecution, string).err(formatError(
+                "commands",
+                "The requested context-menu command is not registered.",
+                "Unknown command `" ~ name ~ "`.",
+                "Sync commands again and ensure the handler is registered for context-menu routing."
+            ));
+        }
+
+        auto resolved = descriptor.get;
+        auto policyError = validatePolicy(resolved, ctx);
+        if (!policyError.isNull)
+            return Result!(CommandExecution, string).err(policyError.get);
+
+        auto middlewareError = runMiddlewares(resolved, ctx);
+        if (!middlewareError.isNull)
+            return Result!(CommandExecution, string).err(middlewareError.get);
+
+        enforce(resolved.slashExecutor !is null, "Context-menu executor was not registered for " ~ resolved.displayName);
         return resolved.slashExecutor(ctx, options);
     }
 
@@ -494,8 +536,46 @@ final class CommandRegistry
         if (_services.has!T())
             return;
 
-        T instance = T.init;
+        auto instance = instantiateStatefulOwner!T();
 
+        static if (TypeHasInjectAttr!T)
+        {
+            injectMarkedFields(instance);
+        }
+        else
+        {
+            injectCompatibleFields(instance);
+        }
+
+        _services.add!T(instance);
+    }
+
+    private T instantiateStatefulOwner(T)()
+    {
+        static if (is(T == class))
+        {
+            static if (__traits(compiles, new T))
+            {
+                return new T;
+            }
+            else
+            {
+                throw new DdiscordException(formatError(
+                    "commands",
+                    "Could not create a stateful command group automatically.",
+                    "Type `" ~ T.stringof ~ "` is a class without a default constructor.",
+                    "Register an instance manually in `client.services` before registering this command group."
+                ));
+            }
+        }
+        else
+        {
+            return T.init;
+        }
+    }
+
+    private void injectCompatibleFields(T)(ref T instance)
+    {
         static foreach (index, _; instance.tupleof)
         {
             {
@@ -509,8 +589,29 @@ final class CommandRegistry
                 }
             }
         }
+    }
 
-        _services.add!T(instance);
+    private void injectMarkedFields(T)(ref T instance)
+    {
+        static foreach (memberName; __traits(allMembers, T))
+        {
+            static if (memberName != "__ctor" && memberName != "__xdtor")
+            {
+                mixin("alias memberSymbol = T." ~ memberName ~ ";");
+                static if (!isCallable!memberSymbol)
+                {
+                    static if (HasInjectAttr!(T, memberName))
+                    {
+                        mixin("alias FieldType = typeof(instance." ~ memberName ~ ");");
+                        auto resolved = _services.get!FieldType();
+                        static if (__traits(compiles, mixin("instance." ~ memberName ~ " = resolved;")))
+                        {
+                            mixin("instance." ~ memberName ~ " = resolved;");
+                        }
+                    }
+                }
+            }
+        }
     }
 
     private Nullable!string validatePolicy(CommandDescriptor descriptor, CommandContext ctx)
@@ -1023,103 +1124,6 @@ private bool hasCommandAttr(alias fn)()
     return result;
 }
 
-private template isCommandContextParameter(T)
-{
-    enum bool isCommandContextParameter =
-        is(T == CommandContext) ||
-        is(T == PrefixCommandContext) ||
-        is(T == SlashCommandContext) ||
-        is(T == ContextMenuCommandContext) ||
-        is(T == HybridCommandContext);
-}
-
-private template CommandContextParameterCount(Params...)
-{
-    static if (Params.length == 0)
-        enum CommandContextParameterCount = 0;
-    else
-        enum CommandContextParameterCount =
-            (isCommandContextParameter!(Params[0]) ? 1 : 0) + CommandContextParameterCount!(Params[1 .. $]);
-}
-
-private template FirstCommandContextParameterType(Params...)
-{
-    static if (Params.length == 0)
-        alias FirstCommandContextParameterType = void;
-    else static if (isCommandContextParameter!(Params[0]))
-        alias FirstCommandContextParameterType = Params[0];
-    else
-        alias FirstCommandContextParameterType = FirstCommandContextParameterType!(Params[1 .. $]);
-}
-
-private Result!(T, string) resolveCommandContextParameter(T)(CommandContext ctx)
-{
-    static if (is(T == CommandContext))
-    {
-        return Result!(T, string).ok(ctx);
-    }
-    else static if (is(T == PrefixCommandContext))
-    {
-        if (ctx.source != CommandSource.Prefix)
-        {
-            return Result!(T, string).err(formatError(
-                "commands",
-                "A prefix command context was requested outside a prefix execution.",
-                "",
-                "Use `PrefixCommandContext` only for prefix handlers or `HybridCommandContext` when the handler supports both prefix and slash."
-            ));
-        }
-
-        return Result!(T, string).ok(ctx.asPrefix());
-    }
-    else static if (is(T == SlashCommandContext))
-    {
-        if (ctx.source != CommandSource.Slash)
-        {
-            return Result!(T, string).err(formatError(
-                "commands",
-                "A slash command context was requested outside a slash execution.",
-                "",
-                "Use `SlashCommandContext` only for slash handlers or `HybridCommandContext` when the handler supports both prefix and slash."
-            ));
-        }
-
-        return Result!(T, string).ok(ctx.asSlash());
-    }
-    else static if (is(T == ContextMenuCommandContext))
-    {
-        if (ctx.source != CommandSource.ContextMenu)
-        {
-            return Result!(T, string).err(formatError(
-                "commands",
-                "A context-menu command context was requested outside a context-menu execution.",
-                "",
-                "Use `ContextMenuCommandContext` only for context-menu handlers."
-            ));
-        }
-
-        return Result!(T, string).ok(ctx.asContextMenu());
-    }
-    else static if (is(T == HybridCommandContext))
-    {
-        if (ctx.source == CommandSource.ContextMenu)
-        {
-            return Result!(T, string).err(formatError(
-                "commands",
-                "A hybrid command context was requested for a context-menu execution.",
-                "",
-                "Use `HybridCommandContext` only for prefix/slash flows."
-            ));
-        }
-
-        return Result!(T, string).ok(ctx.asHybrid());
-    }
-    else
-    {
-        static assert(false, "Unsupported command context parameter.");
-    }
-}
-
 private bool routeEnabled(CommandRoute available, CommandRoute requested)
 {
     return (cast(uint) available & cast(uint) requested) != 0;
@@ -1195,6 +1199,9 @@ private void validateHandlerContextCompatibility(alias fn)(CommandDescriptor des
 {
     alias ParamTypes = Parameters!fn;
     enum contextParamCount = CommandContextParameterCount!ParamTypes;
+    enum explicitHybrid = hasExplicitHybridAttr!fn;
+    enum explicitPrefix = hasExplicitPrefixAttr!fn;
+    enum explicitSlash = hasExplicitSlashAttr!fn;
     static assert(
         contextParamCount <= 1,
         "Command handlers support at most one command context parameter (`CommandContext`, `PrefixContext`, `SlashContext`, `HybridContext`, or `ContextMenuContext`)."
@@ -1206,10 +1213,47 @@ private void validateHandlerContextCompatibility(alias fn)(CommandDescriptor des
     {
         alias CtxType = FirstCommandContextParameterType!ParamTypes;
 
+        static if (explicitHybrid)
+        {
+            static if (!is(CtxType == HybridContext))
+            {
+                throw new DdiscordException(formatError(
+                    "commands",
+                    "`@HybridCommand` handlers must use `HybridContext` for typed route access.",
+                    "Handler `" ~ commandName!fn() ~ "` uses `" ~ CtxType.stringof ~ "`.",
+                    "Change the handler signature to `HybridContext` to keep prefix/slash behavior explicit."
+                ));
+            }
+        }
+        static if (explicitPrefix)
+        {
+            static if (!is(CtxType == PrefixContext))
+            {
+                throw new DdiscordException(formatError(
+                    "commands",
+                    "`@PrefixCommand` handlers must use `PrefixContext` for typed prefix access.",
+                    "Handler `" ~ commandName!fn() ~ "` uses `" ~ CtxType.stringof ~ "`.",
+                    "Change the handler signature to `PrefixContext`."
+                ));
+            }
+        }
+        static if (explicitSlash)
+        {
+            static if (!is(CtxType == SlashContext))
+            {
+                throw new DdiscordException(formatError(
+                    "commands",
+                    "`@SlashCommand` handlers must use `SlashContext` for typed slash access.",
+                    "Handler `" ~ commandName!fn() ~ "` uses `" ~ CtxType.stringof ~ "`.",
+                    "Change the handler signature to `SlashContext`."
+                ));
+            }
+        }
+
         if (descriptor.applicationType == ApplicationCommandType.User ||
             descriptor.applicationType == ApplicationCommandType.Message)
         {
-            static if (!is(CtxType == CommandContext) && !is(CtxType == ContextMenuCommandContext))
+            static if (!is(CtxType == CommandContext) && !is(CtxType == ContextMenuContext))
             {
                 throw new DdiscordException(formatError(
                     "commands",
@@ -1222,7 +1266,7 @@ private void validateHandlerContextCompatibility(alias fn)(CommandDescriptor des
             return;
         }
 
-        static if (is(CtxType == PrefixCommandContext))
+        static if (is(CtxType == PrefixContext))
         {
             if (descriptor.routes != CommandRoute.Prefix)
             {
@@ -1234,7 +1278,7 @@ private void validateHandlerContextCompatibility(alias fn)(CommandDescriptor des
                 ));
             }
         }
-        else static if (is(CtxType == SlashCommandContext))
+        else static if (is(CtxType == SlashContext))
         {
             if (descriptor.routes != CommandRoute.Slash)
             {
@@ -1246,7 +1290,7 @@ private void validateHandlerContextCompatibility(alias fn)(CommandDescriptor des
                 ));
             }
         }
-        else static if (is(CtxType == HybridCommandContext))
+        else static if (is(CtxType == HybridContext))
         {
             if (descriptor.routes != CommandRoute.Hybrid)
             {
@@ -1258,7 +1302,7 @@ private void validateHandlerContextCompatibility(alias fn)(CommandDescriptor des
                 ));
             }
         }
-        else static if (is(CtxType == ContextMenuCommandContext))
+        else static if (is(CtxType == ContextMenuContext))
         {
             if (descriptor.applicationType == ApplicationCommandType.ChatInput)
             {
@@ -1345,59 +1389,6 @@ private void validateAutocompleteMetadata(alias fn)(CommandDescriptor descriptor
             }
         }
     }
-}
-
-private void appendIntegrationTypes(
-    ref ApplicationIntegrationType[] destination,
-    scope const(ApplicationIntegrationType)[] values
-)
-{
-    foreach (value; values)
-    {
-        if (!destination.canFind(value))
-            destination ~= value;
-    }
-}
-
-private ApplicationIntegrationType[] normalizedIntegrationTypes(
-    scope const(ApplicationIntegrationType)[] values
-)
-{
-    ApplicationIntegrationType[] normalized;
-    appendIntegrationTypes(normalized, values);
-    return normalized;
-}
-
-private void appendInteractionContexts(
-    ref InteractionContextType[] destination,
-    scope const(InteractionContextType)[] values
-)
-{
-    foreach (value; values)
-    {
-        if (!destination.canFind(value))
-            destination ~= value;
-    }
-}
-
-private InteractionContextType[] normalizedInteractionContexts(
-    scope const(InteractionContextType)[] values
-)
-{
-    InteractionContextType[] normalized;
-    appendInteractionContexts(normalized, values);
-    return normalized;
-}
-
-private InteractionContextType[] projectedContextsFromPolicy(CommandPolicyDescriptor policy)
-{
-    if (policy.guildOnly)
-        return [InteractionContextType.Guild];
-
-    if (policy.directMessageOnly)
-        return [InteractionContextType.BotDM, InteractionContextType.PrivateChannel];
-
-    return null;
 }
 
 private string defaultOptionName(string parameterName)
@@ -1494,6 +1485,31 @@ private string[] tokenize(string input)
 private template HasInjectAttr(T, string memberName)
 {
     enum bool HasInjectAttr = HasInjectAttrImpl!(__traits(getAttributes, __traits(getMember, T, memberName)));
+}
+
+private template TypeHasInjectAttr(T)
+{
+    enum bool TypeHasInjectAttr = TypeHasInjectAttrImpl!(T, __traits(allMembers, T));
+}
+
+private template TypeHasInjectAttrImpl(T, members...)
+{
+    static if (members.length == 0)
+    {
+        enum bool TypeHasInjectAttrImpl = false;
+    }
+    else static if (members[0] == "__ctor" || members[0] == "__xdtor")
+    {
+        enum bool TypeHasInjectAttrImpl = TypeHasInjectAttrImpl!(T, members[1 .. $]);
+    }
+    else
+    {
+        mixin("alias memberSymbol = T." ~ members[0] ~ ";");
+        static if (!isCallable!memberSymbol && HasInjectAttr!(T, members[0]))
+            enum bool TypeHasInjectAttrImpl = true;
+        else
+            enum bool TypeHasInjectAttrImpl = TypeHasInjectAttrImpl!(T, members[1 .. $]);
+    }
 }
 
 private template HasInjectAttrImpl(attrs...)
@@ -2661,7 +2677,7 @@ unittest
 unittest
 {
     @HybridCommand("echo", "Echoes text")
-    void echo(CommandContext ctx, string text)
+    void echo(HybridContext ctx, string text)
     {
         ctx.send(text).await();
     }
@@ -2688,7 +2704,7 @@ unittest
 unittest
 {
     @Command("whoami", routes: CommandRoute.Prefix)
-    void whoami(PrefixCommandContext ctx)
+    void whoami(PrefixContext ctx)
     {
         assert(ctx.isPrefix);
         ctx.send("prefix").await();
@@ -2712,7 +2728,7 @@ unittest
 unittest
 {
     @HybridCommand("route", "Inspect hybrid route")
-    void route(HybridCommandContext ctx, string text = "")
+    void route(HybridContext ctx, string text = "")
     {
         assert(ctx.fromSlash);
         assert(!ctx.slash.isNull);
@@ -2741,7 +2757,7 @@ unittest
 unittest
 {
     @HybridCommand("echo", "Echoes text")
-    void echo(CommandContext ctx, string text)
+    void echo(HybridContext ctx, string text)
     {
         auto _ = ctx;
         auto __ = text;
@@ -2766,11 +2782,39 @@ unittest
 
 unittest
 {
+    @UserCommand("inspect-user")
+    void inspectUser(ContextMenuContext ctx)
+    {
+        assert(ctx.isContextMenu);
+        ctx.send("context-ok").await();
+    }
+
+    auto services = new ServiceContainer;
+    auto registry = new CommandRegistry(services);
+    auto rest = unittestRestClient();
+    registerHandlers!(inspectUser)(registry);
+
+    CommandContext ctx;
+    ctx.rest = rest;
+    ctx.services = services;
+    ctx.source = CommandSource.ContextMenu;
+
+    auto result = registry.executeContextMenu(ctx, "inspect-user");
+    assert(result.isOk);
+    assert(rest.messages.history.length == 1);
+    assert(rest.messages.history[0].content == "context-ok");
+
+    auto wrongRoute = registry.executeSlash(ctx, "inspect-user");
+    assert(wrongRoute.isErr);
+}
+
+unittest
+{
     @SlashCommand("whoami", "Inspect user command install/context metadata")
     @UserInstalled
     @GuildInstalled
     @CommandContexts(InteractionContextType.Guild, InteractionContextType.PrivateChannel)
-    void whoami(CommandContext ctx)
+    void whoami(SlashContext ctx)
     {
         auto _ = ctx;
     }
@@ -2793,14 +2837,14 @@ unittest
 {
     @PrefixCommand("guild-maint")
     @GuildOnly
-    void guildMaint(CommandContext ctx)
+    void guildMaint(PrefixContext ctx)
     {
         auto _ = ctx;
     }
 
     @SlashCommand("dm-utility")
     @DirectMessageOnly
-    void dmUtility(CommandContext ctx)
+    void dmUtility(SlashContext ctx)
     {
         auto _ = ctx;
     }
@@ -2820,7 +2864,7 @@ unittest
 {
     @SlashCommand("dm-only-install")
     @UserInstalledDmOnly
-    void dmInstall(CommandContext ctx)
+    void dmInstall(SlashContext ctx)
     {
         auto _ = ctx;
     }
@@ -2840,7 +2884,7 @@ unittest
 {
     @PrefixCommand("broken")
     @UserInstalled
-    void broken(CommandContext ctx)
+    void broken(PrefixContext ctx)
     {
         auto _ = ctx;
     }
@@ -2865,7 +2909,7 @@ unittest
     @SlashCommand("context-conflict")
     @GuildOnly
     @CommandContexts(InteractionContextType.BotDM)
-    void contextConflict(CommandContext ctx)
+    void contextConflict(SlashContext ctx)
     {
         auto _ = ctx;
     }
@@ -2890,7 +2934,7 @@ unittest
     @SlashCommand("conflicted")
     @GuildOnly
     @DirectMessageOnly
-    void conflicted(CommandContext ctx)
+    void conflicted(SlashContext ctx)
     {
         auto _ = ctx;
     }
@@ -2927,7 +2971,53 @@ unittest
     catch (DdiscordException error)
     {
         threw = true;
-        assert(error.msg.canFind("Slash-only handler context"));
+        assert(error.msg.canFind("must use `HybridContext`"));
+    }
+
+    assert(threw);
+}
+
+unittest
+{
+    @SlashCommand("wrong-slash-context")
+    void wrongSlashContext(CommandContext ctx)
+    {
+        auto _ = ctx;
+    }
+
+    bool threw;
+    try
+    {
+        auto registry = new CommandRegistry(new ServiceContainer);
+        registerHandlers!(wrongSlashContext)(registry);
+    }
+    catch (DdiscordException error)
+    {
+        threw = true;
+        assert(error.msg.canFind("must use `SlashContext`"));
+    }
+
+    assert(threw);
+}
+
+unittest
+{
+    @PrefixCommand("wrong-prefix-context")
+    void wrongPrefixContext(CommandContext ctx)
+    {
+        auto _ = ctx;
+    }
+
+    bool threw;
+    try
+    {
+        auto registry = new CommandRegistry(new ServiceContainer);
+        registerHandlers!(wrongPrefixContext)(registry);
+    }
+    catch (DdiscordException error)
+    {
+        threw = true;
+        assert(error.msg.canFind("must use `PrefixContext`"));
     }
 
     assert(threw);
@@ -3071,7 +3161,7 @@ unittest
     @InstalledEverywhere
     @GuildInstalledGuildOnly
     @DmContextOnly
-    void installCombos(CommandContext ctx)
+    void installCombos(SlashContext ctx)
     {
         auto _ = ctx;
     }

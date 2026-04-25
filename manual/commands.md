@@ -6,7 +6,7 @@
 
 ```d
 @PrefixCommand("ping", "Reply with Pong")
-void ping(CommandContext ctx)
+void ping(PrefixContext ctx)
 {
     ctx.reply("Pong!").await();
 }
@@ -127,6 +127,8 @@ Use typed context aliases to keep handler signatures explicit:
 - `ContextMenuContext`: message/user context menu
 
 `ddiscord` validates route/context mismatches during registration (for example, `SlashContext` on a hybrid route).
+For explicit route UDAs, typing is strict:
+`@PrefixCommand` -> `PrefixContext`, `@SlashCommand` -> `SlashContext`, `@HybridCommand` -> `HybridContext`.
 
 Route-specific fluent helpers are available:
 

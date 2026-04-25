@@ -178,7 +178,7 @@ void listScripts(CommandContext ctx)
 
 @HybridCommand("run", "Run a saved Lua script")
 void runScript(
-    CommandContext ctx,
+    HybridContext ctx,
     @Option("name", "Saved command name") string name = "",
     @Greedy @Option("args", "Arguments passed to the script") string args = ""
 )

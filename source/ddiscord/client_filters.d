@@ -22,6 +22,8 @@ bool matchesRegistrationFilter(
         return false;
     if (candidate.plugin && !filter.includePlugins)
         return false;
+    if (candidate.task && !filter.includeTasks)
+        return false;
     if (!matchesFilterTokens(candidate.moduleName, filter.includeModules))
         return false;
     if (matchesAnyToken(candidate.moduleName, filter.excludeModules))
@@ -104,3 +106,19 @@ unittest
     assert(matchesRegistrationFilter(filter, candidate));
 }
 
+unittest
+{
+    RegistrationCandidate candidate;
+    candidate.moduleName = "example.tasks";
+    candidate.ownerName = "BackgroundTasks";
+    candidate.symbolName = "heartbeat";
+    candidate.commandName = "heartbeat";
+    candidate.typeSymbol = true;
+    candidate.task = true;
+
+    auto denied = CommandRegistrationFilter.modules("example").withoutTasks();
+    assert(!matchesRegistrationFilter(denied, candidate));
+
+    auto allowed = CommandRegistrationFilter.modules("example");
+    assert(matchesRegistrationFilter(allowed, candidate));
+}

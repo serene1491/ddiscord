@@ -7,7 +7,7 @@
 module ddiscord.models.interaction;
 
 import ddiscord.interactions.components : ComponentType;
-import ddiscord.models.application_command : AutocompleteChoice, InteractionType;
+import ddiscord.models.application_command : ApplicationCommandType, AutocompleteChoice, InteractionType;
 import ddiscord.models.channel : Channel;
 import ddiscord.models.member : GuildMember;
 import ddiscord.models.message : Message;
@@ -48,6 +48,7 @@ struct Interaction
     ulong permissions;
     ulong appPermissions;
     string commandName;
+    ApplicationCommandType commandType = ApplicationCommandType.ChatInput;
     string customId;
     ComponentType componentType = ComponentType.Unknown;
     InteractionOption[] options;
@@ -118,6 +119,10 @@ struct Interaction
 
 private void parseInteractionData(ref Interaction interaction, JSONValue dataValue)
 {
+    auto commandTypeValue = dataValue.object.get("type", JSONValue.init);
+    if (commandTypeValue.type != JSONType.null_)
+        interaction.commandType = cast(ApplicationCommandType) cast(int) commandTypeValue.integer;
+
     auto nameValue = dataValue.object.get("name", JSONValue.init);
     if (nameValue.type != JSONType.null_)
         interaction.commandName = nameValue.str;
@@ -324,6 +329,23 @@ unittest
     auto interaction = Interaction.fromJSON(payload);
     assert(interaction.permissions == 1024);
     assert(interaction.appPermissions == 2048);
+    assert(interaction.commandType == ApplicationCommandType.ChatInput);
+}
+
+unittest
+{
+    auto payload = parseJSON(`{
+        "id": "9",
+        "type": 2,
+        "token": "abc",
+        "data": {
+            "name": "Inspect User",
+            "type": 2
+        }
+    }`);
+
+    auto interaction = Interaction.fromJSON(payload);
+    assert(interaction.commandType == ApplicationCommandType.User);
 }
 
 unittest

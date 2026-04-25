@@ -54,6 +54,8 @@ struct GatewayClientConfig
     string token;
     uint intents;
     string url;
+    uint shardId;
+    uint shardCount = 1;
     ILogger logger;
     Duration connectTimeout = dur!"seconds"(15);
     Duration pollTimeout = dur!"msecs"(250);
@@ -909,28 +911,41 @@ final class GatewayClient
     private GatewayEnvelope receiveEnvelope()
     {
         auto message = _socket.receive();
-        if (message.type != MessageType.Text)
+        string rawPayload;
+
+        if (message.type == MessageType.Text)
+        {
+            rawPayload = message.text;
+        }
+        else if (message.type == MessageType.Binary)
+        {
+            rawPayload = cast(string) message.data;
+        }
+        else
         {
             throw new DdiscordException(formatError(
                 "gateway",
-                "Discord sent a non-text WebSocket payload.",
-                "Only JSON text frames are currently supported.",
-                "Disable compression and ETF when building the gateway URL."
+                "Discord sent an unsupported gateway frame type.",
+                "Received WebSocket frame type `" ~ (cast(int) message.type).to!string ~ "`.",
+                "Use data frames (`Text`/`Binary`) for gateway envelopes."
             ));
         }
 
         JSONValue json;
         try
         {
-            json = parseJSON(message.text);
+            json = parseJSON(rawPayload);
         }
         catch (Exception error)
         {
+            auto hint = message.type == MessageType.Binary
+                ? "Binary gateway payloads that are not JSON usually indicate ETF or compression. Use `encoding=json` without compression or add an ETF/decoder layer."
+                : "Check whether the gateway connection negotiated JSON encoding.";
             throw new DdiscordException(formatError(
                 "gateway",
                 "Discord sent a payload that could not be parsed as JSON.",
                 error.msg,
-                "Check whether the gateway connection negotiated JSON encoding."
+                hint
             ));
         }
 
@@ -980,6 +995,14 @@ final class GatewayClient
         JSONValue payload;
         payload["token"] = gatewayToken(config.token);
         payload["intents"] = config.intents;
+
+        if (config.shardCount > 1)
+        {
+            JSONValue[] shard;
+            shard ~= JSONValue(cast(long) config.shardId);
+            shard ~= JSONValue(cast(long) config.shardCount);
+            payload["shard"] = shard;
+        }
 
         JSONValue properties;
         properties["os"] = runtimeOs();

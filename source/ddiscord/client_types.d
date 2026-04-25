@@ -25,6 +25,7 @@ struct CommandRegistrationFilter
     bool includeTypes = true;
     bool includeEvents = true;
     bool includePlugins = true;
+    bool includeTasks = true;
 
     static CommandRegistrationFilter modules(string[] values...)
     {
@@ -99,6 +100,12 @@ struct CommandRegistrationFilter
     CommandRegistrationFilter withoutPlugins()
     {
         includePlugins = false;
+        return this;
+    }
+
+    CommandRegistrationFilter withoutTasks()
+    {
+        includeTasks = false;
         return this;
     }
 }
@@ -222,6 +229,7 @@ struct RegistrationCandidate
     bool command;
     bool event;
     bool plugin;
+    bool task;
 }
 
 struct HelpRequest

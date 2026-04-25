@@ -17,8 +17,8 @@ import std.exception : enforce;
 import std.string : startsWith, strip;
 import std.conv : to;
 
-/// Lightweight awaitable task wrapper.
-struct Task(T)
+/// Lightweight awaitable wrapper for REST/context operations.
+struct AsyncTask(T)
 {
     static if (!is(T == void))
         T value;
@@ -69,26 +69,26 @@ struct Task(T)
     /// Creates a successful task.
     static if (!is(T == void))
     {
-        static Task!T success(T value)
+        static AsyncTask!T success(T value)
         {
-            Task!T task;
+            AsyncTask!T task;
             task.value = value;
             return task;
         }
     }
     else
     {
-        static Task!T success()
+        static AsyncTask!T success()
         {
-            Task!T task;
+            AsyncTask!T task;
             return task;
         }
     }
 
     /// Creates a failed task.
-    static Task!T failure(string message)
+    static AsyncTask!T failure(string message)
     {
-        Task!T task;
+        AsyncTask!T task;
         task._errorMessage = Nullable!string.of(message);
         return task;
     }
@@ -187,6 +187,46 @@ final class TaskScheduler
         return runUntil(Clock.currTime);
     }
 
+    /// Runs a task immediately by label. Returns `true` when found.
+    bool runNow(string label)
+    {
+        ScheduledTask task;
+        bool found;
+
+        synchronized (_mutex)
+        {
+            if (auto taskPtr = label in _tasks)
+            {
+                task = *taskPtr;
+                found = true;
+            }
+        }
+
+        if (!found)
+            return false;
+
+        executeTask(label, task.callback);
+
+        synchronized (_mutex)
+        {
+            auto current = label in _tasks;
+            if (current is null)
+                return true;
+
+            if (task.recurring)
+            {
+                task.dueAt = Clock.currTime + task.interval;
+                _tasks[label] = task;
+            }
+            else
+            {
+                _tasks.remove(label);
+            }
+        }
+
+        return true;
+    }
+
     /// Runs all tasks that are due up to a specific time.
     size_t runUntil(SysTime now)
     {
@@ -220,26 +260,7 @@ final class TaskScheduler
             if (!found)
                 continue;
 
-            if (task.callback !is null)
-            {
-                try
-                {
-                    task.callback();
-                }
-                catch (Throwable error)
-                {
-                    auto message = formatError(
-                        "tasks",
-                        "A scheduled task raised an unhandled error.",
-                        "Task `" ~ label ~ "` failed with: " ~ error.msg,
-                        "Inspect the callback implementation; the scheduler kept running."
-                    );
-                    synchronized (_mutex)
-                        _taskErrors ~= message;
-                    if (logger !is null)
-                        logger.error("tasks", message);
-                }
-            }
+            executeTask(label, task.callback);
             executed++;
 
             synchronized (_mutex)
@@ -268,6 +289,30 @@ final class TaskScheduler
     {
         synchronized (_mutex)
             return _taskErrors.dup;
+    }
+
+    private void executeTask(string label, void delegate() callback)
+    {
+        if (callback is null)
+            return;
+
+        try
+        {
+            callback();
+        }
+        catch (Throwable error)
+        {
+            auto message = formatError(
+                "tasks",
+                "A scheduled task raised an unhandled error.",
+                "Task `" ~ label ~ "` failed with: " ~ error.msg,
+                "Inspect the callback implementation; the scheduler kept running."
+            );
+            synchronized (_mutex)
+                _taskErrors ~= message;
+            if (logger !is null)
+                logger.error("tasks", message);
+        }
     }
 }
 
@@ -315,6 +360,16 @@ unittest
     auto later = Clock.currTime + dur!"seconds"(2);
     assert(scheduler.runUntil(later) == 1);
     assert(scheduler.taskErrors.length == 1);
+}
+
+unittest
+{
+    auto scheduler = new TaskScheduler;
+    int calls;
+    scheduler.every("tick", dur!"seconds"(30), { calls++; });
+    assert(scheduler.runNow("tick"));
+    assert(calls == 1);
+    assert(scheduler.has("tick"));
 }
 
 unittest

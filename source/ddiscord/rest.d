@@ -23,7 +23,7 @@ import ddiscord.models.member : GuildMember;
 import ddiscord.models.message : Message, MessageAttachmentCreate, MessageCreate, MessageFlags;
 import ddiscord.models.role : Role;
 import ddiscord.models.user : User;
-import ddiscord.tasks : Task;
+import ddiscord.tasks : AsyncTask;
 import ddiscord.util.errors : formatError;
 import ddiscord.util.identity : DdiscordUserAgent;
 import ddiscord.util.limits : DiscordApiBase;
@@ -1627,11 +1627,11 @@ final class MessagesEndpoints
     }
 
     /// Creates a message in a channel.
-    Task!Message create(Snowflake channelId, MessageCreate payload)
+    AsyncTask!Message create(Snowflake channelId, MessageCreate payload)
     {
         if (_real.isNull)
         {
-            return Task!Message.failure(formatError(
+            return AsyncTask!Message.failure(formatError(
                 "rest",
                 "Cannot create a Discord message because the REST transport is not configured.",
                 "Attempted route: `/channels/" ~ channelId.toString ~ "/messages`.",
@@ -1641,18 +1641,18 @@ final class MessagesEndpoints
 
         auto created = _real.get.createMessage(channelId, payload);
         if (created.isErr)
-            return Task!Message.failure(created.error);
+            return AsyncTask!Message.failure(created.error);
 
         _history.store(created.value);
-        return Task!Message.success(created.value);
+        return AsyncTask!Message.success(created.value);
     }
 
     /// Edits an existing message in a channel.
-    Task!Message edit(Snowflake channelId, Snowflake messageId, MessageCreate payload)
+    AsyncTask!Message edit(Snowflake channelId, Snowflake messageId, MessageCreate payload)
     {
         if (_real.isNull)
         {
-            return Task!Message.failure(formatError(
+            return AsyncTask!Message.failure(formatError(
                 "rest",
                 "Cannot edit a Discord message because the REST transport is not configured.",
                 "Attempted route: `/channels/" ~ channelId.toString ~ "/messages/" ~ messageId.toString ~ "`.",
@@ -1662,18 +1662,18 @@ final class MessagesEndpoints
 
         auto edited = _real.get.editMessage(channelId, messageId, payload);
         if (edited.isErr)
-            return Task!Message.failure(edited.error);
+            return AsyncTask!Message.failure(edited.error);
 
         _history.store(edited.value);
-        return Task!Message.success(edited.value);
+        return AsyncTask!Message.success(edited.value);
     }
 
     /// Deletes one message from a channel.
-    Task!void delete(Snowflake channelId, Snowflake messageId)
+    AsyncTask!void delete(Snowflake channelId, Snowflake messageId)
     {
         if (_real.isNull)
         {
-            return Task!void.failure(formatError(
+            return AsyncTask!void.failure(formatError(
                 "rest",
                 "Cannot delete a Discord message because the REST transport is not configured.",
                 "Attempted route: `/channels/" ~ channelId.toString ~ "/messages/" ~ messageId.toString ~ "`.",
@@ -1683,17 +1683,17 @@ final class MessagesEndpoints
 
         auto deleted = _real.get.deleteMessage(channelId, messageId);
         if (deleted.isErr)
-            return Task!void.failure(deleted.error);
+            return AsyncTask!void.failure(deleted.error);
 
-        return Task!void.success();
+        return AsyncTask!void.success();
     }
 
     /// Deletes between 2 and 100 messages from a channel.
-    Task!void bulkDelete(Snowflake channelId, Snowflake[] messageIds)
+    AsyncTask!void bulkDelete(Snowflake channelId, Snowflake[] messageIds)
     {
         if (_real.isNull)
         {
-            return Task!void.failure(formatError(
+            return AsyncTask!void.failure(formatError(
                 "rest",
                 "Cannot bulk-delete Discord messages because the REST transport is not configured.",
                 "Attempted route: `/channels/" ~ channelId.toString ~ "/messages/bulk-delete`.",
@@ -1703,17 +1703,17 @@ final class MessagesEndpoints
 
         auto deleted = _real.get.bulkDeleteMessages(channelId, messageIds);
         if (deleted.isErr)
-            return Task!void.failure(deleted.error);
+            return AsyncTask!void.failure(deleted.error);
 
-        return Task!void.success();
+        return AsyncTask!void.success();
     }
 
     /// Crossposts a message in announcement channels.
-    Task!Message crosspost(Snowflake channelId, Snowflake messageId)
+    AsyncTask!Message crosspost(Snowflake channelId, Snowflake messageId)
     {
         if (_real.isNull)
         {
-            return Task!Message.failure(formatError(
+            return AsyncTask!Message.failure(formatError(
                 "rest",
                 "Cannot crosspost a Discord message because the REST transport is not configured.",
                 "Attempted route: `/channels/" ~ channelId.toString ~ "/messages/" ~ messageId.toString ~ "/crosspost`.",
@@ -1723,14 +1723,14 @@ final class MessagesEndpoints
 
         auto crossposted = _real.get.crosspostMessage(channelId, messageId);
         if (crossposted.isErr)
-            return Task!Message.failure(crossposted.error);
+            return AsyncTask!Message.failure(crossposted.error);
 
         _history.store(crossposted.value);
-        return Task!Message.success(crossposted.value);
+        return AsyncTask!Message.success(crossposted.value);
     }
 
     /// Pins a message in a channel.
-    Task!void pin(
+    AsyncTask!void pin(
         Snowflake channelId,
         Snowflake messageId,
         Nullable!string auditReason = Nullable!string.init
@@ -1738,7 +1738,7 @@ final class MessagesEndpoints
     {
         if (_real.isNull)
         {
-            return Task!void.failure(formatError(
+            return AsyncTask!void.failure(formatError(
                 "rest",
                 "Cannot pin a Discord message because the REST transport is not configured.",
                 "Attempted route: `/channels/" ~ channelId.toString ~ "/pins/" ~ messageId.toString ~ "`.",
@@ -1748,13 +1748,13 @@ final class MessagesEndpoints
 
         auto pinned = _real.get.pinMessage(channelId, messageId, auditReason);
         if (pinned.isErr)
-            return Task!void.failure(pinned.error);
+            return AsyncTask!void.failure(pinned.error);
 
-        return Task!void.success();
+        return AsyncTask!void.success();
     }
 
     /// Unpins a message in a channel.
-    Task!void unpin(
+    AsyncTask!void unpin(
         Snowflake channelId,
         Snowflake messageId,
         Nullable!string auditReason = Nullable!string.init
@@ -1762,7 +1762,7 @@ final class MessagesEndpoints
     {
         if (_real.isNull)
         {
-            return Task!void.failure(formatError(
+            return AsyncTask!void.failure(formatError(
                 "rest",
                 "Cannot unpin a Discord message because the REST transport is not configured.",
                 "Attempted route: `/channels/" ~ channelId.toString ~ "/pins/" ~ messageId.toString ~ "`.",
@@ -1772,17 +1772,17 @@ final class MessagesEndpoints
 
         auto unpinned = _real.get.unpinMessage(channelId, messageId, auditReason);
         if (unpinned.isErr)
-            return Task!void.failure(unpinned.error);
+            return AsyncTask!void.failure(unpinned.error);
 
-        return Task!void.success();
+        return AsyncTask!void.success();
     }
 
     /// Lists pinned messages in a channel.
-    Task!(Message[]) pins(Snowflake channelId)
+    AsyncTask!(Message[]) pins(Snowflake channelId)
     {
         if (_real.isNull)
         {
-            return Task!(Message[]).failure(formatError(
+            return AsyncTask!(Message[]).failure(formatError(
                 "rest",
                 "Cannot list pinned Discord messages because the REST transport is not configured.",
                 "Attempted route: `/channels/" ~ channelId.toString ~ "/pins`.",
@@ -1792,9 +1792,9 @@ final class MessagesEndpoints
 
         auto pinned = _real.get.listPinnedMessages(channelId);
         if (pinned.isErr)
-            return Task!(Message[]).failure(pinned.error);
+            return AsyncTask!(Message[]).failure(pinned.error);
 
-        return Task!(Message[]).success(pinned.value);
+        return AsyncTask!(Message[]).success(pinned.value);
     }
 
     /// Returns every message sent through the REST client.
@@ -1821,68 +1821,68 @@ final class ReactionsEndpoints
     }
 
     /// Adds a reaction as the current bot user.
-    Task!void add(Snowflake channelId, Snowflake messageId, string emoji)
+    AsyncTask!void add(Snowflake channelId, Snowflake messageId, string emoji)
     {
         if (_real.isNull)
-            return Task!void.failure(formatError("rest", "Cannot add a reaction because the REST transport is not configured.", "", "Provide a bot token or a transport before managing reactions."));
+            return AsyncTask!void.failure(formatError("rest", "Cannot add a reaction because the REST transport is not configured.", "", "Provide a bot token or a transport before managing reactions."));
 
         auto added = _real.get.addReaction(channelId, messageId, emoji);
         if (added.isErr)
-            return Task!void.failure(added.error);
+            return AsyncTask!void.failure(added.error);
 
-        return Task!void.success();
+        return AsyncTask!void.success();
     }
 
     /// Removes the current bot user's reaction.
-    Task!void removeSelf(Snowflake channelId, Snowflake messageId, string emoji)
+    AsyncTask!void removeSelf(Snowflake channelId, Snowflake messageId, string emoji)
     {
         if (_real.isNull)
-            return Task!void.failure(formatError("rest", "Cannot remove the bot reaction because the REST transport is not configured.", "", "Provide a bot token or a transport before managing reactions."));
+            return AsyncTask!void.failure(formatError("rest", "Cannot remove the bot reaction because the REST transport is not configured.", "", "Provide a bot token or a transport before managing reactions."));
 
         auto removed = _real.get.removeOwnReaction(channelId, messageId, emoji);
         if (removed.isErr)
-            return Task!void.failure(removed.error);
+            return AsyncTask!void.failure(removed.error);
 
-        return Task!void.success();
+        return AsyncTask!void.success();
     }
 
     /// Removes a specific user's reaction.
-    Task!void removeUser(Snowflake channelId, Snowflake messageId, string emoji, Snowflake userId)
+    AsyncTask!void removeUser(Snowflake channelId, Snowflake messageId, string emoji, Snowflake userId)
     {
         if (_real.isNull)
-            return Task!void.failure(formatError("rest", "Cannot remove a user's reaction because the REST transport is not configured.", "", "Provide a bot token or a transport before managing reactions."));
+            return AsyncTask!void.failure(formatError("rest", "Cannot remove a user's reaction because the REST transport is not configured.", "", "Provide a bot token or a transport before managing reactions."));
 
         auto removed = _real.get.removeUserReaction(channelId, messageId, emoji, userId);
         if (removed.isErr)
-            return Task!void.failure(removed.error);
+            return AsyncTask!void.failure(removed.error);
 
-        return Task!void.success();
+        return AsyncTask!void.success();
     }
 
     /// Clears all reactions from a message.
-    Task!void clear(Snowflake channelId, Snowflake messageId)
+    AsyncTask!void clear(Snowflake channelId, Snowflake messageId)
     {
         if (_real.isNull)
-            return Task!void.failure(formatError("rest", "Cannot clear reactions because the REST transport is not configured.", "", "Provide a bot token or a transport before managing reactions."));
+            return AsyncTask!void.failure(formatError("rest", "Cannot clear reactions because the REST transport is not configured.", "", "Provide a bot token or a transport before managing reactions."));
 
         auto cleared = _real.get.clearReactions(channelId, messageId);
         if (cleared.isErr)
-            return Task!void.failure(cleared.error);
+            return AsyncTask!void.failure(cleared.error);
 
-        return Task!void.success();
+        return AsyncTask!void.success();
     }
 
     /// Clears all reactions for one emoji from a message.
-    Task!void clearEmoji(Snowflake channelId, Snowflake messageId, string emoji)
+    AsyncTask!void clearEmoji(Snowflake channelId, Snowflake messageId, string emoji)
     {
         if (_real.isNull)
-            return Task!void.failure(formatError("rest", "Cannot clear emoji reactions because the REST transport is not configured.", "", "Provide a bot token or a transport before managing reactions."));
+            return AsyncTask!void.failure(formatError("rest", "Cannot clear emoji reactions because the REST transport is not configured.", "", "Provide a bot token or a transport before managing reactions."));
 
         auto cleared = _real.get.clearEmojiReactions(channelId, messageId, emoji);
         if (cleared.isErr)
-            return Task!void.failure(cleared.error);
+            return AsyncTask!void.failure(cleared.error);
 
-        return Task!void.success();
+        return AsyncTask!void.success();
     }
 }
 
@@ -1899,41 +1899,41 @@ final class ApplicationCommandsEndpoints
     }
 
     /// Replaces the global application command manifest.
-    Task!(ApplicationCommandDefinition[]) bulkOverwrite(ApplicationCommandDefinition[] definitions)
+    AsyncTask!(ApplicationCommandDefinition[]) bulkOverwrite(ApplicationCommandDefinition[] definitions)
     {
         if (_real.isNull)
-            return Task!(ApplicationCommandDefinition[]).failure(formatError("rest", "Cannot overwrite application commands because the REST transport is not configured.", "", "Configure a bot token or inject a transport before syncing commands."));
+            return AsyncTask!(ApplicationCommandDefinition[]).failure(formatError("rest", "Cannot overwrite application commands because the REST transport is not configured.", "", "Configure a bot token or inject a transport before syncing commands."));
 
         auto synced = _real.get.bulkOverwriteGlobalCommands(definitions);
         if (synced.isErr)
-            return Task!(ApplicationCommandDefinition[]).failure(synced.error);
+            return AsyncTask!(ApplicationCommandDefinition[]).failure(synced.error);
 
         _store.overwrite(synced.value);
-        return Task!(ApplicationCommandDefinition[]).success(synced.value);
+        return AsyncTask!(ApplicationCommandDefinition[]).success(synced.value);
     }
 
     /// Short alias for `bulkOverwrite`.
-    Task!(ApplicationCommandDefinition[]) sync(ApplicationCommandDefinition[] definitions)
+    AsyncTask!(ApplicationCommandDefinition[]) sync(ApplicationCommandDefinition[] definitions)
     {
         return bulkOverwrite(definitions);
     }
 
     /// Lists globally registered application commands.
-    Task!(ApplicationCommandDefinition[]) listGlobal()
+    AsyncTask!(ApplicationCommandDefinition[]) listGlobal()
     {
         if (_real.isNull)
-            return Task!(ApplicationCommandDefinition[]).failure(formatError("rest", "Cannot list application commands because the REST transport is not configured.", "", "Configure a bot token or inject a transport before listing commands."));
+            return AsyncTask!(ApplicationCommandDefinition[]).failure(formatError("rest", "Cannot list application commands because the REST transport is not configured.", "", "Configure a bot token or inject a transport before listing commands."));
 
         auto listed = _real.get.listGlobalCommands();
         if (listed.isErr)
-            return Task!(ApplicationCommandDefinition[]).failure(listed.error);
+            return AsyncTask!(ApplicationCommandDefinition[]).failure(listed.error);
 
         _store.overwrite(listed.value);
-        return Task!(ApplicationCommandDefinition[]).success(listed.value);
+        return AsyncTask!(ApplicationCommandDefinition[]).success(listed.value);
     }
 
     /// Short alias for `listGlobal`.
-    Task!(ApplicationCommandDefinition[]) list()
+    AsyncTask!(ApplicationCommandDefinition[]) list()
     {
         return listGlobal();
     }
@@ -1956,29 +1956,29 @@ final class UsersEndpoints
     }
 
     /// Returns the current bot user.
-    Task!User me()
+    AsyncTask!User me()
     {
         if (_real.isNull)
-            return Task!User.failure(formatError("rest", "Cannot call `/users/@me` because the REST transport is not configured.", "", "Provide a bot token or an explicit test transport before calling authenticated Discord endpoints."));
+            return AsyncTask!User.failure(formatError("rest", "Cannot call `/users/@me` because the REST transport is not configured.", "", "Provide a bot token or an explicit test transport before calling authenticated Discord endpoints."));
 
         auto user = _real.get.currentUser();
         if (user.isErr)
-            return Task!User.failure(user.error);
+            return AsyncTask!User.failure(user.error);
 
-        return Task!User.success(user.value);
+        return AsyncTask!User.success(user.value);
     }
 
     /// Updates the current bot user.
-    Task!User update(ModifyCurrentUser payload)
+    AsyncTask!User update(ModifyCurrentUser payload)
     {
         if (_real.isNull)
-            return Task!User.failure(formatError("rest", "Cannot call `PATCH /users/@me` because the REST transport is not configured.", "", "Provide a bot token or an explicit test transport before calling authenticated Discord endpoints."));
+            return AsyncTask!User.failure(formatError("rest", "Cannot call `PATCH /users/@me` because the REST transport is not configured.", "", "Provide a bot token or an explicit test transport before calling authenticated Discord endpoints."));
 
         auto user = _real.get.modifyCurrentUser(payload);
         if (user.isErr)
-            return Task!User.failure(user.error);
+            return AsyncTask!User.failure(user.error);
 
-        return Task!User.success(user.value);
+        return AsyncTask!User.success(user.value);
     }
 }
 
@@ -1993,33 +1993,33 @@ final class ApplicationsEndpoints
     }
 
     /// Returns the current Discord application.
-    Task!Application me()
+    AsyncTask!Application me()
     {
         if (_real.isNull)
-            return Task!Application.failure(formatError("rest", "Cannot call `GET /oauth2/applications/@me` because the REST transport is not configured.", "", "Provide a bot token or an explicit test transport before calling authenticated Discord endpoints."));
+            return AsyncTask!Application.failure(formatError("rest", "Cannot call `GET /oauth2/applications/@me` because the REST transport is not configured.", "", "Provide a bot token or an explicit test transport before calling authenticated Discord endpoints."));
 
         auto application = _real.get.currentApplication();
         if (application.isErr)
-            return Task!Application.failure(application.error);
+            return AsyncTask!Application.failure(application.error);
 
-        return Task!Application.success(application.value);
+        return AsyncTask!Application.success(application.value);
     }
 
     /// Updates the current Discord application.
-    Task!Application update(ModifyCurrentApplication payload)
+    AsyncTask!Application update(ModifyCurrentApplication payload)
     {
         if (_real.isNull)
-            return Task!Application.failure(formatError("rest", "Cannot call `PATCH /applications/@me` because the REST transport is not configured.", "", "Provide a bot token or an explicit test transport before calling authenticated Discord endpoints."));
+            return AsyncTask!Application.failure(formatError("rest", "Cannot call `PATCH /applications/@me` because the REST transport is not configured.", "", "Provide a bot token or an explicit test transport before calling authenticated Discord endpoints."));
 
         auto application = _real.get.modifyCurrentApplication(payload);
         if (application.isErr)
-            return Task!Application.failure(application.error);
+            return AsyncTask!Application.failure(application.error);
 
-        return Task!Application.success(application.value);
+        return AsyncTask!Application.success(application.value);
     }
 
     /// Short alias for `me`.
-    Task!Application current()
+    AsyncTask!Application current()
     {
         return me();
     }
@@ -2036,16 +2036,16 @@ final class GatewayEndpoints
     }
 
     /// Returns the recommended gateway URL and shard info.
-    Task!GatewayBotInfo bot()
+    AsyncTask!GatewayBotInfo bot()
     {
         if (_real.isNull)
-            return Task!GatewayBotInfo.failure(formatError("rest", "Cannot call `/gateway/bot` because the REST transport is not configured.", "", "Provide a bot token or an explicit test transport before gateway discovery."));
+            return AsyncTask!GatewayBotInfo.failure(formatError("rest", "Cannot call `/gateway/bot` because the REST transport is not configured.", "", "Provide a bot token or an explicit test transport before gateway discovery."));
 
         auto info = _real.get.gatewayBot();
         if (info.isErr)
-            return Task!GatewayBotInfo.failure(info.error);
+            return AsyncTask!GatewayBotInfo.failure(info.error);
 
-        return Task!GatewayBotInfo.success(info.value);
+        return AsyncTask!GatewayBotInfo.success(info.value);
     }
 }
 
@@ -2060,46 +2060,46 @@ final class GuildsEndpoints
     }
 
     /// Returns a guild descriptor by id.
-    Task!Guild get(Snowflake guildId)
+    AsyncTask!Guild get(Snowflake guildId)
     {
         if (_real.isNull)
-            return Task!Guild.failure(formatError("rest", "Cannot fetch a guild because the REST transport is not configured.", "", "Provide a bot token or a transport before reading guild metadata."));
+            return AsyncTask!Guild.failure(formatError("rest", "Cannot fetch a guild because the REST transport is not configured.", "", "Provide a bot token or a transport before reading guild metadata."));
 
         auto guild = _real.get.getGuild(guildId);
         if (guild.isErr)
-            return Task!Guild.failure(guild.error);
+            return AsyncTask!Guild.failure(guild.error);
 
-        return Task!Guild.success(guild.value);
+        return AsyncTask!Guild.success(guild.value);
     }
 
     /// Returns a guild member descriptor by guild and user id.
-    Task!GuildMember member(Snowflake guildId, Snowflake userId)
+    AsyncTask!GuildMember member(Snowflake guildId, Snowflake userId)
     {
         if (_real.isNull)
-            return Task!GuildMember.failure(formatError("rest", "Cannot fetch a guild member because the REST transport is not configured.", "", "Provide a bot token or a transport before reading guild members."));
+            return AsyncTask!GuildMember.failure(formatError("rest", "Cannot fetch a guild member because the REST transport is not configured.", "", "Provide a bot token or a transport before reading guild members."));
 
         auto member = _real.get.getGuildMember(guildId, userId);
         if (member.isErr)
-            return Task!GuildMember.failure(member.error);
+            return AsyncTask!GuildMember.failure(member.error);
 
-        return Task!GuildMember.success(member.value);
+        return AsyncTask!GuildMember.success(member.value);
     }
 
     /// Lists the roles for a guild.
-    Task!(Role[]) roles(Snowflake guildId)
+    AsyncTask!(Role[]) roles(Snowflake guildId)
     {
         if (_real.isNull)
-            return Task!(Role[]).failure(formatError("rest", "Cannot list guild roles because the REST transport is not configured.", "", "Provide a bot token or a transport before reading guild roles."));
+            return AsyncTask!(Role[]).failure(formatError("rest", "Cannot list guild roles because the REST transport is not configured.", "", "Provide a bot token or a transport before reading guild roles."));
 
         auto roles = _real.get.listGuildRoles(guildId);
         if (roles.isErr)
-            return Task!(Role[]).failure(roles.error);
+            return AsyncTask!(Role[]).failure(roles.error);
 
-        return Task!(Role[]).success(roles.value);
+        return AsyncTask!(Role[]).success(roles.value);
     }
 
     /// Applies a timeout to a guild member for the provided duration.
-    Task!GuildMember timeoutMember(
+    AsyncTask!GuildMember timeoutMember(
         Snowflake guildId,
         Snowflake userId,
         Duration duration,
@@ -2107,51 +2107,51 @@ final class GuildsEndpoints
     )
     {
         if (_real.isNull)
-            return Task!GuildMember.failure(formatError("rest", "Cannot timeout a guild member because the REST transport is not configured.", "", "Provide a bot token or a transport before moderating guild members."));
+            return AsyncTask!GuildMember.failure(formatError("rest", "Cannot timeout a guild member because the REST transport is not configured.", "", "Provide a bot token or a transport before moderating guild members."));
 
         auto updated = _real.get.timeoutGuildMember(guildId, userId, duration, auditReason);
         if (updated.isErr)
-            return Task!GuildMember.failure(updated.error);
+            return AsyncTask!GuildMember.failure(updated.error);
 
-        return Task!GuildMember.success(updated.value);
+        return AsyncTask!GuildMember.success(updated.value);
     }
 
     /// Clears timeout state for a guild member.
-    Task!GuildMember clearMemberTimeout(
+    AsyncTask!GuildMember clearMemberTimeout(
         Snowflake guildId,
         Snowflake userId,
         Nullable!string auditReason = Nullable!string.init
     )
     {
         if (_real.isNull)
-            return Task!GuildMember.failure(formatError("rest", "Cannot clear a guild member timeout because the REST transport is not configured.", "", "Provide a bot token or a transport before moderating guild members."));
+            return AsyncTask!GuildMember.failure(formatError("rest", "Cannot clear a guild member timeout because the REST transport is not configured.", "", "Provide a bot token or a transport before moderating guild members."));
 
         auto updated = _real.get.clearGuildMemberTimeout(guildId, userId, auditReason);
         if (updated.isErr)
-            return Task!GuildMember.failure(updated.error);
+            return AsyncTask!GuildMember.failure(updated.error);
 
-        return Task!GuildMember.success(updated.value);
+        return AsyncTask!GuildMember.success(updated.value);
     }
 
     /// Removes a member from the guild.
-    Task!void kick(
+    AsyncTask!void kick(
         Snowflake guildId,
         Snowflake userId,
         Nullable!string auditReason = Nullable!string.init
     )
     {
         if (_real.isNull)
-            return Task!void.failure(formatError("rest", "Cannot kick a guild member because the REST transport is not configured.", "", "Provide a bot token or a transport before moderating guild members."));
+            return AsyncTask!void.failure(formatError("rest", "Cannot kick a guild member because the REST transport is not configured.", "", "Provide a bot token or a transport before moderating guild members."));
 
         auto kicked = _real.get.kickGuildMember(guildId, userId, auditReason);
         if (kicked.isErr)
-            return Task!void.failure(kicked.error);
+            return AsyncTask!void.failure(kicked.error);
 
-        return Task!void.success();
+        return AsyncTask!void.success();
     }
 
     /// Bans a member from the guild.
-    Task!void ban(
+    AsyncTask!void ban(
         Snowflake guildId,
         Snowflake userId,
         uint deleteMessageSeconds = 0,
@@ -2159,30 +2159,30 @@ final class GuildsEndpoints
     )
     {
         if (_real.isNull)
-            return Task!void.failure(formatError("rest", "Cannot ban a guild member because the REST transport is not configured.", "", "Provide a bot token or a transport before moderating guild members."));
+            return AsyncTask!void.failure(formatError("rest", "Cannot ban a guild member because the REST transport is not configured.", "", "Provide a bot token or a transport before moderating guild members."));
 
         auto banned = _real.get.banGuildMember(guildId, userId, deleteMessageSeconds, auditReason);
         if (banned.isErr)
-            return Task!void.failure(banned.error);
+            return AsyncTask!void.failure(banned.error);
 
-        return Task!void.success();
+        return AsyncTask!void.success();
     }
 
     /// Removes a ban for a guild member.
-    Task!void unban(
+    AsyncTask!void unban(
         Snowflake guildId,
         Snowflake userId,
         Nullable!string auditReason = Nullable!string.init
     )
     {
         if (_real.isNull)
-            return Task!void.failure(formatError("rest", "Cannot unban a guild member because the REST transport is not configured.", "", "Provide a bot token or a transport before moderating guild members."));
+            return AsyncTask!void.failure(formatError("rest", "Cannot unban a guild member because the REST transport is not configured.", "", "Provide a bot token or a transport before moderating guild members."));
 
         auto unbanned = _real.get.unbanGuildMember(guildId, userId, auditReason);
         if (unbanned.isErr)
-            return Task!void.failure(unbanned.error);
+            return AsyncTask!void.failure(unbanned.error);
 
-        return Task!void.success();
+        return AsyncTask!void.success();
     }
 }
 
@@ -2197,33 +2197,33 @@ final class ChannelsEndpoints
     }
 
     /// Returns a channel descriptor by id.
-    Task!Channel get(Snowflake channelId)
+    AsyncTask!Channel get(Snowflake channelId)
     {
         if (_real.isNull)
-            return Task!Channel.failure(formatError("rest", "Cannot fetch a channel because the REST transport is not configured.", "", "Provide a bot token or a transport before reading channel metadata."));
+            return AsyncTask!Channel.failure(formatError("rest", "Cannot fetch a channel because the REST transport is not configured.", "", "Provide a bot token or a transport before reading channel metadata."));
 
         auto channel = _real.get.getChannel(channelId);
         if (channel.isErr)
-            return Task!Channel.failure(channel.error);
+            return AsyncTask!Channel.failure(channel.error);
 
-        return Task!Channel.success(channel.value);
+        return AsyncTask!Channel.success(channel.value);
     }
 
     /// Triggers the Discord typing indicator for a channel.
-    Task!void triggerTyping(Snowflake channelId)
+    AsyncTask!void triggerTyping(Snowflake channelId)
     {
         if (_real.isNull)
-            return Task!void.failure(formatError("rest", "Cannot trigger typing because the REST transport is not configured.", "", "Provide a bot token or a transport before posting typing indicators."));
+            return AsyncTask!void.failure(formatError("rest", "Cannot trigger typing because the REST transport is not configured.", "", "Provide a bot token or a transport before posting typing indicators."));
 
         auto triggered = _real.get.triggerTypingIndicator(channelId);
         if (triggered.isErr)
-            return Task!void.failure(triggered.error);
+            return AsyncTask!void.failure(triggered.error);
 
-        return Task!void.success();
+        return AsyncTask!void.success();
     }
 
     /// Short alias for `triggerTyping`.
-    Task!void typing(Snowflake channelId)
+    AsyncTask!void typing(Snowflake channelId)
     {
         return triggerTyping(channelId);
     }
@@ -2240,7 +2240,7 @@ final class ThreadsEndpoints
     }
 
     /// Creates a thread from an existing message.
-    Task!Channel createFromMessage(
+    AsyncTask!Channel createFromMessage(
         Snowflake channelId,
         Snowflake messageId,
         string name,
@@ -2249,7 +2249,7 @@ final class ThreadsEndpoints
     )
     {
         if (_real.isNull)
-            return Task!Channel.failure(formatError("rest", "Cannot create a message thread because the REST transport is not configured.", "", "Provide a bot token or a transport before creating threads."));
+            return AsyncTask!Channel.failure(formatError("rest", "Cannot create a message thread because the REST transport is not configured.", "", "Provide a bot token or a transport before creating threads."));
 
         auto created = _real.get.createThreadFromMessage(
             channelId,
@@ -2259,13 +2259,13 @@ final class ThreadsEndpoints
             rateLimitPerUser
         );
         if (created.isErr)
-            return Task!Channel.failure(created.error);
+            return AsyncTask!Channel.failure(created.error);
 
-        return Task!Channel.success(created.value);
+        return AsyncTask!Channel.success(created.value);
     }
 
     /// Creates a standalone thread in a channel.
-    Task!Channel create(
+    AsyncTask!Channel create(
         Snowflake channelId,
         string name,
         ChannelType type = ChannelType.PublicThread,
@@ -2275,7 +2275,7 @@ final class ThreadsEndpoints
     )
     {
         if (_real.isNull)
-            return Task!Channel.failure(formatError("rest", "Cannot create a thread because the REST transport is not configured.", "", "Provide a bot token or a transport before creating threads."));
+            return AsyncTask!Channel.failure(formatError("rest", "Cannot create a thread because the REST transport is not configured.", "", "Provide a bot token or a transport before creating threads."));
 
         auto created = _real.get.createThread(
             channelId,
@@ -2286,48 +2286,48 @@ final class ThreadsEndpoints
             rateLimitPerUser
         );
         if (created.isErr)
-            return Task!Channel.failure(created.error);
+            return AsyncTask!Channel.failure(created.error);
 
-        return Task!Channel.success(created.value);
+        return AsyncTask!Channel.success(created.value);
     }
 
     /// Joins a thread as the current bot user.
-    Task!void join(Snowflake threadId)
+    AsyncTask!void join(Snowflake threadId)
     {
         if (_real.isNull)
-            return Task!void.failure(formatError("rest", "Cannot join a thread because the REST transport is not configured.", "", "Provide a bot token or a transport before joining threads."));
+            return AsyncTask!void.failure(formatError("rest", "Cannot join a thread because the REST transport is not configured.", "", "Provide a bot token or a transport before joining threads."));
 
         auto joined = _real.get.joinThread(threadId);
         if (joined.isErr)
-            return Task!void.failure(joined.error);
+            return AsyncTask!void.failure(joined.error);
 
-        return Task!void.success();
+        return AsyncTask!void.success();
     }
 
     /// Leaves a thread as the current bot user.
-    Task!void leave(Snowflake threadId)
+    AsyncTask!void leave(Snowflake threadId)
     {
         if (_real.isNull)
-            return Task!void.failure(formatError("rest", "Cannot leave a thread because the REST transport is not configured.", "", "Provide a bot token or a transport before leaving threads."));
+            return AsyncTask!void.failure(formatError("rest", "Cannot leave a thread because the REST transport is not configured.", "", "Provide a bot token or a transport before leaving threads."));
 
         auto left = _real.get.leaveThread(threadId);
         if (left.isErr)
-            return Task!void.failure(left.error);
+            return AsyncTask!void.failure(left.error);
 
-        return Task!void.success();
+        return AsyncTask!void.success();
     }
 
     /// Updates archived/locked thread state.
-    Task!Channel archive(Snowflake threadId, bool archived = true, bool locked = false)
+    AsyncTask!Channel archive(Snowflake threadId, bool archived = true, bool locked = false)
     {
         if (_real.isNull)
-            return Task!Channel.failure(formatError("rest", "Cannot update a thread archive state because the REST transport is not configured.", "", "Provide a bot token or a transport before updating threads."));
+            return AsyncTask!Channel.failure(formatError("rest", "Cannot update a thread archive state because the REST transport is not configured.", "", "Provide a bot token or a transport before updating threads."));
 
         auto updated = _real.get.archiveThread(threadId, archived, locked);
         if (updated.isErr)
-            return Task!Channel.failure(updated.error);
+            return AsyncTask!Channel.failure(updated.error);
 
-        return Task!Channel.success(updated.value);
+        return AsyncTask!Channel.success(updated.value);
     }
 }
 
@@ -2344,7 +2344,7 @@ final class WebhooksEndpoints
     }
 
     /// Executes a webhook and returns the created message (`wait=true`).
-    Task!Message execute(
+    AsyncTask!Message execute(
         Snowflake webhookId,
         string webhookToken,
         MessageCreate payload,
@@ -2352,14 +2352,14 @@ final class WebhooksEndpoints
     )
     {
         if (_real.isNull)
-            return Task!Message.failure(formatError("rest", "Cannot execute a webhook because the REST transport is not configured.", "", "Provide a transport before executing webhooks."));
+            return AsyncTask!Message.failure(formatError("rest", "Cannot execute a webhook because the REST transport is not configured.", "", "Provide a transport before executing webhooks."));
 
         auto created = _real.get.executeWebhookMessage(webhookId, webhookToken, payload, threadId);
         if (created.isErr)
-            return Task!Message.failure(created.error);
+            return AsyncTask!Message.failure(created.error);
 
         _history.store(created.value);
-        return Task!Message.success(created.value);
+        return AsyncTask!Message.success(created.value);
     }
 }
 
@@ -2376,10 +2376,10 @@ final class InteractionsEndpoints
     }
 
     /// Sends the initial interaction response.
-    Task!void send(Snowflake interactionId, string interactionToken, MessageCreate payload)
+    AsyncTask!void send(Snowflake interactionId, string interactionToken, MessageCreate payload)
     {
         if (_real.isNull)
-            return Task!void.failure(formatError("rest", "Cannot respond to an interaction because the REST transport is not configured.", "", "Configure a bot token or inject a transport before replying to interactions."));
+            return AsyncTask!void.failure(formatError("rest", "Cannot respond to an interaction because the REST transport is not configured.", "", "Configure a bot token or inject a transport before replying to interactions."));
 
         auto sent = _real.get.respondToInteraction(
             interactionId,
@@ -2388,34 +2388,34 @@ final class InteractionsEndpoints
             payload
         );
         if (sent.isErr)
-            return Task!void.failure(sent.error);
+            return AsyncTask!void.failure(sent.error);
 
-        return Task!void.success();
+        return AsyncTask!void.success();
     }
 
     /// Sends autocomplete choices for an interaction.
-    Task!void autocomplete(
+    AsyncTask!void autocomplete(
         Snowflake interactionId,
         string interactionToken,
         AutocompleteChoice[] choices
     )
     {
         if (_real.isNull)
-            return Task!void.failure(formatError("rest", "Cannot respond to autocomplete because the REST transport is not configured.", "", "Configure a bot token or inject a transport before sending autocomplete results."));
+            return AsyncTask!void.failure(formatError("rest", "Cannot respond to autocomplete because the REST transport is not configured.", "", "Configure a bot token or inject a transport before sending autocomplete results."));
 
         auto sent = _real.get.respondAutocomplete(interactionId, interactionToken, choices);
         if (sent.isErr)
-            return Task!void.failure(sent.error);
+            return AsyncTask!void.failure(sent.error);
 
-        return Task!void.success();
+        return AsyncTask!void.success();
     }
 
     /// Responds to an interaction by opening a modal.
-    Task!void modal(Snowflake interactionId, string interactionToken, Modal modal)
+    AsyncTask!void modal(Snowflake interactionId, string interactionToken, Modal modal)
     {
         if (_real.isNull)
         {
-            return Task!void.failure(formatError(
+            return AsyncTask!void.failure(formatError(
                 "rest",
                 "Cannot show an interaction modal because the REST transport is not configured.",
                 "",
@@ -2425,20 +2425,20 @@ final class InteractionsEndpoints
 
         auto sent = _real.get.respondWithModal(interactionId, interactionToken, modal);
         if (sent.isErr)
-            return Task!void.failure(sent.error);
+            return AsyncTask!void.failure(sent.error);
 
-        return Task!void.success();
+        return AsyncTask!void.success();
     }
 
     /// Sends a deferred interaction acknowledgement.
-    Task!void defer(Snowflake interactionId, string interactionToken, bool ephemeral = false)
+    AsyncTask!void defer(Snowflake interactionId, string interactionToken, bool ephemeral = false)
     {
         MessageCreate payload;
         if (ephemeral)
             payload.setFlag(MessageFlags.Ephemeral);
 
         if (_real.isNull)
-            return Task!void.failure(formatError("rest", "Cannot defer an interaction because the REST transport is not configured.", "", "Configure a bot token or inject a transport before deferring interactions."));
+            return AsyncTask!void.failure(formatError("rest", "Cannot defer an interaction because the REST transport is not configured.", "", "Configure a bot token or inject a transport before deferring interactions."));
 
         auto sent = _real.get.respondToInteraction(
             interactionId,
@@ -2447,16 +2447,16 @@ final class InteractionsEndpoints
             payload
         );
         if (sent.isErr)
-            return Task!void.failure(sent.error);
+            return AsyncTask!void.failure(sent.error);
 
-        return Task!void.success();
+        return AsyncTask!void.success();
     }
 
     /// Updates the source message for a component interaction.
-    Task!void update(Snowflake interactionId, string interactionToken, MessageCreate payload)
+    AsyncTask!void update(Snowflake interactionId, string interactionToken, MessageCreate payload)
     {
         if (_real.isNull)
-            return Task!void.failure(formatError("rest", "Cannot update an interaction message because the REST transport is not configured.", "", "Configure a bot token or inject a transport before updating component interaction messages."));
+            return AsyncTask!void.failure(formatError("rest", "Cannot update an interaction message because the REST transport is not configured.", "", "Configure a bot token or inject a transport before updating component interaction messages."));
 
         auto sent = _real.get.respondToInteraction(
             interactionId,
@@ -2465,37 +2465,37 @@ final class InteractionsEndpoints
             payload
         );
         if (sent.isErr)
-            return Task!void.failure(sent.error);
+            return AsyncTask!void.failure(sent.error);
 
-        return Task!void.success();
+        return AsyncTask!void.success();
     }
 
     /// Sends a follow-up message after the initial interaction acknowledgement.
-    Task!Message followup(string interactionToken, MessageCreate payload)
+    AsyncTask!Message followup(string interactionToken, MessageCreate payload)
     {
         if (_real.isNull)
-            return Task!Message.failure(formatError("rest", "Cannot send an interaction follow-up because the REST transport is not configured.", "", "Configure a bot token or inject a transport before sending follow-up messages."));
+            return AsyncTask!Message.failure(formatError("rest", "Cannot send an interaction follow-up because the REST transport is not configured.", "", "Configure a bot token or inject a transport before sending follow-up messages."));
 
         auto created = _real.get.createFollowupMessage(interactionToken, payload);
         if (created.isErr)
-            return Task!Message.failure(created.error);
+            return AsyncTask!Message.failure(created.error);
 
         _history.store(created.value);
-        return Task!Message.success(created.value);
+        return AsyncTask!Message.success(created.value);
     }
 
     /// Edits the original interaction response.
-    Task!Message edit(string interactionToken, MessageCreate payload)
+    AsyncTask!Message edit(string interactionToken, MessageCreate payload)
     {
         if (_real.isNull)
-            return Task!Message.failure(formatError("rest", "Cannot edit the original interaction response because the REST transport is not configured.", "", "Configure a bot token or inject a transport before editing interaction responses."));
+            return AsyncTask!Message.failure(formatError("rest", "Cannot edit the original interaction response because the REST transport is not configured.", "", "Configure a bot token or inject a transport before editing interaction responses."));
 
         auto edited = _real.get.editOriginalInteractionResponse(interactionToken, payload);
         if (edited.isErr)
-            return Task!Message.failure(edited.error);
+            return AsyncTask!Message.failure(edited.error);
 
         _history.store(edited.value);
-        return Task!Message.success(edited.value);
+        return AsyncTask!Message.success(edited.value);
     }
 
 }

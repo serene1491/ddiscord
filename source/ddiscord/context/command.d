@@ -18,7 +18,7 @@ import ddiscord.models.user : User;
 import ddiscord.rest : RestClient;
 import ddiscord.services : ServiceContainer;
 import ddiscord.state : StateStore;
-import ddiscord.tasks : Task;
+import ddiscord.tasks : AsyncTask;
 import ddiscord.util.errors : formatError;
 import ddiscord.util.optional : Nullable;
 import ddiscord.util.snowflake : Snowflake;
@@ -31,49 +31,49 @@ struct CommandMessageRef
     Snowflake messageId;
 
     /// Adds a reaction as the current bot user.
-    Task!void react(string emoji)
+    AsyncTask!void react(string emoji)
     {
         return rest.reactions.add(channelId, messageId, emoji);
     }
 
     /// Removes the current bot user's reaction.
-    Task!void unreact(string emoji)
+    AsyncTask!void unreact(string emoji)
     {
         return rest.reactions.removeSelf(channelId, messageId, emoji);
     }
 
     /// Pins this message.
-    Task!void pin(Nullable!string auditReason = Nullable!string.init)
+    AsyncTask!void pin(Nullable!string auditReason = Nullable!string.init)
     {
         return rest.messages.pin(channelId, messageId, auditReason);
     }
 
     /// Unpins this message.
-    Task!void unpin(Nullable!string auditReason = Nullable!string.init)
+    AsyncTask!void unpin(Nullable!string auditReason = Nullable!string.init)
     {
         return rest.messages.unpin(channelId, messageId, auditReason);
     }
 
     /// Crossposts this message in announcement channels.
-    Task!Message crosspost()
+    AsyncTask!Message crosspost()
     {
         return rest.messages.crosspost(channelId, messageId);
     }
 
     /// Edits this message.
-    Task!Message edit(MessageCreate payload)
+    AsyncTask!Message edit(MessageCreate payload)
     {
         return rest.messages.edit(channelId, messageId, payload);
     }
 
     /// Edits this message with plain-text content.
-    Task!Message edit(string content)
+    AsyncTask!Message edit(string content)
     {
         return edit(MessageCreate(content));
     }
 
     /// Deletes this message.
-    Task!void deleteMessage()
+    AsyncTask!void deleteMessage()
     {
         return rest.messages.delete(channelId, messageId);
     }
@@ -175,18 +175,18 @@ struct CommandContext
     }
 
     /// Sends a message in the current command context.
-    Task!void send(string content, bool ephemeral = false)
+    AsyncTask!void send(string content, bool ephemeral = false)
     {
         auto payload = MessageCreate(content);
         return send(payload, ephemeral);
     }
 
     /// Sends a payload in the current command context.
-    Task!void send(MessageCreate payload, bool ephemeral = false)
+    AsyncTask!void send(MessageCreate payload, bool ephemeral = false)
     {
         auto ephemeralError = validateEphemeralUsage(ephemeral, "send");
         if (!ephemeralError.isNull)
-            return Task!void.failure(ephemeralError.get);
+            return AsyncTask!void.failure(ephemeralError.get);
 
         if (ephemeral)
             payload.setFlag(MessageFlags.Ephemeral);
@@ -197,17 +197,17 @@ struct CommandContext
             {
                 auto created = rest.interactions.followup(interaction.get.token, payload).awaitResult();
                 if (created.isErr)
-                    return Task!void.failure(created.error);
+                    return AsyncTask!void.failure(created.error);
 
-                return Task!void.success();
+                return AsyncTask!void.success();
             }
 
             auto sent = rest.interactions.send(interaction.get.id, interaction.get.token, payload).awaitResult();
             if (sent.isErr)
-                return Task!void.failure(sent.error);
+                return AsyncTask!void.failure(sent.error);
 
             interactionResponded = true;
-            return Task!void.success();
+            return AsyncTask!void.success();
         }
 
         auto channelId = currentChannel.id;
@@ -216,13 +216,13 @@ struct CommandContext
 
         auto created = rest.messages.create(channelId, payload).awaitResult();
         if (created.isErr)
-            return Task!void.failure(created.error);
+            return AsyncTask!void.failure(created.error);
 
-        return Task!void.success();
+        return AsyncTask!void.success();
     }
 
     /// Sends a message with one binary attachment in the current command context.
-    Task!void sendFile(
+    AsyncTask!void sendFile(
         string filename,
         const(ubyte)[] data,
         string content = "",
@@ -238,18 +238,18 @@ struct CommandContext
     }
 
     /// Replies to the source message using Discord's native reply payload.
-    Task!void reply(string content, bool mentionAuthor = false, bool ephemeral = false)
+    AsyncTask!void reply(string content, bool mentionAuthor = false, bool ephemeral = false)
     {
         auto payload = MessageCreate(content);
         return reply(payload, mentionAuthor, ephemeral);
     }
 
     /// Replies to the source message using Discord's native reply payload.
-    Task!void reply(MessageCreate payload, bool mentionAuthor = false, bool ephemeral = false)
+    AsyncTask!void reply(MessageCreate payload, bool mentionAuthor = false, bool ephemeral = false)
     {
         auto ephemeralError = validateEphemeralUsage(ephemeral, "reply");
         if (!ephemeralError.isNull)
-            return Task!void.failure(ephemeralError.get);
+            return AsyncTask!void.failure(ephemeralError.get);
 
         if (ephemeral)
             payload.setFlag(MessageFlags.Ephemeral);
@@ -261,35 +261,35 @@ struct CommandContext
     }
 
     /// Sends a deferred acknowledgement for interaction-based commands.
-    Task!void defer(bool ephemeral = false)
+    AsyncTask!void defer(bool ephemeral = false)
     {
         auto ephemeralError = validateEphemeralUsage(ephemeral, "defer");
         if (!ephemeralError.isNull)
-            return Task!void.failure(ephemeralError.get);
+            return AsyncTask!void.failure(ephemeralError.get);
 
         if (hasInteractionToken)
         {
             auto deferred = rest.interactions.defer(interaction.get.id, interaction.get.token, ephemeral).awaitResult();
             if (deferred.isErr)
-                return Task!void.failure(deferred.error);
+                return AsyncTask!void.failure(deferred.error);
 
             interactionAcknowledged = true;
-            return Task!void.success();
+            return AsyncTask!void.success();
         }
 
-        return Task!void.success();
+        return AsyncTask!void.success();
     }
 
     /// Triggers the typing indicator for message-based contexts.
-    Task!void typing()
+    AsyncTask!void typing()
     {
         if (hasInteractionToken)
-            return Task!void.success();
+            return AsyncTask!void.success();
 
         auto channelId = currentChannelId();
         if (channelId.value == 0)
         {
-            return Task!void.failure(formatError(
+            return AsyncTask!void.failure(formatError(
                 "context",
                 "The typing indicator requires a channel id.",
                 "",
@@ -299,22 +299,22 @@ struct CommandContext
 
         auto sent = rest.channels.typing(channelId).awaitResult();
         if (sent.isErr)
-            return Task!void.failure(sent.error);
+            return AsyncTask!void.failure(sent.error);
 
-        return Task!void.success();
+        return AsyncTask!void.success();
     }
 
     /// Shows a "thinking" state appropriate for the current command source.
-    Task!void think(bool ephemeral = false)
+    AsyncTask!void think(bool ephemeral = false)
     {
         auto ephemeralError = validateEphemeralUsage(ephemeral, "think");
         if (!ephemeralError.isNull)
-            return Task!void.failure(ephemeralError.get);
+            return AsyncTask!void.failure(ephemeralError.get);
 
         if (hasInteractionToken)
         {
             if (interactionAcknowledged || interactionResponded)
-                return Task!void.success();
+                return AsyncTask!void.success();
 
             return defer(ephemeral);
         }
@@ -323,12 +323,12 @@ struct CommandContext
     }
 
     /// Reacts to the source message in this context.
-    Task!void react(string emoji)
+    AsyncTask!void react(string emoji)
     {
         auto reference = messageRef;
         if (reference.isNull)
         {
-            return Task!void.failure(formatError(
+            return AsyncTask!void.failure(formatError(
                 "context",
                 "This command context has no source message for reaction operations.",
                 "",
@@ -338,17 +338,17 @@ struct CommandContext
 
         auto added = reference.get.react(emoji).awaitResult();
         if (added.isErr)
-            return Task!void.failure(added.error);
-        return Task!void.success();
+            return AsyncTask!void.failure(added.error);
+        return AsyncTask!void.success();
     }
 
     /// Removes the bot reaction from the source message.
-    Task!void unreact(string emoji)
+    AsyncTask!void unreact(string emoji)
     {
         auto reference = messageRef;
         if (reference.isNull)
         {
-            return Task!void.failure(formatError(
+            return AsyncTask!void.failure(formatError(
                 "context",
                 "This command context has no source message for reaction operations.",
                 "",
@@ -358,17 +358,17 @@ struct CommandContext
 
         auto removed = reference.get.unreact(emoji).awaitResult();
         if (removed.isErr)
-            return Task!void.failure(removed.error);
-        return Task!void.success();
+            return AsyncTask!void.failure(removed.error);
+        return AsyncTask!void.success();
     }
 
     /// Pins the source message.
-    Task!void pin(Nullable!string auditReason = Nullable!string.init)
+    AsyncTask!void pin(Nullable!string auditReason = Nullable!string.init)
     {
         auto reference = messageRef;
         if (reference.isNull)
         {
-            return Task!void.failure(formatError(
+            return AsyncTask!void.failure(formatError(
                 "context",
                 "This command context has no source message for pin operations.",
                 "",
@@ -378,17 +378,17 @@ struct CommandContext
 
         auto pinned = reference.get.pin(auditReason).awaitResult();
         if (pinned.isErr)
-            return Task!void.failure(pinned.error);
-        return Task!void.success();
+            return AsyncTask!void.failure(pinned.error);
+        return AsyncTask!void.success();
     }
 
     /// Unpins the source message.
-    Task!void unpin(Nullable!string auditReason = Nullable!string.init)
+    AsyncTask!void unpin(Nullable!string auditReason = Nullable!string.init)
     {
         auto reference = messageRef;
         if (reference.isNull)
         {
-            return Task!void.failure(formatError(
+            return AsyncTask!void.failure(formatError(
                 "context",
                 "This command context has no source message for pin operations.",
                 "",
@@ -398,17 +398,17 @@ struct CommandContext
 
         auto unpinned = reference.get.unpin(auditReason).awaitResult();
         if (unpinned.isErr)
-            return Task!void.failure(unpinned.error);
-        return Task!void.success();
+            return AsyncTask!void.failure(unpinned.error);
+        return AsyncTask!void.success();
     }
 
     /// Crossposts the source message and returns Discord's created message payload.
-    Task!Message crosspost()
+    AsyncTask!Message crosspost()
     {
         auto reference = messageRef;
         if (reference.isNull)
         {
-            return Task!Message.failure(formatError(
+            return AsyncTask!Message.failure(formatError(
                 "context",
                 "This command context has no source message for crosspost operations.",
                 "",
@@ -420,12 +420,12 @@ struct CommandContext
     }
 
     /// Edits the source message with the provided payload.
-    Task!Message editMessage(MessageCreate payload)
+    AsyncTask!Message editMessage(MessageCreate payload)
     {
         auto reference = messageRef;
         if (reference.isNull)
         {
-            return Task!Message.failure(formatError(
+            return AsyncTask!Message.failure(formatError(
                 "context",
                 "This command context has no source message for edit operations.",
                 "",
@@ -437,18 +437,18 @@ struct CommandContext
     }
 
     /// Edits the source message with plain-text content.
-    Task!Message editMessage(string content)
+    AsyncTask!Message editMessage(string content)
     {
         return editMessage(MessageCreate(content));
     }
 
     /// Deletes the source message.
-    Task!void deleteMessage()
+    AsyncTask!void deleteMessage()
     {
         auto reference = messageRef;
         if (reference.isNull)
         {
-            return Task!void.failure(formatError(
+            return AsyncTask!void.failure(formatError(
                 "context",
                 "This command context has no source message for delete operations.",
                 "",
@@ -458,16 +458,16 @@ struct CommandContext
 
         auto deleted = reference.get.deleteMessage().awaitResult();
         if (deleted.isErr)
-            return Task!void.failure(deleted.error);
-        return Task!void.success();
+            return AsyncTask!void.failure(deleted.error);
+        return AsyncTask!void.success();
     }
 
     /// Sends autocomplete choices for the current interaction.
-    Task!void autocomplete(AutocompleteChoice[] choices)
+    AsyncTask!void autocomplete(AutocompleteChoice[] choices)
     {
         if (interaction.isNull || interaction.get.token.length == 0)
         {
-            return Task!void.failure(formatError(
+            return AsyncTask!void.failure(formatError(
                 "context",
                 "Autocomplete responses require an active interaction token.",
                 "",
@@ -477,18 +477,18 @@ struct CommandContext
 
         auto sent = rest.interactions.autocomplete(interaction.get.id, interaction.get.token, choices).awaitResult();
         if (sent.isErr)
-            return Task!void.failure(sent.error);
+            return AsyncTask!void.failure(sent.error);
 
         interactionResponded = true;
-        return Task!void.success();
+        return AsyncTask!void.success();
     }
 
     /// Opens a modal in response to the current interaction.
-    Task!void showModal(Modal modal)
+    AsyncTask!void showModal(Modal modal)
     {
         if (interaction.isNull || interaction.get.token.length == 0)
         {
-            return Task!void.failure(formatError(
+            return AsyncTask!void.failure(formatError(
                 "context",
                 "Opening a modal requires an active interaction token.",
                 "",
@@ -498,14 +498,14 @@ struct CommandContext
 
         auto sent = rest.interactions.modal(interaction.get.id, interaction.get.token, modal).awaitResult();
         if (sent.isErr)
-            return Task!void.failure(sent.error);
+            return AsyncTask!void.failure(sent.error);
 
         interactionResponded = true;
-        return Task!void.success();
+        return AsyncTask!void.success();
     }
 
     /// Sends a follow-up message for a deferred or already-acknowledged interaction.
-    Task!void followup(string content, bool ephemeral = false)
+    AsyncTask!void followup(string content, bool ephemeral = false)
     {
         auto payload = MessageCreate(content);
         if (ephemeral)
@@ -514,11 +514,11 @@ struct CommandContext
     }
 
     /// Sends a follow-up payload for a deferred or already-acknowledged interaction.
-    Task!void followup(MessageCreate payload)
+    AsyncTask!void followup(MessageCreate payload)
     {
         if (interaction.isNull || interaction.get.token.length == 0)
         {
-            return Task!void.failure(formatError(
+            return AsyncTask!void.failure(formatError(
                 "context",
                 "Interaction follow-up messages require an active interaction token.",
                 "",
@@ -528,14 +528,14 @@ struct CommandContext
 
         auto created = rest.interactions.followup(interaction.get.token, payload).awaitResult();
         if (created.isErr)
-            return Task!void.failure(created.error);
+            return AsyncTask!void.failure(created.error);
 
         interactionResponded = true;
-        return Task!void.success();
+        return AsyncTask!void.success();
     }
 
     /// Sends an interaction follow-up with one binary attachment.
-    Task!void followupFile(
+    AsyncTask!void followupFile(
         string filename,
         const(ubyte)[] data,
         string content = "",
@@ -553,7 +553,7 @@ struct CommandContext
     }
 
     /// Edits the original interaction response.
-    Task!void edit(string content, bool ephemeral = false)
+    AsyncTask!void edit(string content, bool ephemeral = false)
     {
         auto payload = MessageCreate(content);
         if (ephemeral)
@@ -562,11 +562,11 @@ struct CommandContext
     }
 
     /// Edits the original interaction response payload.
-    Task!void edit(MessageCreate payload)
+    AsyncTask!void edit(MessageCreate payload)
     {
         if (interaction.isNull || interaction.get.token.length == 0)
         {
-            return Task!void.failure(formatError(
+            return AsyncTask!void.failure(formatError(
                 "context",
                 "Editing the original interaction response requires an active interaction token.",
                 "",
@@ -576,15 +576,15 @@ struct CommandContext
 
         auto edited = rest.interactions.edit(interaction.get.token, payload).awaitResult();
         if (edited.isErr)
-            return Task!void.failure(edited.error);
+            return AsyncTask!void.failure(edited.error);
 
         interactionResponded = true;
         interactionAcknowledged = true;
-        return Task!void.success();
+        return AsyncTask!void.success();
     }
 
     /// Edits the original interaction response and adds one binary attachment.
-    Task!void editFile(
+    AsyncTask!void editFile(
         string filename,
         const(ubyte)[] data,
         string content = "",
@@ -610,33 +610,33 @@ struct CommandContext
     }
 
     /// Returns this context as a prefix command context.
-    PrefixCommandContext asPrefix()
+    PrefixContext asPrefix()
     {
-        PrefixCommandContext ctx;
+        PrefixContext ctx;
         ctx.command = this;
         return ctx;
     }
 
     /// Returns this context as a slash command context.
-    SlashCommandContext asSlash()
+    SlashContext asSlash()
     {
-        SlashCommandContext ctx;
+        SlashContext ctx;
         ctx.command = this;
         return ctx;
     }
 
     /// Returns this context as a context-menu command context.
-    ContextMenuCommandContext asContextMenu()
+    ContextMenuContext asContextMenu()
     {
-        ContextMenuCommandContext ctx;
+        ContextMenuContext ctx;
         ctx.command = this;
         return ctx;
     }
 
     /// Returns this context as a hybrid command context.
-    HybridCommandContext asHybrid()
+    HybridContext asHybrid()
     {
-        HybridCommandContext ctx;
+        HybridContext ctx;
         ctx.command = this;
         return ctx;
     }
@@ -697,7 +697,7 @@ struct CommandContext
 }
 
 /// Prefix/text command context.
-struct PrefixCommandContext
+struct PrefixContext
 {
     CommandContext command;
     alias command this;
@@ -713,26 +713,26 @@ struct PrefixCommandContext
     }
 
     /// Prefix-friendly alias for `send`.
-    Task!void respond(string content)
+    AsyncTask!void respond(string content)
     {
         return command.send(content);
     }
 
     /// Prefix-friendly alias for `send`.
-    Task!void respond(MessageCreate payload)
+    AsyncTask!void respond(MessageCreate payload)
     {
         return command.send(payload);
     }
 
     /// Reply directly to the source message, mentioning by default.
-    Task!void replyToSource(string content, bool mentionAuthor = true)
+    AsyncTask!void replyToSource(string content, bool mentionAuthor = true)
     {
         return command.reply(content, mentionAuthor);
     }
 }
 
 /// Slash command context.
-struct SlashCommandContext
+struct SlashContext
 {
     CommandContext command;
     alias command this;
@@ -748,38 +748,38 @@ struct SlashCommandContext
     }
 
     /// Slash-friendly alias for interaction responses.
-    Task!void respond(string content, bool ephemeral = false)
+    AsyncTask!void respond(string content, bool ephemeral = false)
     {
         return command.send(content, ephemeral);
     }
 
     /// Slash-friendly alias for interaction responses.
-    Task!void respond(MessageCreate payload, bool ephemeral = false)
+    AsyncTask!void respond(MessageCreate payload, bool ephemeral = false)
     {
         return command.send(payload, ephemeral);
     }
 
     /// Sends an ephemeral slash response.
-    Task!void respondEphemeral(string content)
+    AsyncTask!void respondEphemeral(string content)
     {
         return command.send(content, true);
     }
 
     /// Defers the interaction as ephemeral.
-    Task!void deferEphemeral()
+    AsyncTask!void deferEphemeral()
     {
         return command.defer(true);
     }
 
     /// Marks the interaction as "thinking" in ephemeral mode.
-    Task!void thinkEphemeral()
+    AsyncTask!void thinkEphemeral()
     {
         return command.think(true);
     }
 }
 
 /// Context-menu command context.
-struct ContextMenuCommandContext
+struct ContextMenuContext
 {
     CommandContext command;
     alias command this;
@@ -796,7 +796,7 @@ struct ContextMenuCommandContext
 }
 
 /// Unified hybrid command context spanning prefix and slash flows.
-struct HybridCommandContext
+struct HybridContext
 {
     CommandContext command;
     alias command this;
@@ -811,22 +811,22 @@ struct HybridCommandContext
         return command.source == CommandSource.Slash;
     }
 
-    Nullable!PrefixCommandContext prefix() @property
+    Nullable!PrefixContext prefix() @property
     {
         if (!fromPrefix)
-            return Nullable!PrefixCommandContext.init;
-        return Nullable!PrefixCommandContext.of(command.asPrefix());
+            return Nullable!PrefixContext.init;
+        return Nullable!PrefixContext.of(command.asPrefix());
     }
 
-    Nullable!SlashCommandContext slash() @property
+    Nullable!SlashContext slash() @property
     {
         if (!fromSlash)
-            return Nullable!SlashCommandContext.init;
-        return Nullable!SlashCommandContext.of(command.asSlash());
+            return Nullable!SlashContext.init;
+        return Nullable!SlashContext.of(command.asSlash());
     }
 
     /// Unified response helper across prefix and slash routes.
-    Task!void respond(string content, bool ephemeralOnSlash = false)
+    AsyncTask!void respond(string content, bool ephemeralOnSlash = false)
     {
         if (fromSlash)
             return command.send(content, ephemeralOnSlash);
@@ -834,25 +834,13 @@ struct HybridCommandContext
     }
 
     /// Unified payload response helper across prefix and slash routes.
-    Task!void respond(MessageCreate payload, bool ephemeralOnSlash = false)
+    AsyncTask!void respond(MessageCreate payload, bool ephemeralOnSlash = false)
     {
         if (fromSlash)
             return command.send(payload, ephemeralOnSlash);
         return command.send(payload);
     }
 }
-
-/// Short alias for prefix-only command handlers.
-alias PrefixContext = PrefixCommandContext;
-
-/// Short alias for slash-only command handlers.
-alias SlashContext = SlashCommandContext;
-
-/// Short alias for context-menu command handlers.
-alias ContextMenuContext = ContextMenuCommandContext;
-
-/// Short alias for hybrid prefix/slash command handlers.
-alias HybridContext = HybridCommandContext;
 
 unittest
 {

@@ -5,7 +5,7 @@ This console focuses on the built-in task scheduler.
 It demonstrates:
 
 - scheduling one-shot reminders from commands
-- recurring scheduler heartbeats
+- recurring scheduler heartbeats through `@Task`
 - lightweight state tracking for task usage
 
 ## Run

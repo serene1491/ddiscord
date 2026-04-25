@@ -26,7 +26,7 @@ struct GreetingCommands
     @Inject GreetingService greeter;
 
     @HybridCommand("hello-service", "Greet through an injected service")
-    void hello(CommandContext ctx, string target = "friend")
+    void hello(HybridContext ctx, string target = "friend")
     {
         auto message = greeter.greeting(ctx.user, target);
         ctx.send(message, ctx.source == CommandSource.Slash).await();
