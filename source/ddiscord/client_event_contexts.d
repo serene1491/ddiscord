@@ -10,20 +10,22 @@ import ddiscord.context.command : CommandContext;
 import ddiscord.context.event : AutocompleteInteractionEventContext, ChannelCreateEventContext,
     ChannelDeleteEventContext, ChannelPinsUpdateEventContext, ChannelUpdateEventContext,
     CommandExecutedEventContext, CommandFailedEventContext, EventContext, GuildCreateEventContext,
-    GuildDeleteEventContext, GuildMemberAddEventContext, GuildMemberRemoveEventContext,
+    GatewayDispatchEventContext, GuildDeleteEventContext, GuildMemberAddEventContext, GuildMemberRemoveEventContext,
+    GuildUpdateEventContext,
     GuildBanAddEventContext, GuildBanRemoveEventContext, GuildRoleCreateEventContext,
     GuildRoleDeleteEventContext, GuildRoleUpdateEventContext, InteractionCreateEventContext,
     InviteCreateEventContext, InviteDeleteEventContext, MessageComponentEventContext,
-    MessageCreateEventContext, MessageDeleteEventContext, MessageReactionAddEventContext,
+    MessageCreateEventContext, MessageDeleteBulkEventContext, MessageDeleteEventContext, MessageReactionAddEventContext,
     MessageReactionRemoveAllEventContext, MessageReactionRemoveEmojiEventContext,
     MessageReactionRemoveEventContext, MessageUpdateEventContext, ModalSubmitEventContext,
     PresenceUpdateEventContext, ReadyEventContext, ResumedEventContext, ThreadCreateEventContext,
-    ThreadDeleteEventContext, ThreadUpdateEventContext, TypingStartEventContext,
-    WebhooksUpdateEventContext;
+    ThreadDeleteEventContext, ThreadUpdateEventContext, TypingStartEventContext, UserUpdateEventContext,
+    VoiceServerUpdateEventContext, VoiceStateUpdateEventContext, WebhooksUpdateEventContext;
 import ddiscord.gateway.client : GatewayChannelPinsUpdateInfo, GatewayGuildBanInfo,
-    GatewayGuildRoleDeleteInfo, GatewayGuildRoleInfo, GatewayInviteInfo, GatewayMessageDeleteInfo,
+    GatewayGuildRoleDeleteInfo, GatewayGuildRoleInfo, GatewayInviteInfo, GatewayMessageDeleteBulkInfo, GatewayMessageDeleteInfo,
     GatewayMessageReactionInfo, GatewayMessageReactionRemoveAllInfo, GatewayThreadDeleteInfo,
-    GatewayTypingStartInfo, GatewayWebhooksUpdateInfo;
+    GatewayTypingStartInfo, GatewayVoiceServerUpdateInfo, GatewayVoiceStateUpdateInfo,
+    GatewayWebhooksUpdateInfo;
 import ddiscord.models.channel : Channel;
 import ddiscord.models.guild : Guild, UnavailableGuild;
 import ddiscord.models.interaction : Interaction;
@@ -33,6 +35,7 @@ import ddiscord.models.presence : Activity, StatusType;
 import ddiscord.models.user : User;
 import ddiscord.util.optional : Nullable;
 import ddiscord.util.snowflake : Snowflake;
+import std.json : JSONValue;
 
 mixin template ClientEventContextBuilders()
 {
@@ -88,6 +91,14 @@ mixin template ClientEventContextBuilders()
     {
         GuildDeleteEventContext ctx;
         ctx.event = buildEventContext(Nullable!User.of(_selfUser), lookupGuild(Nullable!Snowflake.of(guild.id)));
+        ctx.guildData = guild;
+        return ctx;
+    }
+
+    private GuildUpdateEventContext buildGuildUpdateEventContext(Guild guild)
+    {
+        GuildUpdateEventContext ctx;
+        ctx.event = buildEventContext(Nullable!User.of(_selfUser), Nullable!Guild.of(guild));
         ctx.guildData = guild;
         return ctx;
     }
@@ -224,6 +235,23 @@ mixin template ClientEventContextBuilders()
             cachedMessage
         );
         ctx.messageId = info.messageId;
+        ctx.channelId = info.channelId;
+        ctx.guildId = info.guildId;
+        return ctx;
+    }
+
+    private MessageDeleteBulkEventContext buildMessageDeleteBulkEventContext(
+        GatewayMessageDeleteBulkInfo info
+    )
+    {
+        MessageDeleteBulkEventContext ctx;
+        ctx.event = buildEventContext(
+            Nullable!User.of(_selfUser),
+            lookupGuild(info.guildId),
+            Nullable!GuildMember.init,
+            lookupChannelFromOptional(info.channelId)
+        );
+        ctx.messageIds = info.messageIds.dup;
         ctx.channelId = info.channelId;
         ctx.guildId = info.guildId;
         return ctx;
@@ -377,6 +405,72 @@ mixin template ClientEventContextBuilders()
             Nullable!Snowflake.init,
             Nullable!GuildMember.init
         );
+    }
+
+    private UserUpdateEventContext buildUserUpdateEventContext(User user)
+    {
+        UserUpdateEventContext ctx;
+        ctx.event = buildEventContext(Nullable!User.of(user));
+        ctx.userData = user;
+        return ctx;
+    }
+
+    private VoiceStateUpdateEventContext buildVoiceStateUpdateEventContext(
+        GatewayVoiceStateUpdateInfo info
+    )
+    {
+        VoiceStateUpdateEventContext ctx;
+        ctx.event = buildEventContext(
+            cache.user(info.userId),
+            lookupGuild(info.guildId),
+            Nullable!GuildMember.init,
+            lookupChannelFromOptional(info.channelId)
+        );
+        ctx.guildId = info.guildId;
+        ctx.channelId = info.channelId;
+        ctx.userId = info.userId;
+        ctx.sessionId = info.sessionId;
+        ctx.deaf = info.deaf;
+        ctx.mute = info.mute;
+        ctx.selfDeaf = info.selfDeaf;
+        ctx.selfMute = info.selfMute;
+        ctx.selfStream = info.selfStream;
+        ctx.selfVideo = info.selfVideo;
+        ctx.suppress = info.suppress;
+        return ctx;
+    }
+
+    private VoiceServerUpdateEventContext buildVoiceServerUpdateEventContext(
+        GatewayVoiceServerUpdateInfo info
+    )
+    {
+        VoiceServerUpdateEventContext ctx;
+        ctx.event = buildEventContext(Nullable!User.of(_selfUser), lookupGuild(info.guildId));
+        ctx.guildId = info.guildId;
+        ctx.token = info.token;
+        ctx.endpoint = info.endpoint;
+        return ctx;
+    }
+
+    private GatewayDispatchEventContext buildGatewayDispatchEventContext(
+        string eventName,
+        JSONValue payload,
+        Nullable!long sequence
+    )
+    {
+        GatewayDispatchEventContext ctx;
+        ctx.event = buildEventContext(Nullable!User.of(_selfUser));
+        ctx.eventName = eventName;
+        ctx.payload = payload;
+        ctx.sequence = sequence;
+        return ctx;
+    }
+
+    private Nullable!Channel lookupChannelFromOptional(Nullable!Snowflake channelId)
+    {
+        if (channelId.isNull)
+            return Nullable!Channel.init;
+        return lookupChannel(channelId.get);
     }
 
     private PresenceUpdateEventContext buildGatewayPresenceUpdateEventContext(

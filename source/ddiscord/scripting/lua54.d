@@ -11,12 +11,14 @@ pragma(lib, "lua5.4");
 extern (C):
 
 struct lua_State;
+struct lua_Debug;
 
 alias lua_Integer = long;
 alias lua_Number = double;
 alias lua_CFunction = int function(lua_State* L);
 alias lua_KContext = long;
 alias lua_KFunction = int function(lua_State* L, int status, lua_KContext ctx);
+alias lua_Hook = void function(lua_State* L, lua_Debug* ar);
 
 enum LuaOk = 0;
 enum LuaYield = 1;
@@ -32,6 +34,9 @@ enum LuaTypeFunction = 6;
 enum LuaRegistryIndex = -1001000;
 enum LuaRefNil = -1;
 enum LuaNoRef = -2;
+enum LuaMaskCount = 1 << 3;
+enum LuaGcCount = 3;
+enum LuaGcCountB = 4;
 
 lua_State* luaL_newstate();
 void luaL_openlibs(lua_State* L);
@@ -44,6 +49,8 @@ int lua_error(lua_State* L);
 int lua_resume(lua_State* L, lua_State* from, int nargs, int* nresults);
 int lua_status(lua_State* L);
 int lua_yieldk(lua_State* L, int nresults, lua_KContext ctx, lua_KFunction k);
+int lua_gc(lua_State* L, int what, int data);
+int lua_sethook(lua_State* L, lua_Hook func, int mask, int count);
 lua_State* lua_newthread(lua_State* L);
 void lua_xmove(lua_State* from, lua_State* to, int n);
 

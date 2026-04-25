@@ -6,6 +6,7 @@
  */
 module ddiscord.scripting;
 
+import core.time : Duration, MonoTime, dur;
 import ddiscord.scripting.lua54;
 import ddiscord.util.errors : DdiscordException, formatError;
 import ddiscord.util.result : Result;
@@ -87,6 +88,18 @@ struct ScriptError
 {
     string message;
     size_t line;
+}
+
+private enum DefaultLuaInstructionCheckInterval = 25_000;
+private enum DefaultLuaMemoryLimitBytes = 32 * 1024 * 1024;
+private enum DefaultLuaExecutionTimeout = dur!"seconds"(2);
+
+/// Runtime execution limits for the Lua sandbox.
+struct LuaRuntimeLimits
+{
+    Duration maxExecutionTime = DefaultLuaExecutionTimeout;
+    size_t maxMemoryBytes = DefaultLuaMemoryLimitBytes;
+    uint instructionCheckInterval = DefaultLuaInstructionCheckInterval;
 }
 
 /// Metadata for a single exported Lua symbol.
@@ -294,22 +307,33 @@ private final class LuaVm
 {
     private lua_State* _state;
     private LuaSandboxProfile _profile;
+    private LuaRuntimeLimits _limits;
     private LuaCallableThunk[] _thunks;
     private LuaCapability[string] _restrictedExports;
     private lua_State* _thread;
     private int _threadRef = LuaNoRef;
     private bool _suspended;
     private string _suspendedChunkName;
+    private MonoTime _executionDeadline;
 
     this(
         LuaSandboxProfile profile,
         LuaCallableDescriptor[] callables,
         LuaValueDescriptor[] values = null,
         LuaApiDescriptor apiDescriptor = LuaApiDescriptor.init,
-        LuaExportDescriptor[] restrictedExports = null
+        LuaExportDescriptor[] restrictedExports = null,
+        LuaRuntimeLimits limits = LuaRuntimeLimits.init
     )
     {
         _profile = profile;
+        _limits = limits;
+        if (_limits.maxExecutionTime <= Duration.zero)
+            _limits.maxExecutionTime = DefaultLuaExecutionTimeout;
+        if (_limits.maxMemoryBytes == 0)
+            _limits.maxMemoryBytes = DefaultLuaMemoryLimitBytes;
+        if (_limits.instructionCheckInterval == 0)
+            _limits.instructionCheckInterval = DefaultLuaInstructionCheckInterval;
+
         _state = luaL_newstate();
         if (_state is null)
         {
@@ -602,13 +626,37 @@ private final class LuaVm
 
     private Result!(LuaStepResult, ScriptError) resumeThread(int nargs, string chunkName)
     {
+        auto thread = _thread;
+        if (thread is null)
+        {
+            return Result!(LuaStepResult, ScriptError).err(ScriptError(
+                "Lua runtime does not have an active coroutine.",
+                0
+            ));
+        }
+
+        _executionDeadline = MonoTime.currTime + _limits.maxExecutionTime;
+        auto previousHookVm = _activeLuaVmForHook;
+        _activeLuaVmForHook = this;
+        auto hookInterval = _limits.instructionCheckInterval > cast(uint) int.max
+            ? int.max
+            : cast(int) _limits.instructionCheckInterval;
+        if (hookInterval <= 0)
+            hookInterval = cast(int) DefaultLuaInstructionCheckInterval;
+        lua_sethook(thread, &enforceLuaRuntimeLimits, LuaMaskCount, hookInterval);
+        scope(exit)
+        {
+            lua_sethook(thread, cast(lua_Hook) null, 0, 0);
+            _activeLuaVmForHook = previousHookVm;
+        }
+
         int nresults = 0;
-        auto status = lua_resume(_thread, _state, nargs, &nresults);
+        auto status = lua_resume(thread, _state, nargs, &nresults);
 
         if (status == LuaYield)
         {
-            auto value = firstResultFromThread(_thread, nresults);
-            lua_settop(_thread, 0);
+            auto value = firstResultFromThread(thread, nresults);
+            lua_settop(thread, 0);
             if (value.isErr)
             {
                 releaseThread();
@@ -626,8 +674,8 @@ private final class LuaVm
 
         if (status == LuaOk)
         {
-            auto value = firstResultFromThread(_thread, nresults);
-            lua_settop(_thread, 0);
+            auto value = firstResultFromThread(thread, nresults);
+            lua_settop(thread, 0);
             if (value.isErr)
             {
                 releaseThread();
@@ -641,8 +689,8 @@ private final class LuaVm
             return Result!(LuaStepResult, ScriptError).ok(step);
         }
 
-        auto message = stackString(_thread, -1);
-        lua_settop(_thread, 0);
+        auto message = stackString(thread, -1);
+        lua_settop(thread, 0);
         releaseThread();
         return Result!(LuaStepResult, ScriptError).err(scriptError(enrichLuaError(message), chunkName));
     }
@@ -653,6 +701,30 @@ private final class LuaVm
             return Result!(LuaValue, ScriptError).ok(LuaValue.nil());
 
         return valueFromStack(thread, -nresults);
+    }
+
+    private string runtimeLimitViolation(lua_State* state)
+    {
+        if (MonoTime.currTime > _executionDeadline)
+        {
+            return "Lua execution exceeded time limit (`" ~
+                _limits.maxExecutionTime.total!"msecs".to!string ~ "ms`).";
+        }
+
+        auto kilobytes = lua_gc(state, LuaGcCount, 0);
+        auto bytesRemainder = lua_gc(state, LuaGcCountB, 0);
+        if (kilobytes >= 0 && bytesRemainder >= 0)
+        {
+            auto totalBytes = cast(size_t) kilobytes * 1024 + cast(size_t) bytesRemainder;
+            if (totalBytes > _limits.maxMemoryBytes)
+            {
+                return "Lua execution exceeded memory limit (`" ~
+                    _limits.maxMemoryBytes.to!string ~ " bytes`, currently `" ~
+                    totalBytes.to!string ~ "`).";
+            }
+        }
+
+        return "";
     }
 
     private void releaseThread()
@@ -745,6 +817,7 @@ struct LuaRuntime
 {
     LuaSandboxProfile profile;
     LuaCapability[] permissions;
+    LuaRuntimeLimits limits;
     LuaExportDescriptor[] exports;
     LuaExportDescriptor[] restrictedExports;
     private LuaVm _vm;
@@ -1117,6 +1190,23 @@ struct LuaRuntime
     }
 }
 
+private LuaVm _activeLuaVmForHook;
+
+private extern (C) void enforceLuaRuntimeLimits(lua_State* state, lua_Debug* ar) @trusted
+{
+    auto _ = ar;
+
+    if (_activeLuaVmForHook is null)
+        return;
+
+    auto violation = _activeLuaVmForHook.runtimeLimitViolation(state);
+    if (violation.length == 0)
+        return;
+
+    lua_pushlstring(state, violation.ptr, violation.length);
+    lua_error(state);
+}
+
 /// Minimal scripting engine surface.
 final class ScriptingEngine
 {
@@ -1124,9 +1214,17 @@ final class ScriptingEngine
     LuaRuntime open(T)(
         T binding,
         LuaSandboxProfile profile = LuaSandboxProfile.Untrusted,
-        LuaCapability[] permissions = null
+        LuaCapability[] permissions = null,
+        LuaRuntimeLimits limits = LuaRuntimeLimits.init
     )
     {
+        if (limits.maxExecutionTime <= Duration.zero)
+            limits.maxExecutionTime = DefaultLuaExecutionTimeout;
+        if (limits.maxMemoryBytes == 0)
+            limits.maxMemoryBytes = DefaultLuaMemoryLimitBytes;
+        if (limits.instructionCheckInterval == 0)
+            limits.instructionCheckInterval = DefaultLuaInstructionCheckInterval;
+
         auto box = new BindingBox!T(binding);
         auto collected = collectExports!T(box);
         auto callables = filterCallables(collected.callables, permissions);
@@ -1139,9 +1237,17 @@ final class ScriptingEngine
         LuaRuntime runtime;
         runtime.profile = profile;
         runtime.permissions = permissions.dup;
+        runtime.limits = limits;
         runtime.exports = toExportDescriptors(callables, values);
         runtime.restrictedExports = toExportDescriptors(restrictedCallablesOnly, restrictedValuesOnly);
-        runtime._vm = new LuaVm(profile, callables, values, apiDescriptor, runtime.restrictedExports);
+        runtime._vm = new LuaVm(
+            profile,
+            callables,
+            values,
+            apiDescriptor,
+            runtime.restrictedExports,
+            limits
+        );
         return runtime;
     }
 }
@@ -2310,4 +2416,46 @@ unittest
     auto capabilities = allLuaCapabilities();
     assert(capabilities.canFind(LuaCapability.ContextRead));
     assert(capabilities.canFind(LuaCapability.LogWrite));
+}
+
+unittest
+{
+    struct EmptyApi
+    {
+    }
+
+    LuaRuntimeLimits limits;
+    limits.maxExecutionTime = dur!"msecs"(50);
+    limits.maxMemoryBytes = 4 * 1024 * 1024;
+    limits.instructionCheckInterval = 2_000;
+
+    auto runtime = (new ScriptingEngine).open!EmptyApi(
+        EmptyApi.init,
+        limits: limits
+    );
+    auto timedOut = runtime.eval("while true do end");
+
+    assert(timedOut.isErr);
+    assert(timedOut.error.message.canFind("time limit"));
+}
+
+unittest
+{
+    struct EmptyApi
+    {
+    }
+
+    LuaRuntimeLimits limits;
+    limits.maxExecutionTime = dur!"seconds"(2);
+    limits.maxMemoryBytes = 64 * 1024;
+    limits.instructionCheckInterval = 2_000;
+
+    auto runtime = (new ScriptingEngine).open!EmptyApi(
+        EmptyApi.init,
+        limits: limits
+    );
+    auto memoryLimited = runtime.eval("local t={} for i=1,200000 do t[i]=string.rep('a', 16) end return #t");
+
+    assert(memoryLimited.isErr);
+    assert(memoryLimited.error.message.canFind("memory limit"));
 }

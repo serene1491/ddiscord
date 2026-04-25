@@ -10,15 +10,17 @@ import ddiscord.context.event : AutocompleteInteractionEventContext, ChannelCrea
     ChannelDeleteEventContext, ChannelPinsUpdateEventContext, ChannelUpdateEventContext,
     CommandExecutedEventContext, CommandFailedEventContext, GuildCreateEventContext,
     GuildDeleteEventContext, GuildMemberAddEventContext, GuildMemberRemoveEventContext,
+    GuildUpdateEventContext, GatewayDispatchEventContext,
     GuildBanAddEventContext, GuildBanRemoveEventContext, GuildRoleCreateEventContext,
     GuildRoleDeleteEventContext, GuildRoleUpdateEventContext, InteractionCreateEventContext,
     InviteCreateEventContext, InviteDeleteEventContext, MessageComponentEventContext,
-    MessageCreateEventContext, MessageDeleteEventContext, MessageReactionAddEventContext,
+    MessageCreateEventContext, MessageDeleteBulkEventContext, MessageDeleteEventContext, MessageReactionAddEventContext,
     MessageReactionRemoveAllEventContext, MessageReactionRemoveEmojiEventContext,
     MessageReactionRemoveEventContext, MessageUpdateEventContext, ModalSubmitEventContext,
-    PresenceUpdateEventContext, ReadyEventContext, ResumedEventContext,
+    PresenceUpdateEventContext, ReadyEventContext, ResumedEventContext, UserUpdateEventContext,
     ThreadCreateEventContext, ThreadDeleteEventContext, ThreadUpdateEventContext,
-    TypingStartEventContext, WebhooksUpdateEventContext;
+    TypingStartEventContext, VoiceServerUpdateEventContext, VoiceStateUpdateEventContext,
+    WebhooksUpdateEventContext;
 import ddiscord.models.guild : Guild, UnavailableGuild;
 import ddiscord.models.interaction : Interaction;
 import ddiscord.models.member : GuildMember;
@@ -29,6 +31,7 @@ import ddiscord.models.user : User;
 import ddiscord.models.channel : Channel;
 import ddiscord.util.optional : Nullable;
 import ddiscord.util.snowflake : Snowflake;
+import std.json : JSONValue;
 
 /// Ready gateway event.
 struct ReadyEvent
@@ -59,6 +62,13 @@ struct GuildDeleteEvent
 {
     UnavailableGuild guild;
     GuildDeleteEventContext context;
+}
+
+/// Guild update event.
+struct GuildUpdateEvent
+{
+    Guild guild;
+    GuildUpdateEventContext context;
 }
 
 /// Guild member remove event.
@@ -120,6 +130,15 @@ struct MessageDeleteEvent
     Nullable!Snowflake channelId;
     Nullable!Snowflake guildId;
     MessageDeleteEventContext context;
+}
+
+/// Message bulk-delete event.
+struct MessageDeleteBulkEvent
+{
+    Snowflake[] messageIds;
+    Nullable!Snowflake channelId;
+    Nullable!Snowflake guildId;
+    MessageDeleteBulkEventContext context;
 }
 
 /// Message reaction add event.
@@ -200,6 +219,15 @@ struct InteractionCreateEvent
     InteractionCreateEventContext context;
 }
 
+/// Raw gateway dispatch event.
+struct GatewayDispatchEvent
+{
+    string eventName;
+    JSONValue payload;
+    Nullable!long sequence;
+    GatewayDispatchEventContext context;
+}
+
 /// Low-level autocomplete interaction event.
 struct AutocompleteInteractionEvent
 {
@@ -229,6 +257,13 @@ struct PresenceUpdateEvent
     PresenceUpdateEventContext context;
 }
 
+/// User update event.
+struct UserUpdateEvent
+{
+    User user;
+    UserUpdateEventContext context;
+}
+
 /// Typing start event.
 struct TypingStartEvent
 {
@@ -237,6 +272,32 @@ struct TypingStartEvent
     Snowflake userId;
     long timestampUnix;
     TypingStartEventContext context;
+}
+
+/// Voice-state update event.
+struct VoiceStateUpdateEvent
+{
+    Nullable!Snowflake guildId;
+    Nullable!Snowflake channelId;
+    Snowflake userId;
+    string sessionId;
+    bool deaf;
+    bool mute;
+    bool selfDeaf;
+    bool selfMute;
+    bool selfStream;
+    bool selfVideo;
+    bool suppress;
+    VoiceStateUpdateEventContext context;
+}
+
+/// Voice-server update event.
+struct VoiceServerUpdateEvent
+{
+    Nullable!Snowflake guildId;
+    string token;
+    string endpoint;
+    VoiceServerUpdateEventContext context;
 }
 
 /// Guild role create event.

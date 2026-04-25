@@ -71,6 +71,22 @@ struct RestClientConfig
     LatencySample* latencyTarget;
 }
 
+/// Query options for listing channel messages.
+struct MessageQuery
+{
+    Nullable!Snowflake before;
+    Nullable!Snowflake after;
+    Nullable!Snowflake around;
+    ushort limit = 50;
+}
+
+/// Query options for listing users who reacted with one emoji.
+struct ReactionQuery
+{
+    ushort limit = 25;
+    Nullable!Snowflake after;
+}
+
 /// Session start limits returned by `GET /gateway/bot`.
 struct GatewaySessionStartLimit
 {
@@ -274,6 +290,110 @@ private final class RealDiscordRest
             return Result!(Message, string).err(formatError("rest", "Discord returned a message edit response that was not valid JSON.", json.error));
 
         return Result!(Message, string).ok(Message.fromJSON(json.value));
+    }
+
+    Result!(Message, string) getMessage(Snowflake channelId, Snowflake messageId)
+    {
+        auto request = perform(
+            HttpMethod.Get,
+            "GET:/channels/{channel_id}/messages/{message_id}",
+            "/channels/" ~ channelId.toString ~ "/messages/" ~ messageId.toString
+        );
+
+        if (request.isErr)
+            return Result!(Message, string).err(request.error);
+
+        auto json = request.value.json();
+        if (json.isErr)
+        {
+            return Result!(Message, string).err(formatError(
+                "rest",
+                "Discord returned an invalid message payload.",
+                json.error
+            ));
+        }
+
+        return Result!(Message, string).ok(Message.fromJSON(json.value));
+    }
+
+    Result!(Message[], string) listMessages(Snowflake channelId, MessageQuery query)
+    {
+        if (!query.before.isNull && !query.after.isNull)
+        {
+            return Result!(Message[], string).err(formatError(
+                "rest",
+                "Cannot list channel messages with both `before` and `after` filters.",
+                "Discord accepts only one directional anchor per message query."
+            ));
+        }
+
+        if (!query.around.isNull && (!query.before.isNull || !query.after.isNull))
+        {
+            return Result!(Message[], string).err(formatError(
+                "rest",
+                "Cannot combine `around` with `before` or `after` in message queries.",
+                "Pick one anchor strategy for the request."
+            ));
+        }
+
+        const resolvedLimit = query.limit == 0 ? cast(ushort) 50 : query.limit;
+        if (resolvedLimit > 100)
+        {
+            return Result!(Message[], string).err(formatError(
+                "rest",
+                "Message list limit is out of range.",
+                "Discord requires `limit` between 1 and 100."
+            ));
+        }
+
+        string[] parts;
+        parts ~= "limit=" ~ resolvedLimit.to!string;
+        if (!query.before.isNull)
+            parts ~= "before=" ~ query.before.get.toString;
+        if (!query.after.isNull)
+            parts ~= "after=" ~ query.after.get.toString;
+        if (!query.around.isNull)
+            parts ~= "around=" ~ query.around.get.toString;
+
+        string suffix;
+        foreach (index, part; parts)
+        {
+            if (index != 0)
+                suffix ~= "&";
+            suffix ~= part;
+        }
+
+        auto request = perform(
+            HttpMethod.Get,
+            "GET:/channels/{channel_id}/messages",
+            "/channels/" ~ channelId.toString ~ "/messages?" ~ suffix
+        );
+
+        if (request.isErr)
+            return Result!(Message[], string).err(request.error);
+
+        auto json = request.value.json();
+        if (json.isErr)
+        {
+            return Result!(Message[], string).err(formatError(
+                "rest",
+                "Discord returned an invalid channel message list payload.",
+                json.error
+            ));
+        }
+        if (json.value.type != JSONType.array)
+        {
+            return Result!(Message[], string).err(formatError(
+                "rest",
+                "Discord returned an invalid channel message list payload.",
+                "Expected a JSON array."
+            ));
+        }
+
+        Message[] messages;
+        foreach (item; json.value.array)
+            messages ~= Message.fromJSON(item);
+        return Result!(Message[], string).ok(messages);
     }
 
     Result!(bool, string) deleteMessage(Snowflake channelId, Snowflake messageId)
@@ -1072,6 +1192,65 @@ private final class RealDiscordRest
         return Result!(bool, string).ok(true);
     }
 
+    Result!(User[], string) listReactions(
+        Snowflake channelId,
+        Snowflake messageId,
+        string emoji,
+        ReactionQuery query = ReactionQuery.init
+    )
+    {
+        auto routeEmoji = reactionEmojiPath(emoji);
+        if (routeEmoji.isErr)
+            return Result!(User[], string).err(routeEmoji.error);
+
+        const resolvedLimit = query.limit == 0 ? cast(ushort) 25 : query.limit;
+        if (resolvedLimit > 100)
+        {
+            return Result!(User[], string).err(formatError(
+                "rest",
+                "Reaction list limit is out of range.",
+                "Discord requires `limit` between 1 and 100."
+            ));
+        }
+
+        string suffix = "limit=" ~ resolvedLimit.to!string;
+        if (!query.after.isNull)
+            suffix ~= "&after=" ~ query.after.get.toString;
+
+        auto request = perform(
+            HttpMethod.Get,
+            "GET:/channels/{channel_id}/messages/{message_id}/reactions/{emoji}",
+            "/channels/" ~ channelId.toString ~ "/messages/" ~ messageId.toString
+                ~ "/reactions/" ~ routeEmoji.value ~ "?" ~ suffix
+        );
+
+        if (request.isErr)
+            return Result!(User[], string).err(request.error);
+
+        auto json = request.value.json();
+        if (json.isErr)
+        {
+            return Result!(User[], string).err(formatError(
+                "rest",
+                "Discord returned an invalid reaction-user payload.",
+                json.error
+            ));
+        }
+        if (json.value.type != JSONType.array)
+        {
+            return Result!(User[], string).err(formatError(
+                "rest",
+                "Discord returned an invalid reaction-user payload.",
+                "Expected a JSON array."
+            ));
+        }
+
+        User[] users;
+        foreach (item; json.value.array)
+            users ~= User.fromJSON(item);
+        return Result!(User[], string).ok(users);
+    }
+
     Result!(bool, string) respondToInteraction(
         Snowflake interactionId,
         string interactionToken,
@@ -1426,6 +1605,54 @@ private final class RealDiscordRest
         return performRequest(routeKey, request);
     }
 
+    Result!(HttpResponse, string) raw(
+        HttpMethod method,
+        string path,
+        ubyte[] body = null,
+        string contentType = "application/json",
+        bool authenticated = true,
+        string[string] headers = null,
+        string rateLimitKey = ""
+    )
+    {
+        auto normalizedPath = normalizeRawPath(path);
+        if (normalizedPath.isErr)
+            return Result!(HttpResponse, string).err(normalizedPath.error);
+
+        auto routeKey = rateLimitKey;
+        if (routeKey.length == 0)
+            routeKey = defaultRawRateLimitKey(method, normalizedPath.value);
+
+        HttpRequest request;
+        request.method = method;
+        request.url = normalizedPath.value;
+        request.body = body.dup;
+        request.contentType = contentType;
+        request.authenticated = authenticated;
+        request.headers = headers.dup;
+        return performRequest(routeKey, request);
+    }
+
+    Result!(HttpResponse, string) rawJson(
+        HttpMethod method,
+        string path,
+        JSONValue payload,
+        bool authenticated = true,
+        string[string] headers = null,
+        string rateLimitKey = ""
+    )
+    {
+        return raw(
+            method,
+            path,
+            cast(ubyte[]) payload.toString.dup,
+            "application/json",
+            authenticated,
+            headers,
+            rateLimitKey
+        );
+    }
+
     private Result!(HttpResponse, string) performRequest(string routeKey, HttpRequest request)
     {
         uint rateLimitRetries;
@@ -1485,6 +1712,68 @@ private final class RealDiscordRest
         if (_latencyTarget is null)
             return;
         (*_latencyTarget).milliseconds = (MonoTime.currTime - startedAt).total!"msecs";
+    }
+
+    private string methodName(HttpMethod method) const
+    {
+        final switch (method)
+        {
+            case HttpMethod.Get:
+                return "GET";
+            case HttpMethod.Post:
+                return "POST";
+            case HttpMethod.Put:
+                return "PUT";
+            case HttpMethod.Patch:
+                return "PATCH";
+            case HttpMethod.Delete:
+                return "DELETE";
+        }
+    }
+
+    private Result!(string, string) normalizeRawPath(string rawPath) const
+    {
+        auto path = rawPath.strip;
+        if (path.length == 0)
+        {
+            return Result!(string, string).err(formatError(
+                "rest",
+                "Cannot call a raw REST route with an empty path.",
+                "",
+                "Pass a Discord API route such as `/channels/{channel_id}/messages`."
+            ));
+        }
+
+        if (path.canFind("://"))
+        {
+            return Result!(string, string).err(formatError(
+                "rest",
+                "Raw REST routes must use relative Discord API paths, not absolute URLs.",
+                "Received path: `" ~ path ~ "`.",
+                "Use a path like `/channels/{channel_id}/messages`."
+            ));
+        }
+
+        if (path[0] != '/')
+            path = "/" ~ path;
+
+        return Result!(string, string).ok(path);
+    }
+
+    private string defaultRawRateLimitKey(HttpMethod method, string normalizedPath) const
+    {
+        auto queryIndex = normalizedPath.length;
+        foreach (index, character; normalizedPath)
+        {
+            if (character == '?')
+            {
+                queryIndex = index;
+                break;
+            }
+        }
+
+        auto bucketPath = normalizedPath[0 .. queryIndex];
+        return methodName(method) ~ ":" ~ bucketPath;
     }
 
     private Result!(Snowflake, string) resolveApplicationId()
@@ -1686,6 +1975,49 @@ final class MessagesEndpoints
         return AsyncTask!Message.success(created.value);
     }
 
+    /// Fetches one message by channel/message id.
+    AsyncTask!Message get(Snowflake channelId, Snowflake messageId)
+    {
+        if (_real.isNull)
+        {
+            return AsyncTask!Message.failure(formatError(
+                "rest",
+                "Cannot fetch a Discord message because the REST transport is not configured.",
+                "Attempted route: `/channels/" ~ channelId.toString ~ "/messages/" ~ messageId.toString ~ "`.",
+                "Configure a bot token or inject a transport before reading messages."
+            ));
+        }
+
+        auto fetched = _real.get.getMessage(channelId, messageId);
+        if (fetched.isErr)
+            return AsyncTask!Message.failure(fetched.error);
+
+        _history.store(fetched.value);
+        return AsyncTask!Message.success(fetched.value);
+    }
+
+    /// Lists channel messages with pagination anchors.
+    AsyncTask!(Message[]) getMany(Snowflake channelId, MessageQuery query = MessageQuery.init)
+    {
+        if (_real.isNull)
+        {
+            return AsyncTask!(Message[]).failure(formatError(
+                "rest",
+                "Cannot list Discord messages because the REST transport is not configured.",
+                "Attempted route: `/channels/" ~ channelId.toString ~ "/messages`.",
+                "Configure a bot token or inject a transport before listing messages."
+            ));
+        }
+
+        auto listed = _real.get.listMessages(channelId, query);
+        if (listed.isErr)
+            return AsyncTask!(Message[]).failure(listed.error);
+
+        foreach (message; listed.value)
+            _history.store(message);
+        return AsyncTask!(Message[]).success(listed.value);
+    }
+
     /// Edits an existing message in a channel.
     AsyncTask!Message edit(Snowflake channelId, Snowflake messageId, MessageCreate payload)
     {
@@ -1834,6 +2166,51 @@ final class MessagesEndpoints
             return AsyncTask!(Message[]).failure(pinned.error);
 
         return AsyncTask!(Message[]).success(pinned.value);
+    }
+
+    /// Lists users who reacted with the provided emoji.
+    AsyncTask!(User[]) getReactions(
+        Snowflake channelId,
+        Snowflake messageId,
+        string emoji,
+        ReactionQuery query = ReactionQuery.init
+    )
+    {
+        if (_real.isNull)
+        {
+            return AsyncTask!(User[]).failure(formatError(
+                "rest",
+                "Cannot list Discord reactions because the REST transport is not configured.",
+                "Attempted route: `/channels/" ~ channelId.toString ~ "/messages/" ~ messageId.toString ~ "/reactions`.",
+                "Configure a bot token or inject a transport before reading reaction users."
+            ));
+        }
+
+        auto users = _real.get.listReactions(channelId, messageId, emoji, query);
+        if (users.isErr)
+            return AsyncTask!(User[]).failure(users.error);
+
+        return AsyncTask!(User[]).success(users.value);
+    }
+
+    /// Clears all reactions from a message.
+    AsyncTask!void deleteAllReactions(Snowflake channelId, Snowflake messageId)
+    {
+        if (_real.isNull)
+        {
+            return AsyncTask!void.failure(formatError(
+                "rest",
+                "Cannot clear Discord message reactions because the REST transport is not configured.",
+                "Attempted route: `/channels/" ~ channelId.toString ~ "/messages/" ~ messageId.toString ~ "/reactions`.",
+                "Configure a bot token or inject a transport before clearing reactions."
+            ));
+        }
+
+        auto cleared = _real.get.clearReactions(channelId, messageId);
+        if (cleared.isErr)
+            return AsyncTask!void.failure(cleared.error);
+
+        return AsyncTask!void.success();
     }
 
     /// Returns every message sent through the REST client.
@@ -2560,6 +2937,136 @@ final class InteractionsEndpoints
 
 }
 
+/// Low-level raw REST surface for advanced routes not yet wrapped by dedicated endpoints.
+final class RawEndpoints
+{
+    private Nullable!RealDiscordRest _real;
+
+    this(Nullable!RealDiscordRest realTransport)
+    {
+        _real = realTransport;
+    }
+
+    AsyncTask!HttpResponse request(
+        HttpMethod method,
+        string path,
+        ubyte[] body = null,
+        string contentType = "application/json",
+        bool authenticated = true,
+        string[string] headers = null,
+        string rateLimitKey = ""
+    )
+    {
+        if (_real.isNull)
+        {
+            return AsyncTask!HttpResponse.failure(formatError(
+                "rest",
+                "Cannot call raw REST routes because the REST transport is not configured.",
+                "Attempted route: `" ~ path ~ "`.",
+                "Configure a bot token or inject a transport before using `rest.raw`."
+            ));
+        }
+
+        auto response = _real.get.raw(
+            method,
+            path,
+            body,
+            contentType,
+            authenticated,
+            headers,
+            rateLimitKey
+        );
+        if (response.isErr)
+            return AsyncTask!HttpResponse.failure(response.error);
+        return AsyncTask!HttpResponse.success(response.value);
+    }
+
+    AsyncTask!HttpResponse requestJson(
+        HttpMethod method,
+        string path,
+        JSONValue payload,
+        bool authenticated = true,
+        string[string] headers = null,
+        string rateLimitKey = ""
+    )
+    {
+        if (_real.isNull)
+        {
+            return AsyncTask!HttpResponse.failure(formatError(
+                "rest",
+                "Cannot call raw JSON REST routes because the REST transport is not configured.",
+                "Attempted route: `" ~ path ~ "`.",
+                "Configure a bot token or inject a transport before using `rest.raw`."
+            ));
+        }
+
+        auto response = _real.get.rawJson(
+            method,
+            path,
+            payload,
+            authenticated,
+            headers,
+            rateLimitKey
+        );
+        if (response.isErr)
+            return AsyncTask!HttpResponse.failure(response.error);
+        return AsyncTask!HttpResponse.success(response.value);
+    }
+
+    AsyncTask!HttpResponse get(
+        string path,
+        bool authenticated = true,
+        string[string] headers = null,
+        string rateLimitKey = ""
+    )
+    {
+        return request(HttpMethod.Get, path, null, "application/json", authenticated, headers, rateLimitKey);
+    }
+
+    AsyncTask!HttpResponse delete_(
+        string path,
+        bool authenticated = true,
+        string[string] headers = null,
+        string rateLimitKey = ""
+    )
+    {
+        return request(HttpMethod.Delete, path, null, "application/json", authenticated, headers, rateLimitKey);
+    }
+
+    AsyncTask!HttpResponse postJson(
+        string path,
+        JSONValue payload,
+        bool authenticated = true,
+        string[string] headers = null,
+        string rateLimitKey = ""
+    )
+    {
+        return requestJson(HttpMethod.Post, path, payload, authenticated, headers, rateLimitKey);
+    }
+
+    AsyncTask!HttpResponse putJson(
+        string path,
+        JSONValue payload,
+        bool authenticated = true,
+        string[string] headers = null,
+        string rateLimitKey = ""
+    )
+    {
+        return requestJson(HttpMethod.Put, path, payload, authenticated, headers, rateLimitKey);
+    }
+
+    AsyncTask!HttpResponse patchJson(
+        string path,
+        JSONValue payload,
+        bool authenticated = true,
+        string[string] headers = null,
+        string rateLimitKey = ""
+    )
+    {
+        return requestJson(HttpMethod.Patch, path, payload, authenticated, headers, rateLimitKey);
+    }
+}
+
 /// REST client surface.
 final class RestClient
 {
@@ -2578,6 +3085,7 @@ final class RestClient
     ThreadsEndpoints threads;
     WebhooksEndpoints webhooks;
     InteractionsEndpoints interactions;
+    RawEndpoints raw;
     LatencySample latency;
 
     this(RestClientConfig config = RestClientConfig.init)
@@ -2601,6 +3109,7 @@ final class RestClient
         threads = new ThreadsEndpoints(_real);
         webhooks = new WebhooksEndpoints(_history, _real);
         interactions = new InteractionsEndpoints(_history, _real);
+        raw = new RawEndpoints(_real);
     }
 
     /// Returns whether this client is using the network-backed Discord REST implementation.
@@ -3530,4 +4039,144 @@ unittest
     ).awaitResult();
     assert(invalidType.isErr);
     assert(invalidType.error.canFind("unsupported channel type"));
+}
+
+unittest
+{
+    HttpRequest[] captured;
+    HttpTransport transport = (request) {
+        captured ~= request;
+
+        HttpResponse response;
+        response.statusCode = 200;
+
+        if (request.url.canFind("/channels/55/messages/100/reactions/"))
+        {
+            response.body = cast(ubyte[]) `[{"id":"9","username":"reacter","bot":false}]`.dup;
+            return Result!(HttpResponse, HttpError).ok(response);
+        }
+
+        if (request.url.canFind("/channels/55/messages?"))
+        {
+            response.body = cast(ubyte[]) `[
+                {"id":"100","channel_id":"55","content":"one","author":{"id":"1","username":"bot","bot":true}},
+                {"id":"101","channel_id":"55","content":"two","author":{"id":"1","username":"bot","bot":true}}
+            ]`.dup;
+            return Result!(HttpResponse, HttpError).ok(response);
+        }
+
+        response.body = cast(ubyte[]) `{"id":"100","channel_id":"55","content":"hello","author":{"id":"1","username":"bot","bot":true}}`.dup;
+        return Result!(HttpResponse, HttpError).ok(response);
+    };
+
+    RestClientConfig config;
+    config.token = "token";
+    config.transport = Nullable!HttpTransport.of(transport);
+
+    auto rest = new RestClient(config);
+
+    auto single = rest.messages.get(Snowflake(55), Snowflake(100)).awaitResult();
+    assert(single.isOk);
+    assert(single.value.id == Snowflake(100));
+    assert(captured[0].method == HttpMethod.Get);
+    assert(captured[0].url.canFind("/channels/55/messages/100"));
+
+    MessageQuery query;
+    query.limit = 2;
+    query.before = Nullable!Snowflake.of(Snowflake(200));
+    auto many = rest.messages.getMany(Snowflake(55), query).awaitResult();
+    assert(many.isOk);
+    assert(many.value.length == 2);
+    assert(captured[1].method == HttpMethod.Get);
+    assert(captured[1].url.canFind("/channels/55/messages?"));
+    assert(captured[1].url.canFind("limit=2"));
+    assert(captured[1].url.canFind("before=200"));
+
+    ReactionQuery reactionsQuery;
+    reactionsQuery.limit = 10;
+    auto reactors = rest.messages.getReactions(
+        Snowflake(55),
+        Snowflake(100),
+        "🔥",
+        reactionsQuery
+    ).awaitResult();
+    assert(reactors.isOk);
+    assert(reactors.value.length == 1);
+    assert(reactors.value[0].username == "reacter");
+    assert(captured[2].method == HttpMethod.Get);
+    assert(captured[2].url.canFind("/channels/55/messages/100/reactions/"));
+
+    auto cleared = rest.messages.deleteAllReactions(Snowflake(55), Snowflake(100)).awaitResult();
+    assert(cleared.isOk);
+    assert(captured[3].method == HttpMethod.Delete);
+    assert(captured[3].url.canFind("/channels/55/messages/100/reactions"));
+}
+
+unittest
+{
+    HttpRequest[] captured;
+    HttpTransport transport = (request) {
+        captured ~= request;
+
+        HttpResponse response;
+        response.statusCode = 200;
+        response.body = cast(ubyte[]) `{"ok":true}`.dup;
+        return Result!(HttpResponse, HttpError).ok(response);
+    };
+
+    RestClientConfig config;
+    config.token = "token";
+    config.transport = Nullable!HttpTransport.of(transport);
+
+    auto rest = new RestClient(config);
+
+    JSONValue payload;
+    payload["name"] = "ops";
+
+    auto rawJson = rest.raw.postJson(
+        "guilds/123/channels",
+        payload,
+        true,
+        null,
+        "POST:/guilds/{guild_id}/channels"
+    ).awaitResult();
+    assert(rawJson.isOk);
+    assert(captured[0].method == HttpMethod.Post);
+    assert(captured[0].contentType == "application/json");
+    assert(captured[0].url.canFind("/guilds/123/channels"));
+    assert(captured[0].authenticated);
+    assert(cast(string) captured[0].body == payload.toString);
+
+    auto rawDelete = rest.raw.delete_(
+        "/channels/999/messages/888",
+        true,
+        null,
+        "DELETE:/channels/{channel_id}/messages/{message_id}"
+    ).awaitResult();
+    assert(rawDelete.isOk);
+    assert(captured[1].method == HttpMethod.Delete);
+    assert(captured[1].url.canFind("/channels/999/messages/888"));
+}
+
+unittest
+{
+    bool called;
+    HttpTransport transport = (request) {
+        auto _ = request;
+        called = true;
+
+        HttpResponse response;
+        response.statusCode = 200;
+        return Result!(HttpResponse, HttpError).ok(response);
+    };
+
+    RestClientConfig config;
+    config.token = "token";
+    config.transport = Nullable!HttpTransport.of(transport);
+
+    auto rest = new RestClient(config);
+    auto attempted = rest.raw.get("https://example.com/steal-token").awaitResult();
+    assert(attempted.isErr);
+    assert(attempted.error.canFind("relative Discord API paths"));
+    assert(!called);
 }

@@ -2,6 +2,42 @@
 
 All notable changes to `ddiscord` should be documented in this file.
 
+## [0.3.3]
+
+### Added
+
+- REST coverage expansion for message retrieval and reactions:
+  `messages.get(...)`, `messages.getMany(...)`, `messages.getReactions(...)`, and
+  `messages.deleteAllReactions(...)`.
+- Advanced escape-hatch REST surface via `rest.raw` with typed helpers:
+  `request(...)`, `requestJson(...)`, `get(...)`, `delete_(...)`, `postJson(...)`,
+  `putJson(...)`, and `patchJson(...)`.
+- Gateway dispatch coverage for `GUILD_UPDATE`, `USER_UPDATE`, `MESSAGE_DELETE_BULK`,
+  `VOICE_STATE_UPDATE`, and `VOICE_SERVER_UPDATE`.
+- New typed client events and contexts for guild/user updates, bulk message deletes,
+  voice state/server updates, and raw gateway dispatch payload access.
+- Lua runtime safety controls through `LuaRuntimeLimits` (execution timeout, memory cap,
+  and instruction checkpoint interval) with runtime limit enforcement.
+
+### Changed
+
+- Gateway dispatch flow now emits a typed raw-dispatch event for every dispatch name so
+  unsupported/new Discord events can still be consumed immediately without waiting for
+  dedicated wrappers.
+- `rest.raw` now normalizes route paths and rejects absolute URLs, preventing accidental
+  token forwarding outside Discord API routes.
+- Raw REST auto-generated rate-limit keys now ignore query strings by default for better
+  bucket reuse and steadier retry behavior.
+- Lua runtime default limits were tuned for production usability while preserving guardrails:
+  `2s` execution timeout, `32MB` memory limit, and `25k` instruction check interval.
+
+### Fixed
+
+- Lua runtime hook activation now restores previous hook context correctly in nested flows.
+- Added unittest coverage for raw route normalization/security and Lua limit enforcement
+  failure paths.
+
+
 ## [0.3.2.1]
 
 ### Added

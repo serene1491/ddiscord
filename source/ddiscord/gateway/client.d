@@ -238,6 +238,58 @@ struct GatewayThreadUpdateEvent
     Channel thread;
 }
 
+/// Typed payload for `GUILD_UPDATE`.
+struct GatewayGuildUpdateEvent
+{
+    Guild guild;
+}
+
+/// Typed payload for `USER_UPDATE`.
+struct GatewayUserUpdateEvent
+{
+    User user;
+}
+
+/// Typed payload for `MESSAGE_DELETE_BULK`.
+struct GatewayMessageDeleteBulkInfo
+{
+    Snowflake[] messageIds;
+    Nullable!Snowflake channelId;
+    Nullable!Snowflake guildId;
+}
+
+/// Typed payload for `VOICE_STATE_UPDATE`.
+struct GatewayVoiceStateUpdateInfo
+{
+    Nullable!Snowflake guildId;
+    Nullable!Snowflake channelId;
+    Snowflake userId;
+    string sessionId;
+    bool deaf;
+    bool mute;
+    bool selfDeaf;
+    bool selfMute;
+    bool selfStream;
+    bool selfVideo;
+    bool suppress;
+}
+
+/// Typed payload for `VOICE_SERVER_UPDATE`.
+struct GatewayVoiceServerUpdateInfo
+{
+    Nullable!Snowflake guildId;
+    string token;
+    string endpoint;
+}
+
+/// Raw gateway dispatch payload, emitted for every dispatch event name.
+struct GatewayRawDispatchEvent
+{
+    string eventName;
+    JSONValue data;
+    Nullable!long sequence;
+}
+
 private struct GatewayEnvelope
 {
     GatewayOpcode opcode;
@@ -440,6 +492,11 @@ final class GatewayClient
     void delegate(Interaction) onInteractionCreate;
     void delegate(GatewayGuildMemberAddInfo) onGuildMemberAdd;
     void delegate(GatewayPresenceUpdateInfo) onPresenceUpdate;
+    void delegate(GatewayGuildUpdateEvent) onGuildUpdate;
+    void delegate(GatewayUserUpdateEvent) onUserUpdate;
+    void delegate(GatewayMessageDeleteBulkInfo) onMessageDeleteBulk;
+    void delegate(GatewayVoiceStateUpdateInfo) onVoiceStateUpdate;
+    void delegate(GatewayVoiceServerUpdateInfo) onVoiceServerUpdate;
     void delegate(string) onError;
 
     private bool _running;
@@ -769,6 +826,9 @@ final class GatewayClient
         _dispatchHandlers["GUILD_CREATE"] = (JSONValue data) {
             invokeFromJSON!Guild(data, onGuildCreate);
         };
+        _dispatchHandlers["GUILD_UPDATE"] = (JSONValue data) {
+            handleGuildUpdateDispatch(data);
+        };
         _dispatchHandlers["GUILD_DELETE"] = (JSONValue data) {
             invokeFromJSON!UnavailableGuild(data, onGuildDelete);
         };
@@ -803,6 +863,9 @@ final class GatewayClient
         };
         _dispatchHandlers["MESSAGE_DELETE"] = (JSONValue data) {
             invokeParsed!(GatewayMessageDeleteInfo, parseMessageDelete)(data, onMessageDelete);
+        };
+        _dispatchHandlers["MESSAGE_DELETE_BULK"] = (JSONValue data) {
+            invokeParsed!(GatewayMessageDeleteBulkInfo, parseMessageDeleteBulk)(data, onMessageDeleteBulk);
         };
         _dispatchHandlers["MESSAGE_REACTION_ADD"] = (JSONValue data) {
             invokeParsed!(GatewayMessageReactionInfo, parseMessageReaction)(data, onMessageReactionAdd);
@@ -854,11 +917,20 @@ final class GatewayClient
         _dispatchHandlers["INTERACTION_CREATE"] = (JSONValue data) {
             invokeFromJSON!Interaction(data, onInteractionCreate);
         };
+        _dispatchHandlers["USER_UPDATE"] = (JSONValue data) {
+            handleUserUpdateDispatch(data);
+        };
         _dispatchHandlers["GUILD_MEMBER_ADD"] = (JSONValue data) {
             invokeParsed!(GatewayGuildMemberAddInfo, parseGuildMemberAdd)(data, onGuildMemberAdd);
         };
         _dispatchHandlers["PRESENCE_UPDATE"] = (JSONValue data) {
             invokeParsed!(GatewayPresenceUpdateInfo, parsePresenceUpdate)(data, onPresenceUpdate);
+        };
+        _dispatchHandlers["VOICE_STATE_UPDATE"] = (JSONValue data) {
+            invokeParsed!(GatewayVoiceStateUpdateInfo, parseVoiceStateUpdate)(data, onVoiceStateUpdate);
+        };
+        _dispatchHandlers["VOICE_SERVER_UPDATE"] = (JSONValue data) {
+            invokeParsed!(GatewayVoiceServerUpdateInfo, parseVoiceServerUpdate)(data, onVoiceServerUpdate);
         };
     }
 
@@ -908,6 +980,33 @@ final class GatewayClient
             onResumed();
 
         emitDispatch!GatewayResumedInfo(GatewayResumedInfo.init);
+    }
+
+    private void handleGuildUpdateDispatch(JSONValue data)
+    {
+        auto guild = Guild.fromJSON(data);
+
+        GatewayGuildUpdateEvent event;
+        event.guild = guild;
+
+        if (onGuildUpdate !is null)
+            onGuildUpdate(event);
+
+        emitDispatch!GatewayGuildUpdateEvent(event);
+    }
+
+    private void handleUserUpdateDispatch(JSONValue data)
+    {
+        auto user = User.fromJSON(data);
+
+        GatewayUserUpdateEvent event;
+        event.user = user;
+
+        if (onUserUpdate !is null)
+            onUserUpdate(event);
+
+        emitDispatch!GatewayUserUpdateEvent(event);
+        emitDispatch!User(user);
     }
 
     private void handleMessageCreateDispatch(JSONValue data)
@@ -1029,6 +1128,12 @@ final class GatewayClient
 
     private void handleDispatch(GatewayEnvelope envelope)
     {
+        GatewayRawDispatchEvent rawEvent;
+        rawEvent.eventName = envelope.eventName;
+        rawEvent.data = envelope.data;
+        rawEvent.sequence = envelope.sequence;
+        emitDispatch!GatewayRawDispatchEvent(rawEvent);
+
         auto handler = envelope.eventName in _dispatchHandlers;
         if (handler is null)
         {
@@ -1503,6 +1608,31 @@ private GatewayMessageDeleteInfo parseMessageDelete(JSONValue data)
     return info;
 }
 
+private GatewayMessageDeleteBulkInfo parseMessageDeleteBulk(JSONValue data)
+{
+    GatewayMessageDeleteBulkInfo info;
+    info.channelId = parseSnowflakeField(data, "channel_id");
+    info.guildId = parseSnowflakeField(data, "guild_id");
+
+    auto idsValue = data.object.get("ids", JSONValue.init);
+    if (idsValue.type == JSONType.array)
+    {
+        foreach (item; idsValue.array)
+        {
+            if (item.type != JSONType.string)
+                continue;
+
+            try
+                info.messageIds ~= Snowflake(item.str.to!ulong);
+            catch (ConvException)
+            {
+            }
+        }
+    }
+
+    return info;
+}
+
 private GatewayGuildMemberRemoveInfo parseGuildMemberRemove(JSONValue data)
 {
     GatewayGuildMemberRemoveInfo info;
@@ -1560,6 +1690,67 @@ private GatewayTypingStartInfo parseTypingStart(JSONValue data)
             info.timestampUnix = cast(long) timestampValue.integer;
         }
     }
+
+    return info;
+}
+
+private GatewayVoiceStateUpdateInfo parseVoiceStateUpdate(JSONValue data)
+{
+    GatewayVoiceStateUpdateInfo info;
+    info.guildId = parseSnowflakeField(data, "guild_id");
+    info.channelId = parseSnowflakeField(data, "channel_id");
+
+    auto userId = parseSnowflakeField(data, "user_id");
+    if (!userId.isNull)
+        info.userId = userId.get;
+
+    auto sessionIdValue = data.object.get("session_id", JSONValue.init);
+    if (sessionIdValue.type == JSONType.string)
+        info.sessionId = sessionIdValue.str;
+
+    auto deafValue = data.object.get("deaf", JSONValue.init);
+    if (deafValue.type == JSONType.true_ || deafValue.type == JSONType.false_)
+        info.deaf = deafValue.boolean;
+
+    auto muteValue = data.object.get("mute", JSONValue.init);
+    if (muteValue.type == JSONType.true_ || muteValue.type == JSONType.false_)
+        info.mute = muteValue.boolean;
+
+    auto selfDeafValue = data.object.get("self_deaf", JSONValue.init);
+    if (selfDeafValue.type == JSONType.true_ || selfDeafValue.type == JSONType.false_)
+        info.selfDeaf = selfDeafValue.boolean;
+
+    auto selfMuteValue = data.object.get("self_mute", JSONValue.init);
+    if (selfMuteValue.type == JSONType.true_ || selfMuteValue.type == JSONType.false_)
+        info.selfMute = selfMuteValue.boolean;
+
+    auto selfStreamValue = data.object.get("self_stream", JSONValue.init);
+    if (selfStreamValue.type == JSONType.true_ || selfStreamValue.type == JSONType.false_)
+        info.selfStream = selfStreamValue.boolean;
+
+    auto selfVideoValue = data.object.get("self_video", JSONValue.init);
+    if (selfVideoValue.type == JSONType.true_ || selfVideoValue.type == JSONType.false_)
+        info.selfVideo = selfVideoValue.boolean;
+
+    auto suppressValue = data.object.get("suppress", JSONValue.init);
+    if (suppressValue.type == JSONType.true_ || suppressValue.type == JSONType.false_)
+        info.suppress = suppressValue.boolean;
+
+    return info;
+}
+
+private GatewayVoiceServerUpdateInfo parseVoiceServerUpdate(JSONValue data)
+{
+    GatewayVoiceServerUpdateInfo info;
+    info.guildId = parseSnowflakeField(data, "guild_id");
+
+    auto tokenValue = data.object.get("token", JSONValue.init);
+    if (tokenValue.type == JSONType.string)
+        info.token = tokenValue.str;
+
+    auto endpointValue = data.object.get("endpoint", JSONValue.init);
+    if (endpointValue.type == JSONType.string)
+        info.endpoint = endpointValue.str;
 
     return info;
 }
@@ -2002,6 +2193,12 @@ unittest
     size_t threadCreates;
     size_t threadUpdates;
     size_t threadDeletes;
+    size_t guildUpdates;
+    size_t userUpdates;
+    size_t messageDeleteBulks;
+    size_t voiceStateUpdates;
+    size_t voiceServerUpdates;
+    size_t rawDispatches;
 
     client.onChannelCreate = (Channel channel) {
         auto _ = channel;
@@ -2095,6 +2292,30 @@ unittest
         auto _ = info;
         threadDeletes++;
     };
+    client.onGuildUpdate = (GatewayGuildUpdateEvent event) {
+        auto _ = event;
+        guildUpdates++;
+    };
+    client.onUserUpdate = (GatewayUserUpdateEvent event) {
+        auto _ = event;
+        userUpdates++;
+    };
+    client.onMessageDeleteBulk = (GatewayMessageDeleteBulkInfo info) {
+        auto _ = info;
+        messageDeleteBulks++;
+    };
+    client.onVoiceStateUpdate = (GatewayVoiceStateUpdateInfo info) {
+        auto _ = info;
+        voiceStateUpdates++;
+    };
+    client.onVoiceServerUpdate = (GatewayVoiceServerUpdateInfo info) {
+        auto _ = info;
+        voiceServerUpdates++;
+    };
+    client.on!GatewayRawDispatchEvent((GatewayRawDispatchEvent event) {
+        auto _ = event;
+        rawDispatches++;
+    });
 
     auto makeEnvelope = (string eventName, JSONValue payload) {
         GatewayEnvelope envelope;
@@ -2127,6 +2348,31 @@ unittest
     client.handleDispatch(makeEnvelope("THREAD_CREATE", JSONValue(["id": JSONValue("88"), "name": JSONValue("thread-a"), "type": JSONValue(11L), "guild_id": JSONValue("7")])));
     client.handleDispatch(makeEnvelope("THREAD_UPDATE", JSONValue(["id": JSONValue("88"), "name": JSONValue("thread-b"), "type": JSONValue(11L), "guild_id": JSONValue("7")])));
     client.handleDispatch(makeEnvelope("THREAD_DELETE", JSONValue(["id": JSONValue("88"), "guild_id": JSONValue("7"), "parent_id": JSONValue("1")])));
+    client.handleDispatch(makeEnvelope("GUILD_UPDATE", JSONValue(["id": JSONValue("7"), "name": JSONValue("guild-updated")])));
+    client.handleDispatch(makeEnvelope("USER_UPDATE", JSONValue(["id": JSONValue("9"), "username": JSONValue("new-user")])));
+    client.handleDispatch(makeEnvelope("MESSAGE_DELETE_BULK", JSONValue([
+        "ids": JSONValue([JSONValue("10"), JSONValue("11")]),
+        "channel_id": JSONValue("1"),
+        "guild_id": JSONValue("7")
+    ])));
+    client.handleDispatch(makeEnvelope("VOICE_STATE_UPDATE", JSONValue([
+        "guild_id": JSONValue("7"),
+        "channel_id": JSONValue("1"),
+        "user_id": JSONValue("9"),
+        "session_id": JSONValue("abc-session"),
+        "deaf": JSONValue(false),
+        "mute": JSONValue(false),
+        "self_deaf": JSONValue(false),
+        "self_mute": JSONValue(false),
+        "self_stream": JSONValue(false),
+        "self_video": JSONValue(false),
+        "suppress": JSONValue(false)
+    ])));
+    client.handleDispatch(makeEnvelope("VOICE_SERVER_UPDATE", JSONValue([
+        "guild_id": JSONValue("7"),
+        "token": JSONValue("voice-token"),
+        "endpoint": JSONValue("us-east.discord.media")
+    ])));
 
     assert(channelCreates == 1);
     assert(channelUpdates == 1);
@@ -2151,6 +2397,12 @@ unittest
     assert(threadCreates == 1);
     assert(threadUpdates == 1);
     assert(threadDeletes == 1);
+    assert(guildUpdates == 1);
+    assert(userUpdates == 1);
+    assert(messageDeleteBulks == 1);
+    assert(voiceStateUpdates == 1);
+    assert(voiceServerUpdates == 1);
+    assert(rawDispatches == 28);
 }
 
 unittest
@@ -2188,6 +2440,64 @@ unittest
     assert(info.guildId == Snowflake(77));
     assert(info.user.id == Snowflake(11));
     assert(info.user.username == "banned-user");
+}
+
+unittest
+{
+    auto payload = JSONValue([
+        "ids": JSONValue([JSONValue("101"), JSONValue("102")]),
+        "channel_id": JSONValue("77"),
+        "guild_id": JSONValue("88")
+    ]);
+
+    auto info = parseMessageDeleteBulk(payload);
+    assert(info.messageIds.length == 2);
+    assert(info.messageIds[0] == Snowflake(101));
+    assert(info.messageIds[1] == Snowflake(102));
+    assert(!info.channelId.isNull);
+    assert(info.channelId.get == Snowflake(77));
+    assert(!info.guildId.isNull);
+    assert(info.guildId.get == Snowflake(88));
+}
+
+unittest
+{
+    auto voiceStatePayload = JSONValue([
+        "guild_id": JSONValue("88"),
+        "channel_id": JSONValue("77"),
+        "user_id": JSONValue("11"),
+        "session_id": JSONValue("session-x"),
+        "deaf": JSONValue(true),
+        "mute": JSONValue(false),
+        "self_deaf": JSONValue(false),
+        "self_mute": JSONValue(true),
+        "self_stream": JSONValue(false),
+        "self_video": JSONValue(true),
+        "suppress": JSONValue(false)
+    ]);
+
+    auto stateInfo = parseVoiceStateUpdate(voiceStatePayload);
+    assert(!stateInfo.guildId.isNull);
+    assert(stateInfo.guildId.get == Snowflake(88));
+    assert(!stateInfo.channelId.isNull);
+    assert(stateInfo.channelId.get == Snowflake(77));
+    assert(stateInfo.userId == Snowflake(11));
+    assert(stateInfo.sessionId == "session-x");
+    assert(stateInfo.deaf);
+    assert(!stateInfo.mute);
+    assert(stateInfo.selfMute);
+    assert(stateInfo.selfVideo);
+
+    auto voiceServerPayload = JSONValue([
+        "guild_id": JSONValue("88"),
+        "token": JSONValue("voice-token"),
+        "endpoint": JSONValue("us-east.discord.media")
+    ]);
+    auto serverInfo = parseVoiceServerUpdate(voiceServerPayload);
+    assert(!serverInfo.guildId.isNull);
+    assert(serverInfo.guildId.get == Snowflake(88));
+    assert(serverInfo.token == "voice-token");
+    assert(serverInfo.endpoint == "us-east.discord.media");
 }
 
 unittest

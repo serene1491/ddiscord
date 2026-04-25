@@ -32,34 +32,38 @@ import ddiscord.context.command : CommandContext, CommandSource, ContextMenuCont
 import ddiscord.context.event : AutocompleteInteractionEventContext, CommandExecutedEventContext,
     ChannelCreateEventContext, ChannelDeleteEventContext, ChannelPinsUpdateEventContext,
     ChannelUpdateEventContext, CommandFailedEventContext, EventContext, GuildCreateEventContext,
-    GuildDeleteEventContext, GuildMemberAddEventContext, GuildMemberRemoveEventContext,
+    GatewayDispatchEventContext, GuildDeleteEventContext, GuildMemberAddEventContext, GuildMemberRemoveEventContext,
+    GuildUpdateEventContext,
     GuildBanAddEventContext, GuildBanRemoveEventContext, GuildRoleCreateEventContext,
     GuildRoleDeleteEventContext, GuildRoleUpdateEventContext, InteractionCreateEventContext,
     InviteCreateEventContext, InviteDeleteEventContext, MessageComponentEventContext,
-    MessageCreateEventContext, MessageDeleteEventContext, MessageReactionAddEventContext,
+    MessageCreateEventContext, MessageDeleteBulkEventContext, MessageDeleteEventContext, MessageReactionAddEventContext,
     MessageReactionRemoveAllEventContext, MessageReactionRemoveEmojiEventContext,
     MessageReactionRemoveEventContext, MessageUpdateEventContext, ModalSubmitEventContext,
-    PresenceUpdateEventContext, ReadyEventContext, ResumedEventContext,
+    PresenceUpdateEventContext, ReadyEventContext, ResumedEventContext, UserUpdateEventContext,
     ThreadCreateEventContext, ThreadDeleteEventContext, ThreadUpdateEventContext,
-    TypingStartEventContext, WebhooksUpdateEventContext;
+    TypingStartEventContext, VoiceServerUpdateEventContext, VoiceStateUpdateEventContext,
+    WebhooksUpdateEventContext;
 import ddiscord.events.dispatcher : Event, EventDispatcher;
 import ddiscord.events.types : AutocompleteInteractionEvent, CommandExecutedEvent,
     ChannelCreateEvent, ChannelDeleteEvent, ChannelPinsUpdateEvent, ChannelUpdateEvent,
-    CommandFailedEvent, GuildCreateEvent, GuildDeleteEvent, GuildMemberAddEvent,
+    CommandFailedEvent, GatewayDispatchEvent, GuildCreateEvent, GuildDeleteEvent, GuildMemberAddEvent,
     GuildMemberRemoveEvent, GuildBanAddEvent, GuildBanRemoveEvent, GuildRoleCreateEvent,
-    GuildRoleDeleteEvent, GuildRoleUpdateEvent, InteractionCreateEvent, InviteCreateEvent,
-    InviteDeleteEvent, MessageComponentEvent, MessageCreateEvent, MessageDeleteEvent,
+    GuildRoleDeleteEvent, GuildRoleUpdateEvent, GuildUpdateEvent, InteractionCreateEvent, InviteCreateEvent,
+    InviteDeleteEvent, MessageComponentEvent, MessageCreateEvent, MessageDeleteBulkEvent, MessageDeleteEvent,
     MessageReactionAddEvent, MessageReactionRemoveAllEvent, MessageReactionRemoveEmojiEvent,
     MessageReactionRemoveEvent, MessageUpdateEvent, ModalSubmitEvent, PresenceUpdateEvent,
     ReadyEvent, ResumedEvent, ThreadCreateEvent, ThreadDeleteEvent, ThreadUpdateEvent,
-    TypingStartEvent, WebhooksUpdateEvent;
+    TypingStartEvent, UserUpdateEvent, VoiceServerUpdateEvent, VoiceStateUpdateEvent, WebhooksUpdateEvent;
 import ddiscord.gateway.client : GatewayClient, GatewayClientConfig, GatewayGuildMemberAddInfo,
     GatewayGuildMemberRemoveInfo, GatewayGuildBanInfo, GatewayGuildRoleDeleteInfo,
     GatewayGuildRoleInfo, GatewayInviteInfo, GatewayMessageCreateEvent,
-    GatewayMessageDeleteInfo, GatewayMessageUpdateEvent,
+    GatewayMessageDeleteBulkInfo, GatewayMessageDeleteInfo, GatewayMessageUpdateEvent,
     GatewayMessageReactionInfo, GatewayMessageReactionRemoveAllInfo,
-    GatewayPresenceUpdateInfo, GatewayReadyInfo, GatewayResumedInfo, GatewayThreadDeleteInfo,
-    GatewayTypingStartInfo, GatewayWebhooksUpdateInfo, GatewayChannelPinsUpdateInfo;
+    GatewayPresenceUpdateInfo, GatewayRawDispatchEvent, GatewayReadyInfo, GatewayResumedInfo, GatewayThreadDeleteInfo,
+    GatewayTypingStartInfo, GatewayUserUpdateEvent, GatewayVoiceServerUpdateInfo,
+    GatewayVoiceStateUpdateInfo, GatewayWebhooksUpdateInfo, GatewayChannelPinsUpdateInfo,
+    GatewayGuildUpdateEvent;
 import ddiscord.gateway.intents : GatewayIntent;
 import ddiscord.help.navigation : BuiltInHelpCustomIdPrefix, BuiltInHelpDefaultPageSize,
     BuiltInHelpNoopCustomId, buildPersistentHelpCustomId, parsePersistentHelpCustomId;
@@ -80,7 +84,7 @@ import ddiscord.permissions : computeEffectivePermissions;
 import ddiscord.core.http.client : HttpError, HttpErrorKind, HttpRequest, HttpResponse, HttpTransport;
 import ddiscord.rest : ApplicationCommandsEndpoints, ApplicationsEndpoints, ChannelsEndpoints,
     GatewayBotInfo, GatewayEndpoints, GuildsEndpoints, InteractionsEndpoints, MessagesEndpoints,
-    ReactionsEndpoints, RestClient, RestClientConfig, ThreadsEndpoints, UsersEndpoints,
+    RawEndpoints, ReactionsEndpoints, RestClient, RestClientConfig, ThreadsEndpoints, UsersEndpoints,
     WebhooksEndpoints;
 import ddiscord.scripting : LuaCapability, LuaRuntime, LuaSandboxProfile, ScriptingEngine;
 import ddiscord.services : ServiceContainer;
@@ -93,6 +97,7 @@ import ddiscord.util.snowflake : Snowflake;
 import std.algorithm : canFind, sort;
 import std.ascii : toLower;
 import std.conv : ConvException, to;
+import std.json : JSONValue;
 import std.string : startsWith, strip;
 import std.traits : Parameters, fullyQualifiedName, isCallable;
 import std.typecons : Tuple;
@@ -458,6 +463,12 @@ final class Client
     InteractionsEndpoints interactions() @property
     {
         return rest.interactions;
+    }
+
+    /// Direct shortcut to low-level raw REST endpoints.
+    RawEndpoints raw() @property
+    {
+        return rest.raw;
     }
 
     /// Direct shortcut to application-command REST endpoints.
@@ -1461,6 +1472,16 @@ final class Client
             event.context = buildGuildCreateEventContext(guild);
             emit!GuildCreateEvent(event);
         });
+        gateway.on!GatewayGuildUpdateEvent((GatewayGuildUpdateEvent gatewayEvent) {
+            auto guild = gatewayEvent.guild;
+            if (guild.id.value != 0)
+                cache.store(guild);
+
+            GuildUpdateEvent event;
+            event.guild = guild;
+            event.context = buildGuildUpdateEventContext(guild);
+            emit!GuildUpdateEvent(event);
+        });
         gateway.on!UnavailableGuild((UnavailableGuild guild) {
             if (!guild.unavailable && guild.id.value != 0)
                 cache.evictGuild(guild.id);
@@ -1561,6 +1582,20 @@ final class Client
             event.guildId = info.guildId;
             event.context = buildMessageDeleteEventContext(info, cached);
             emit!MessageDeleteEvent(event);
+        };
+        gateway.onMessageDeleteBulk = (GatewayMessageDeleteBulkInfo info) {
+            foreach (messageId; info.messageIds)
+            {
+                if (messageId.value != 0)
+                    cache.evictMessage(messageId);
+            }
+
+            MessageDeleteBulkEvent event;
+            event.messageIds = info.messageIds.dup;
+            event.channelId = info.channelId;
+            event.guildId = info.guildId;
+            event.context = buildMessageDeleteBulkEventContext(info);
+            emit!MessageDeleteBulkEvent(event);
         };
         gateway.onMessageReactionAdd = (GatewayMessageReactionInfo info) {
             MessageReactionAddEvent event;
@@ -1720,6 +1755,49 @@ final class Client
                 info.member
             );
             emit!PresenceUpdateEvent(event);
+        });
+        gateway.on!GatewayUserUpdateEvent((GatewayUserUpdateEvent gatewayEvent) {
+            auto user = gatewayEvent.user;
+            if (user.id.value != 0)
+                cache.store(user);
+            _selfUser = user;
+
+            UserUpdateEvent event;
+            event.user = user;
+            event.context = buildUserUpdateEventContext(user);
+            emit!UserUpdateEvent(event);
+        });
+        gateway.onVoiceStateUpdate = (GatewayVoiceStateUpdateInfo info) {
+            VoiceStateUpdateEvent event;
+            event.guildId = info.guildId;
+            event.channelId = info.channelId;
+            event.userId = info.userId;
+            event.sessionId = info.sessionId;
+            event.deaf = info.deaf;
+            event.mute = info.mute;
+            event.selfDeaf = info.selfDeaf;
+            event.selfMute = info.selfMute;
+            event.selfStream = info.selfStream;
+            event.selfVideo = info.selfVideo;
+            event.suppress = info.suppress;
+            event.context = buildVoiceStateUpdateEventContext(info);
+            emit!VoiceStateUpdateEvent(event);
+        };
+        gateway.onVoiceServerUpdate = (GatewayVoiceServerUpdateInfo info) {
+            VoiceServerUpdateEvent event;
+            event.guildId = info.guildId;
+            event.token = info.token;
+            event.endpoint = info.endpoint;
+            event.context = buildVoiceServerUpdateEventContext(info);
+            emit!VoiceServerUpdateEvent(event);
+        };
+        gateway.on!GatewayRawDispatchEvent((GatewayRawDispatchEvent raw) {
+            GatewayDispatchEvent event;
+            event.eventName = raw.eventName;
+            event.payload = raw.data;
+            event.sequence = raw.sequence;
+            event.context = buildGatewayDispatchEventContext(raw.eventName, raw.data, raw.sequence);
+            emit!GatewayDispatchEvent(event);
         });
         gateway.onError = (string message) {
             CommandFailedEvent event;

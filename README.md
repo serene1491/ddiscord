@@ -17,9 +17,11 @@ This library is also used in personal projects, so changes may be frequent and o
 - Multipart attachment uploads across message and interaction response flows
 - Message lifecycle helpers (create/edit/delete/bulk delete/crosspost/pin flows) and reaction endpoints
 - Guild moderation, thread management, and webhook execution REST surfaces
+- Advanced escape hatches for missing API wrappers (`rest.raw` and raw gateway dispatch events)
 - Components V2 coverage with runnable examples
 - State, cache, rate limiting, services, tasks, and Lua/plugin support
 - Coroutine-aware Lua runtime stepping (`evalStep` / `resumeStep`) with auto-resume helpers
+- Configurable Lua runtime guardrails (execution timeout, memory limit, instruction checkpoints)
 - Production-minded runtime controls (dispatch backpressure, error surfacing, and telemetry)
   with built-in queue health and real uptime tracking
 - Runtime safety guardrails for large bots (worker-loop crash isolation, stricter REST validation, and configurable retry controls)

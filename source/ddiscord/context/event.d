@@ -23,6 +23,7 @@ import ddiscord.services : ServiceContainer;
 import ddiscord.state : StateStore;
 import ddiscord.util.optional : Nullable;
 import ddiscord.util.snowflake : Snowflake;
+import std.json : JSONValue;
 
 /// Shared event context surface with cached/current entities.
 struct EventContext
@@ -100,6 +101,14 @@ struct GuildDeleteEventContext
     EventContext event;
     alias event this;
     UnavailableGuild guildData;
+}
+
+/// Guild-update event context.
+struct GuildUpdateEventContext
+{
+    EventContext event;
+    alias event this;
+    Guild guildData;
 }
 
 /// Guild member remove event context.
@@ -196,6 +205,16 @@ struct MessageDeleteEventContext
     Nullable!Snowflake guildId;
 }
 
+/// Message bulk-delete event context.
+struct MessageDeleteBulkEventContext
+{
+    EventContext event;
+    alias event this;
+    Snowflake[] messageIds;
+    Nullable!Snowflake channelId;
+    Nullable!Snowflake guildId;
+}
+
 /// Message reaction add event context.
 struct MessageReactionAddEventContext
 {
@@ -249,6 +268,16 @@ struct InteractionCreateEventContext
     Interaction interaction;
 }
 
+/// Raw gateway-dispatch event context.
+struct GatewayDispatchEventContext
+{
+    EventContext event;
+    alias event this;
+    string eventName;
+    JSONValue payload;
+    Nullable!long sequence;
+}
+
 /// Autocomplete interaction event context.
 struct AutocompleteInteractionEventContext
 {
@@ -286,6 +315,14 @@ struct PresenceUpdateEventContext
     Activity activity;
 }
 
+/// User-update event context.
+struct UserUpdateEventContext
+{
+    EventContext event;
+    alias event this;
+    User userData;
+}
+
 /// Typing-start event context.
 struct TypingStartEventContext
 {
@@ -295,6 +332,34 @@ struct TypingStartEventContext
     Nullable!Snowflake guildId;
     Snowflake userId;
     long timestampUnix;
+}
+
+/// Voice-state update event context.
+struct VoiceStateUpdateEventContext
+{
+    EventContext event;
+    alias event this;
+    Nullable!Snowflake guildId;
+    Nullable!Snowflake channelId;
+    Snowflake userId;
+    string sessionId;
+    bool deaf;
+    bool mute;
+    bool selfDeaf;
+    bool selfMute;
+    bool selfStream;
+    bool selfVideo;
+    bool suppress;
+}
+
+/// Voice-server update event context.
+struct VoiceServerUpdateEventContext
+{
+    EventContext event;
+    alias event this;
+    Nullable!Snowflake guildId;
+    string token;
+    string endpoint;
 }
 
 /// Guild role create event context.
