@@ -19,12 +19,20 @@ All notable changes to `ddiscord` should be documented in this file.
   and `GatewayThreadUpdateEvent`.
 - Command-context UX APIs that return response payloads when available:
   `CommandContext.sendMessage(...)`, `replyMessage(...)`, `followupMessage(...)`, and `editResponse(...)`.
+- Command-context UX APIs that always resolve a concrete response payload:
+  `CommandContext.sendMessageResolved(...)` plus route aliases
+  `PrefixContext.respondMessageResolved(...)`, `SlashContext.respondMessageResolved(...)`,
+  and `HybridContext.respondMessageResolved(...)`.
 - Route-context response helpers that preserve payload access:
   `PrefixContext.respondMessage(...)`, `SlashContext.respondMessage(...)`, and
   `HybridContext.respondMessage(...)`.
+- Interaction REST helper for fetching the original callback response:
+  `rest.interactions.fetchOriginal(interactionToken)`.
 - New gateway unittest coverage for typed subscription semantics (multi-listener invocation, one-shot listener removal, and explicit unsubscription).
 - New gateway unittest coverage verifying that message create/update wrapper subscriptions remain independently routable while legacy `on!Message(...)` listeners still receive both payloads.
 - New command-context unittest coverage for message-returning response helpers across prefix and interaction flows.
+- New command-context unittest coverage for resolved-message flows, including
+  interaction callback `@original` fetching and prefix-route direct creation.
 
 ### Changed
 
@@ -36,6 +44,7 @@ All notable changes to `ddiscord` should be documented in this file.
 - Client message routing now consumes dedicated message wrapper subscriptions (`GatewayMessageCreateEvent` / `GatewayMessageUpdateEvent`) to avoid payload-type ambiguity between create and update dispatches.
 - Existing `send(...)`, `reply(...)`, `followup(...)`, and `edit(...)` command-context helpers now delegate through shared message-returning implementations for more consistent behavior and error propagation.
 - Gateway URL normalization now uses the shared `DiscordGatewayVersion` constant instead of a hardcoded protocol version string.
+- README usage examples now document the message-returning response helpers and resolved-response interaction flow.
 
 ### Fixed
 

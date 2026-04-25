@@ -1270,6 +1270,41 @@ private final class RealDiscordRest
         return Result!(Message, string).ok(Message.fromJSON(json.value));
     }
 
+    Result!(Message, string) fetchOriginalInteractionResponse(string interactionToken)
+    {
+        auto encodedInteractionToken = encodeRouteToken(interactionToken, "interaction token");
+        if (encodedInteractionToken.isErr)
+            return Result!(Message, string).err(encodedInteractionToken.error);
+
+        auto applicationId = resolveApplicationId();
+        if (applicationId.isErr)
+            return Result!(Message, string).err(applicationId.error);
+
+        HttpRequest request;
+        request.method = HttpMethod.Get;
+        request.url = "/webhooks/" ~ applicationId.value.toString ~ "/" ~ encodedInteractionToken.value ~ "/messages/@original";
+        request.authenticated = false;
+
+        auto response = performRequest(
+            "GET:/webhooks/{application_id}/{interaction_token}/messages/@original",
+            request
+        );
+        if (response.isErr)
+            return Result!(Message, string).err(response.error);
+
+        auto json = response.value.json();
+        if (json.isErr)
+        {
+            return Result!(Message, string).err(formatError(
+                "rest",
+                "Discord returned an invalid original interaction response payload.",
+                json.error
+            ));
+        }
+
+        return Result!(Message, string).ok(Message.fromJSON(json.value));
+    }
+
     Result!(Message, string) executeWebhookMessage(
         Snowflake webhookId,
         string webhookToken,
@@ -2502,6 +2537,27 @@ final class InteractionsEndpoints
         return AsyncTask!Message.success(edited.value);
     }
 
+    /// Fetches the original interaction response message.
+    AsyncTask!Message fetchOriginal(string interactionToken)
+    {
+        if (_real.isNull)
+        {
+            return AsyncTask!Message.failure(formatError(
+                "rest",
+                "Cannot fetch the original interaction response because the REST transport is not configured.",
+                "",
+                "Configure a bot token or inject a transport before reading interaction responses."
+            ));
+        }
+
+        auto fetched = _real.get.fetchOriginalInteractionResponse(interactionToken);
+        if (fetched.isErr)
+            return AsyncTask!Message.failure(fetched.error);
+
+        _history.store(fetched.value);
+        return AsyncTask!Message.success(fetched.value);
+    }
+
 }
 
 /// REST client surface.
@@ -3394,13 +3450,17 @@ unittest
     assert(followup.isOk);
     assert(captured[0].url.canFind("/webhooks/42/abc%2Fdef%3Fx%3D1"));
 
+    auto original = rest.interactions.fetchOriginal("abc/def?x=1").awaitResult();
+    assert(original.isOk);
+    assert(captured[1].url.canFind("/webhooks/42/abc%2Fdef%3Fx%3D1/messages/@original"));
+
     auto webhook = rest.webhooks.execute(
         Snowflake(600),
         "abc/def?x=1",
         MessageCreate("ok")
     ).awaitResult();
     assert(webhook.isOk);
-    assert(captured[1].url.canFind("/webhooks/600/abc%2Fdef%3Fx%3D1?wait=true"));
+    assert(captured[2].url.canFind("/webhooks/600/abc%2Fdef%3Fx%3D1?wait=true"));
 }
 
 unittest
@@ -3413,6 +3473,10 @@ unittest
     auto followup = rest.interactions.followup("   ", MessageCreate("ok")).awaitResult();
     assert(followup.isErr);
     assert(followup.error.canFind("empty token"));
+
+    auto original = rest.interactions.fetchOriginal("   ").awaitResult();
+    assert(original.isErr);
+    assert(original.error.canFind("empty token"));
 
     auto webhook = rest.webhooks.execute(
         Snowflake(600),

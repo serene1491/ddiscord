@@ -130,6 +130,27 @@ void handleBuild(CommandContext ctx)
 }
 ```
 
+### Response payload helpers
+
+```d
+@SlashCommand("ticket", "Open a support ticket")
+void handleTicket(SlashContext ctx)
+{
+    // Always returns a concrete Message, even for the first slash callback.
+    auto created = ctx.respondMessageResolved("Ticket opened.", ephemeral: true).await();
+
+    // Use the returned message payload immediately.
+    ctx.followupMessage("Tracking id: " ~ created.id.toString, ephemeral: true).await();
+}
+```
+
+Use these helpers when you need the created/updated message payload in code:
+
+- `ctx.sendMessage(...)` / `ctx.replyMessage(...)` return `Nullable!Message`
+- `ctx.followupMessage(...)` / `ctx.editResponse(...)` return `Message`
+- `ctx.sendMessageResolved(...)` guarantees a `Message` by fetching interaction `@original` when required
+- route aliases are available: `respondMessage(...)` and `respondMessageResolved(...)` on `PrefixContext`, `SlashContext`, and `HybridContext`
+
 ### Opening a modal
 
 ```d
@@ -347,6 +368,7 @@ The public naming is being tightened before `1.0.0`:
 - `ctx.send(...)` is the normal response helper
 - `ctx.reply(...)` is the native reply helper
 - `ctx.edit(...)` edits the original interaction response
+- `ctx.sendMessage(...)` / `ctx.sendMessageResolved(...)` are available when handlers need returned message payloads
 - `client.registerCommands()` and `client.registerAllCommands()` scan the current module by default
 - `CommandRegistrationFilter` narrows auto-registration by module, owner, name, or category
 - built-in `help` is enabled by default and can render through embeds or Components V2

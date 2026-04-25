@@ -248,6 +248,48 @@ struct CommandContext
         return AsyncTask!(Nullable!Message).success(Nullable!Message.of(created.value));
     }
 
+    /// Sends a payload and always resolves a concrete response message.
+    ///
+    /// For initial interaction callback responses, this automatically fetches
+    /// the `@original` interaction response so handlers can keep working with a
+    /// concrete message value.
+    AsyncTask!Message sendMessageResolved(string content, bool ephemeral = false)
+    {
+        auto payload = MessageCreate(content);
+        return sendMessageResolved(payload, ephemeral);
+    }
+
+    /// Sends a payload and always resolves a concrete response message.
+    ///
+    /// For initial interaction callback responses, this automatically fetches
+    /// the `@original` interaction response so handlers can keep working with a
+    /// concrete message value.
+    AsyncTask!Message sendMessageResolved(MessageCreate payload, bool ephemeral = false)
+    {
+        auto sent = sendMessage(payload, ephemeral).awaitResult();
+        if (sent.isErr)
+            return AsyncTask!Message.failure(sent.error);
+
+        if (!sent.value.isNull)
+            return AsyncTask!Message.success(sent.value.get);
+
+        if (!hasInteractionToken)
+        {
+            return AsyncTask!Message.failure(formatError(
+                "context",
+                "Could not resolve a response message for this command context.",
+                "",
+                "Use `sendMessage` when a concrete response payload is not required."
+            ));
+        }
+
+        auto fetched = rest.interactions.fetchOriginal(interaction.get.token).awaitResult();
+        if (fetched.isErr)
+            return AsyncTask!Message.failure(fetched.error);
+
+        return AsyncTask!Message.success(fetched.value);
+    }
+
     /// Sends a message with one binary attachment in the current command context.
     AsyncTask!void sendFile(
         string filename,
@@ -831,6 +873,18 @@ struct PrefixContext
         return command.sendMessage(payload);
     }
 
+    /// Prefix-friendly alias for `sendMessageResolved`.
+    AsyncTask!Message respondMessageResolved(string content)
+    {
+        return command.sendMessageResolved(content);
+    }
+
+    /// Prefix-friendly alias for `sendMessageResolved`.
+    AsyncTask!Message respondMessageResolved(MessageCreate payload)
+    {
+        return command.sendMessageResolved(payload);
+    }
+
     /// Reply directly to the source message, mentioning by default.
     AsyncTask!void replyToSource(string content, bool mentionAuthor = true)
     {
@@ -876,6 +930,18 @@ struct SlashContext
     AsyncTask!(Nullable!Message) respondMessage(MessageCreate payload, bool ephemeral = false)
     {
         return command.sendMessage(payload, ephemeral);
+    }
+
+    /// Slash-friendly alias for `sendMessageResolved`.
+    AsyncTask!Message respondMessageResolved(string content, bool ephemeral = false)
+    {
+        return command.sendMessageResolved(content, ephemeral);
+    }
+
+    /// Slash-friendly alias for `sendMessageResolved`.
+    AsyncTask!Message respondMessageResolved(MessageCreate payload, bool ephemeral = false)
+    {
+        return command.sendMessageResolved(payload, ephemeral);
     }
 
     /// Sends an ephemeral slash response.
@@ -974,6 +1040,22 @@ struct HybridContext
         if (fromSlash)
             return command.sendMessage(payload, ephemeralOnSlash);
         return command.sendMessage(payload);
+    }
+
+    /// Unified response helper that always resolves a concrete message.
+    AsyncTask!Message respondMessageResolved(string content, bool ephemeralOnSlash = false)
+    {
+        if (fromSlash)
+            return command.sendMessageResolved(content, ephemeralOnSlash);
+        return command.sendMessageResolved(content);
+    }
+
+    /// Unified payload response helper that always resolves a concrete message.
+    AsyncTask!Message respondMessageResolved(MessageCreate payload, bool ephemeralOnSlash = false)
+    {
+        if (fromSlash)
+            return command.sendMessageResolved(payload, ephemeralOnSlash);
+        return command.sendMessageResolved(payload);
     }
 }
 
@@ -1336,4 +1418,58 @@ unittest
     assert(edited.value.id == Snowflake(42));
     assert(captured.length >= 3);
     assert(captured[$ - 1].url.canFind("/messages/@original"));
+}
+
+unittest
+{
+    import ddiscord.core.http.client : HttpError, HttpRequest, HttpResponse, HttpTransport;
+    import ddiscord.rest : RestClientConfig;
+    import ddiscord.util.result : Result;
+    import ddiscord.util.snowflake : Snowflake;
+    import std.algorithm : canFind;
+
+    HttpRequest[] captured;
+    HttpTransport transport = (request) {
+        captured ~= request;
+
+        HttpResponse response;
+        response.statusCode = 200;
+        if (request.url.canFind("/callback"))
+            response.body = cast(ubyte[]) `{}`.dup;
+        else if (request.url.canFind("/messages/@original"))
+            response.body = cast(ubyte[]) `{"id":"88","channel_id":"99","content":"resolved","author":{"id":"2","username":"bot","bot":true}}`.dup;
+        else
+            response.body = cast(ubyte[]) `{"id":"77","channel_id":"99","content":"ok","author":{"id":"2","username":"bot","bot":true}}`.dup;
+        return Result!(HttpResponse, HttpError).ok(response);
+    };
+
+    RestClientConfig config;
+    config.token = "token";
+    config.applicationId = Nullable!Snowflake.of(Snowflake(42));
+    config.transport = Nullable!HttpTransport.of(transport);
+
+    CommandContext interactionCtx;
+    interactionCtx.rest = new RestClient(config);
+    interactionCtx.source = CommandSource.Slash;
+    Interaction interaction;
+    interaction.id = Snowflake(33);
+    interaction.token = "abc";
+    interactionCtx.interaction = Nullable!Interaction.of(interaction);
+
+    auto interactionMessage = interactionCtx.sendMessageResolved("first", true).awaitResult();
+    assert(interactionMessage.isOk);
+    assert(interactionMessage.value.id == Snowflake(88));
+    assert(captured.length == 2);
+    assert(captured[0].url.canFind("/interactions/33/abc/callback"));
+    assert(captured[1].url.canFind("/webhooks/42/abc/messages/@original"));
+
+    CommandContext prefixCtx;
+    prefixCtx.rest = new RestClient(config);
+    prefixCtx.currentChannel.id = Snowflake(99);
+
+    auto prefixMessage = prefixCtx.sendMessageResolved("prefix").awaitResult();
+    assert(prefixMessage.isOk);
+    assert(prefixMessage.value.id == Snowflake(77));
+    assert(captured.length == 3);
+    assert(captured[2].url.canFind("/channels/99/messages"));
 }
