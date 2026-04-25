@@ -55,9 +55,10 @@ import ddiscord.events.types : AutocompleteInteractionEvent, CommandExecutedEven
     TypingStartEvent, WebhooksUpdateEvent;
 import ddiscord.gateway.client : GatewayClient, GatewayClientConfig, GatewayGuildMemberAddInfo,
     GatewayGuildMemberRemoveInfo, GatewayGuildBanInfo, GatewayGuildRoleDeleteInfo,
-    GatewayGuildRoleInfo, GatewayInviteInfo, GatewayMessageDeleteInfo,
+    GatewayGuildRoleInfo, GatewayInviteInfo, GatewayMessageCreateEvent,
+    GatewayMessageDeleteInfo, GatewayMessageUpdateEvent,
     GatewayMessageReactionInfo, GatewayMessageReactionRemoveAllInfo,
-    GatewayPresenceUpdateInfo, GatewayReadyInfo, GatewayThreadDeleteInfo,
+    GatewayPresenceUpdateInfo, GatewayReadyInfo, GatewayResumedInfo, GatewayThreadDeleteInfo,
     GatewayTypingStartInfo, GatewayWebhooksUpdateInfo, GatewayChannelPinsUpdateInfo;
 import ddiscord.gateway.intents : GatewayIntent;
 import ddiscord.help.navigation : BuiltInHelpCustomIdPrefix, BuiltInHelpDefaultPageSize,
@@ -1413,7 +1414,7 @@ final class Client
 
     private void wireGatewayCallbacks(GatewayClient gateway, uint shardId, uint shardCount)
     {
-        gateway.onReady = (GatewayReadyInfo ready) {
+        gateway.on!GatewayReadyInfo((GatewayReadyInfo ready) {
             if (ready.selfUser.id.value != 0)
                 _selfUser = ready.selfUser;
 
@@ -1436,8 +1437,9 @@ final class Client
                 "READY received for shard `" ~ shardId.to!string ~ "/" ~ shardCount.to!string ~ "`."
             );
             gateway.updatePresence(_status, _activity);
-        };
-        gateway.onResumed = () {
+        });
+        gateway.on!GatewayResumedInfo((GatewayResumedInfo info) {
+            auto _ = info;
             if (allShardsReady())
                 tasks.cancel(GatewayReadyWatchdogLabel);
 
@@ -1449,8 +1451,8 @@ final class Client
                 "RESUMED received for shard `" ~ shardId.to!string ~ "/" ~ shardCount.to!string ~ "`."
             );
             gateway.updatePresence(_status, _activity);
-        };
-        gateway.onGuildCreate = (Guild guild) {
+        });
+        gateway.on!Guild((Guild guild) {
             if (guild.id.value != 0)
                 cache.store(guild);
 
@@ -1458,8 +1460,8 @@ final class Client
             event.guild = guild;
             event.context = buildGuildCreateEventContext(guild);
             emit!GuildCreateEvent(event);
-        };
-        gateway.onGuildDelete = (UnavailableGuild guild) {
+        });
+        gateway.on!UnavailableGuild((UnavailableGuild guild) {
             if (!guild.unavailable && guild.id.value != 0)
                 cache.evictGuild(guild.id);
 
@@ -1467,7 +1469,7 @@ final class Client
             event.guild = guild;
             event.context = buildGuildDeleteEventContext(guild);
             emit!GuildDeleteEvent(event);
-        };
+        });
         gateway.onGuildMemberRemove = (GatewayGuildMemberRemoveInfo info) {
             if (info.user.id.value != 0)
                 cache.store(info.user);
@@ -1533,10 +1535,11 @@ final class Client
             event.context = buildChannelPinsUpdateEventContext(info);
             emit!ChannelPinsUpdateEvent(event);
         };
-        gateway.onMessageCreate = (Message message) {
-            enqueueMessage(message);
-        };
-        gateway.onMessageUpdate = (Message message) {
+        gateway.on!GatewayMessageCreateEvent((GatewayMessageCreateEvent event) {
+            enqueueMessage(event.message);
+        });
+        gateway.on!GatewayMessageUpdateEvent((GatewayMessageUpdateEvent gatewayEvent) {
+            auto message = gatewayEvent.message;
             if (message.id.value != 0)
                 cache.store(message);
             if (message.author.id.value != 0)
@@ -1546,7 +1549,7 @@ final class Client
             event.message = message;
             event.context = buildMessageUpdateEventContext(message);
             emit!MessageUpdateEvent(event);
-        };
+        });
         gateway.onMessageDelete = (GatewayMessageDeleteInfo info) {
             auto cached = cache.message(info.messageId);
             if (info.messageId.value != 0)
@@ -1687,12 +1690,12 @@ final class Client
             event.context = buildThreadDeleteEventContext(info);
             emit!ThreadDeleteEvent(event);
         };
-        gateway.onInteractionCreate = (Interaction interaction) {
+        gateway.on!Interaction((Interaction interaction) {
             Channel channel;
             channel.id = interaction.channelId;
             enqueueInteraction(interaction, channel);
-        };
-        gateway.onGuildMemberAdd = (GatewayGuildMemberAddInfo info) {
+        });
+        gateway.on!GatewayGuildMemberAddInfo((GatewayGuildMemberAddInfo info) {
             if (!info.member.user.isNull)
                 cache.store(info.member.user.get);
 
@@ -1701,8 +1704,8 @@ final class Client
             event.guild.memberCount = info.memberCount;
             event.context = buildGuildMemberAddEventContext(info.member, info.guildId);
             emit!GuildMemberAddEvent(event);
-        };
-        gateway.onPresenceUpdate = (GatewayPresenceUpdateInfo info) {
+        });
+        gateway.on!GatewayPresenceUpdateInfo((GatewayPresenceUpdateInfo info) {
             if (info.user.id.value != 0)
                 cache.store(info.user);
 
@@ -1717,7 +1720,7 @@ final class Client
                 info.member
             );
             emit!PresenceUpdateEvent(event);
-        };
+        });
         gateway.onError = (string message) {
             CommandFailedEvent event;
             event.attemptedName = "[gateway]";

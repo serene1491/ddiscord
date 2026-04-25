@@ -24,15 +24,18 @@ import ddiscord.models.presence : Activity, ActivityType, StatusType, statusFrom
 import ddiscord.models.role : Role;
 import ddiscord.models.user : User;
 import ddiscord.util.errors : DdiscordException, formatError;
+import ddiscord.util.limits : DiscordGatewayVersion;
 import ddiscord.util.optional : Nullable;
 import ddiscord.util.snowflake : Snowflake;
 import requests.streams : ConnectError, NetworkStream, SSLSocketStream,
     SSLOptions, TCPSocketStream, TimeoutException;
-import std.algorithm : canFind;
+import std.algorithm : canFind, filter;
+import std.array : array;
 import std.conv : ConvException, to;
 import std.json : JSONType, JSONValue, parseJSON;
 import std.random : uniform;
 import std.string : endsWith, startsWith;
+import std.variant : Variant;
 
 /// Gateway opcode values used by Discord.
 enum GatewayOpcode : int
@@ -76,6 +79,11 @@ struct GatewayReadyInfo
     string resumeGatewayUrl;
 }
 
+/// Typed payload for `RESUMED`.
+struct GatewayResumedInfo
+{
+}
+
 /// Typed payload for `GUILD_MEMBER_ADD`.
 struct GatewayGuildMemberAddInfo
 {
@@ -100,6 +108,18 @@ struct GatewayMessageDeleteInfo
     Snowflake messageId;
     Nullable!Snowflake channelId;
     Nullable!Snowflake guildId;
+}
+
+/// Typed payload for `MESSAGE_CREATE`.
+struct GatewayMessageCreateEvent
+{
+    Message message;
+}
+
+/// Typed payload for `MESSAGE_UPDATE`.
+struct GatewayMessageUpdateEvent
+{
+    Message message;
 }
 
 /// Typed payload for `GUILD_MEMBER_REMOVE`.
@@ -186,6 +206,36 @@ struct GatewayThreadDeleteInfo
     Snowflake threadId;
     Nullable!Snowflake guildId;
     Nullable!Snowflake parentId;
+}
+
+/// Typed payload for `CHANNEL_CREATE`.
+struct GatewayChannelCreateEvent
+{
+    Channel channel;
+}
+
+/// Typed payload for `CHANNEL_UPDATE`.
+struct GatewayChannelUpdateEvent
+{
+    Channel channel;
+}
+
+/// Typed payload for `CHANNEL_DELETE`.
+struct GatewayChannelDeleteEvent
+{
+    Channel channel;
+}
+
+/// Typed payload for `THREAD_CREATE`.
+struct GatewayThreadCreateEvent
+{
+    Channel thread;
+}
+
+/// Typed payload for `THREAD_UPDATE`.
+struct GatewayThreadUpdateEvent
+{
+    Channel thread;
 }
 
 private struct GatewayEnvelope
@@ -349,6 +399,14 @@ private final class RequestsWebSocketStreamAdapter : IWebSocketStream
 /// Blocking Discord gateway session manager.
 final class GatewayClient
 {
+    private struct DispatchSubscription(E)
+    {
+        bool once;
+        void delegate(E) handler;
+    }
+
+    private alias DispatchHandler = void delegate(JSONValue);
+
     GatewayClientConfig config;
     void delegate(GatewayReadyInfo) onReady;
     void delegate() onResumed;
@@ -400,6 +458,9 @@ final class GatewayClient
     private bool _awaitingHeartbeatAck;
     private RequestsWebSocketStreamAdapter _stream;
     private WebSocketConnection _socket;
+    private Mutex _dispatchSubscriptionsMutex;
+    private Variant[string] _dispatchSubscriptions;
+    private DispatchHandler[string] _dispatchHandlers;
     private size_t[string] _unhandledDispatchEventCounts;
 
     this(GatewayClientConfig config)
@@ -407,6 +468,47 @@ final class GatewayClient
         this.config = config;
         _sendMutex = new Mutex;
         _heartbeatMutex = new Mutex;
+        _dispatchSubscriptionsMutex = new Mutex;
+        registerDispatchHandlers();
+    }
+
+    /// Registers a typed dispatch listener.
+    /// Listeners are keyed by payload type; if multiple Discord dispatch names
+    /// map to the same payload type, all mapped events will invoke this listener.
+    void on(E)(void delegate(E) handler)
+    {
+        auto key = typeid(E).toString;
+        synchronized (_dispatchSubscriptionsMutex)
+        {
+            auto handlers = subscriptionEntries!E(key);
+            handlers ~= DispatchSubscription!E(false, handler);
+            _dispatchSubscriptions[key] = Variant(handlers);
+        }
+    }
+
+    /// Registers a one-shot typed dispatch listener.
+    /// One-shot listeners follow the same payload-type routing semantics as `on`.
+    void once(E)(void delegate(E) handler)
+    {
+        auto key = typeid(E).toString;
+        synchronized (_dispatchSubscriptionsMutex)
+        {
+            auto handlers = subscriptionEntries!E(key);
+            handlers ~= DispatchSubscription!E(true, handler);
+            _dispatchSubscriptions[key] = Variant(handlers);
+        }
+    }
+
+    /// Removes a typed dispatch listener.
+    void off(E)(void delegate(E) handler)
+    {
+        auto key = typeid(E).toString;
+        synchronized (_dispatchSubscriptionsMutex)
+        {
+            auto handlers = subscriptionEntries!E(key);
+            handlers = handlers.filter!(entry => entry.handler != handler).array;
+            _dispatchSubscriptions[key] = Variant(handlers);
+        }
     }
 
     /// Runs the gateway loop until stopped or a fatal error occurs.
@@ -655,257 +757,339 @@ final class GatewayClient
         }
     }
 
+    private void registerDispatchHandlers()
+    {
+        _dispatchHandlers["READY"] = (JSONValue data) {
+            handleReadyDispatch(data);
+        };
+        _dispatchHandlers["RESUMED"] = (JSONValue data) {
+            handleResumedDispatch(data);
+        };
+
+        _dispatchHandlers["GUILD_CREATE"] = (JSONValue data) {
+            invokeFromJSON!Guild(data, onGuildCreate);
+        };
+        _dispatchHandlers["GUILD_DELETE"] = (JSONValue data) {
+            invokeFromJSON!UnavailableGuild(data, onGuildDelete);
+        };
+        _dispatchHandlers["GUILD_MEMBER_REMOVE"] = (JSONValue data) {
+            invokeParsed!(GatewayGuildMemberRemoveInfo, parseGuildMemberRemove)(data, onGuildMemberRemove);
+        };
+        _dispatchHandlers["GUILD_BAN_ADD"] = (JSONValue data) {
+            invokeParsed!(GatewayGuildBanInfo, parseGuildBan)(data, onGuildBanAdd);
+        };
+        _dispatchHandlers["GUILD_BAN_REMOVE"] = (JSONValue data) {
+            invokeParsed!(GatewayGuildBanInfo, parseGuildBan)(data, onGuildBanRemove);
+        };
+
+        _dispatchHandlers["CHANNEL_CREATE"] = (JSONValue data) {
+            handleChannelCreateDispatch(data);
+        };
+        _dispatchHandlers["CHANNEL_UPDATE"] = (JSONValue data) {
+            handleChannelUpdateDispatch(data);
+        };
+        _dispatchHandlers["CHANNEL_DELETE"] = (JSONValue data) {
+            handleChannelDeleteDispatch(data);
+        };
+        _dispatchHandlers["CHANNEL_PINS_UPDATE"] = (JSONValue data) {
+            invokeParsed!(GatewayChannelPinsUpdateInfo, parseChannelPinsUpdate)(data, onChannelPinsUpdate);
+        };
+
+        _dispatchHandlers["MESSAGE_CREATE"] = (JSONValue data) {
+            handleMessageCreateDispatch(data);
+        };
+        _dispatchHandlers["MESSAGE_UPDATE"] = (JSONValue data) {
+            handleMessageUpdateDispatch(data);
+        };
+        _dispatchHandlers["MESSAGE_DELETE"] = (JSONValue data) {
+            invokeParsed!(GatewayMessageDeleteInfo, parseMessageDelete)(data, onMessageDelete);
+        };
+        _dispatchHandlers["MESSAGE_REACTION_ADD"] = (JSONValue data) {
+            invokeParsed!(GatewayMessageReactionInfo, parseMessageReaction)(data, onMessageReactionAdd);
+        };
+        _dispatchHandlers["MESSAGE_REACTION_REMOVE"] = (JSONValue data) {
+            invokeParsed!(GatewayMessageReactionInfo, parseMessageReaction)(data, onMessageReactionRemove);
+        };
+        _dispatchHandlers["MESSAGE_REACTION_REMOVE_ALL"] = (JSONValue data) {
+            invokeParsed!(GatewayMessageReactionRemoveAllInfo, parseMessageReactionRemoveAll)(data, onMessageReactionRemoveAll);
+        };
+        _dispatchHandlers["MESSAGE_REACTION_REMOVE_EMOJI"] = (JSONValue data) {
+            invokeParsed!(GatewayMessageReactionInfo, parseMessageReaction)(data, onMessageReactionRemoveEmoji);
+        };
+
+        _dispatchHandlers["TYPING_START"] = (JSONValue data) {
+            invokeParsed!(GatewayTypingStartInfo, parseTypingStart)(data, onTypingStart);
+        };
+
+        _dispatchHandlers["GUILD_ROLE_CREATE"] = (JSONValue data) {
+            invokeParsed!(GatewayGuildRoleInfo, parseGuildRole)(data, onGuildRoleCreate);
+        };
+        _dispatchHandlers["GUILD_ROLE_UPDATE"] = (JSONValue data) {
+            invokeParsed!(GatewayGuildRoleInfo, parseGuildRole)(data, onGuildRoleUpdate);
+        };
+        _dispatchHandlers["GUILD_ROLE_DELETE"] = (JSONValue data) {
+            invokeParsed!(GatewayGuildRoleDeleteInfo, parseGuildRoleDelete)(data, onGuildRoleDelete);
+        };
+
+        _dispatchHandlers["INVITE_CREATE"] = (JSONValue data) {
+            invokeParsed!(GatewayInviteInfo, parseInvite)(data, onInviteCreate);
+        };
+        _dispatchHandlers["INVITE_DELETE"] = (JSONValue data) {
+            invokeParsed!(GatewayInviteInfo, parseInvite)(data, onInviteDelete);
+        };
+        _dispatchHandlers["WEBHOOKS_UPDATE"] = (JSONValue data) {
+            invokeParsed!(GatewayWebhooksUpdateInfo, parseWebhooksUpdate)(data, onWebhooksUpdate);
+        };
+
+        _dispatchHandlers["THREAD_CREATE"] = (JSONValue data) {
+            handleThreadCreateDispatch(data);
+        };
+        _dispatchHandlers["THREAD_UPDATE"] = (JSONValue data) {
+            handleThreadUpdateDispatch(data);
+        };
+        _dispatchHandlers["THREAD_DELETE"] = (JSONValue data) {
+            invokeParsed!(GatewayThreadDeleteInfo, parseThreadDelete)(data, onThreadDelete);
+        };
+
+        _dispatchHandlers["INTERACTION_CREATE"] = (JSONValue data) {
+            invokeFromJSON!Interaction(data, onInteractionCreate);
+        };
+        _dispatchHandlers["GUILD_MEMBER_ADD"] = (JSONValue data) {
+            invokeParsed!(GatewayGuildMemberAddInfo, parseGuildMemberAdd)(data, onGuildMemberAdd);
+        };
+        _dispatchHandlers["PRESENCE_UPDATE"] = (JSONValue data) {
+            invokeParsed!(GatewayPresenceUpdateInfo, parsePresenceUpdate)(data, onPresenceUpdate);
+        };
+    }
+
+    private void handleReadyDispatch(JSONValue data)
+    {
+        auto sessionIdValue = data.object.get("session_id", JSONValue.init);
+        if (sessionIdValue.type != JSONType.null_)
+            _sessionId = sessionIdValue.str;
+
+        auto resumeUrlValue = data.object.get("resume_gateway_url", JSONValue.init);
+        if (resumeUrlValue.type != JSONType.null_)
+            _resumeGatewayUrl = resumeUrlValue.str;
+
+        GatewayReadyInfo info;
+        auto versionValue = data.object.get("v", JSONValue.init);
+        if (versionValue.type != JSONType.null_)
+            info.gatewayVersion = cast(uint) versionValue.integer;
+
+        auto userValue = data.object.get("user", JSONValue.init);
+        if (userValue.type != JSONType.null_)
+            info.selfUser = User.fromJSON(userValue);
+
+        auto guildsValue = data.object.get("guilds", JSONValue.init);
+        if (guildsValue.type == JSONType.array)
+        {
+            foreach (item; guildsValue.array)
+                info.guilds ~= UnavailableGuild.fromJSON(item);
+        }
+
+        info.sessionId = _sessionId;
+        info.resumeGatewayUrl = _resumeGatewayUrl;
+        _ready = true;
+        _nextSessionMode = GatewaySessionMode.Resume;
+
+        if (onReady !is null)
+            onReady(info);
+
+        emitDispatch!GatewayReadyInfo(info);
+    }
+
+    private void handleResumedDispatch(JSONValue data)
+    {
+        auto _ = data;
+        _ready = true;
+        _nextSessionMode = GatewaySessionMode.Resume;
+        if (onResumed !is null)
+            onResumed();
+
+        emitDispatch!GatewayResumedInfo(GatewayResumedInfo.init);
+    }
+
+    private void handleMessageCreateDispatch(JSONValue data)
+    {
+        auto message = Message.fromJSON(data);
+
+        if (onMessageCreate !is null)
+            onMessageCreate(message);
+
+        GatewayMessageCreateEvent event;
+        event.message = message;
+        emitDispatch!GatewayMessageCreateEvent(event);
+        emitDispatch!Message(message);
+    }
+
+    private void handleMessageUpdateDispatch(JSONValue data)
+    {
+        auto message = Message.fromJSON(data);
+
+        if (onMessageUpdate !is null)
+            onMessageUpdate(message);
+
+        GatewayMessageUpdateEvent event;
+        event.message = message;
+        emitDispatch!GatewayMessageUpdateEvent(event);
+        emitDispatch!Message(message);
+    }
+
+    private void handleChannelCreateDispatch(JSONValue data)
+    {
+        auto channel = Channel.fromJSON(data);
+
+        if (onChannelCreate !is null)
+            onChannelCreate(channel);
+
+        GatewayChannelCreateEvent event;
+        event.channel = channel;
+        emitDispatch!GatewayChannelCreateEvent(event);
+        emitDispatch!Channel(channel);
+    }
+
+    private void handleChannelUpdateDispatch(JSONValue data)
+    {
+        auto channel = Channel.fromJSON(data);
+
+        if (onChannelUpdate !is null)
+            onChannelUpdate(channel);
+
+        GatewayChannelUpdateEvent event;
+        event.channel = channel;
+        emitDispatch!GatewayChannelUpdateEvent(event);
+        emitDispatch!Channel(channel);
+    }
+
+    private void handleChannelDeleteDispatch(JSONValue data)
+    {
+        auto channel = Channel.fromJSON(data);
+
+        if (onChannelDelete !is null)
+            onChannelDelete(channel);
+
+        GatewayChannelDeleteEvent event;
+        event.channel = channel;
+        emitDispatch!GatewayChannelDeleteEvent(event);
+        emitDispatch!Channel(channel);
+    }
+
+    private void handleThreadCreateDispatch(JSONValue data)
+    {
+        auto thread = Channel.fromJSON(data);
+
+        if (onThreadCreate !is null)
+            onThreadCreate(thread);
+
+        GatewayThreadCreateEvent event;
+        event.thread = thread;
+        emitDispatch!GatewayThreadCreateEvent(event);
+        emitDispatch!Channel(thread);
+    }
+
+    private void handleThreadUpdateDispatch(JSONValue data)
+    {
+        auto thread = Channel.fromJSON(data);
+
+        if (onThreadUpdate !is null)
+            onThreadUpdate(thread);
+
+        GatewayThreadUpdateEvent event;
+        event.thread = thread;
+        emitDispatch!GatewayThreadUpdateEvent(event);
+        emitDispatch!Channel(thread);
+    }
+
+    private void invokeFromJSON(T)(JSONValue data, void delegate(T) callback)
+    {
+        if (callback is null && !hasDispatchSubscribers!T())
+            return;
+
+        auto value = T.fromJSON(data);
+
+        if (callback !is null)
+            callback(value);
+
+        emitDispatch!T(value);
+    }
+
+    private void invokeParsed(T, alias parser)(JSONValue data, void delegate(T) callback)
+    {
+        if (callback is null && !hasDispatchSubscribers!T())
+            return;
+
+        auto value = parser(data);
+
+        if (callback !is null)
+            callback(value);
+
+        emitDispatch!T(value);
+    }
+
     private void handleDispatch(GatewayEnvelope envelope)
     {
-        if (envelope.eventName == "READY")
+        auto handler = envelope.eventName in _dispatchHandlers;
+        if (handler is null)
         {
-            auto sessionIdValue = envelope.data.object.get("session_id", JSONValue.init);
-            if (sessionIdValue.type != JSONType.null_)
-                _sessionId = sessionIdValue.str;
+            reportUnhandledDispatch(envelope.eventName);
+            return;
+        }
 
-            auto resumeUrlValue = envelope.data.object.get("resume_gateway_url", JSONValue.init);
-            if (resumeUrlValue.type != JSONType.null_)
-                _resumeGatewayUrl = resumeUrlValue.str;
+        (*handler)(envelope.data);
+    }
 
-            GatewayReadyInfo info;
-            auto versionValue = envelope.data.object.get("v", JSONValue.init);
-            if (versionValue.type != JSONType.null_)
-                info.gatewayVersion = cast(uint) versionValue.integer;
+    private DispatchSubscription!E[] subscriptionEntries(E)(string key)
+    {
+        if (auto existing = key in _dispatchSubscriptions)
+            return (*existing).get!(DispatchSubscription!E[]).dup;
+        return null;
+    }
 
-            auto userValue = envelope.data.object.get("user", JSONValue.init);
-            if (userValue.type != JSONType.null_)
-                info.selfUser = User.fromJSON(userValue);
+    private bool hasDispatchSubscribers(E)()
+    {
+        auto key = typeid(E).toString;
+        synchronized (_dispatchSubscriptionsMutex)
+        {
+            auto handlers = subscriptionEntries!E(key);
+            return handlers.length != 0;
+        }
+    }
 
-            auto guildsValue = envelope.data.object.get("guilds", JSONValue.init);
-            if (guildsValue.type == JSONType.array)
+    private void emitDispatch(E)(E value)
+    {
+        auto key = typeid(E).toString;
+
+        DispatchSubscription!E[] handlers;
+        synchronized (_dispatchSubscriptionsMutex)
+            handlers = subscriptionEntries!E(key);
+
+        if (handlers.length == 0)
+            return;
+
+        DispatchSubscription!E[] survivors;
+        foreach (entry; handlers)
+        {
+            try
             {
-                foreach (item; guildsValue.array)
-                    info.guilds ~= UnavailableGuild.fromJSON(item);
+                entry.handler(value);
+            }
+            catch (Exception error)
+            {
+                reportError(formatError(
+                    "gateway",
+                    "A typed gateway listener raised an exception.",
+                    "Listener for `" ~ typeid(E).toString ~ "` failed with `" ~ error.msg ~ "`.",
+                    "Inspect the listener implementation. Remaining listeners continued."
+                ));
             }
 
-            info.sessionId = _sessionId;
-            info.resumeGatewayUrl = _resumeGatewayUrl;
-            _ready = true;
-            _nextSessionMode = GatewaySessionMode.Resume;
-
-            if (onReady !is null)
-                onReady(info);
-            return;
+            if (!entry.once)
+                survivors ~= entry;
         }
 
-        if (envelope.eventName == "RESUMED")
-        {
-            _ready = true;
-            _nextSessionMode = GatewaySessionMode.Resume;
-            if (onResumed !is null)
-                onResumed();
-            return;
-        }
-
-        if (envelope.eventName == "GUILD_CREATE")
-        {
-            if (onGuildCreate !is null)
-                onGuildCreate(Guild.fromJSON(envelope.data));
-            return;
-        }
-
-        if (envelope.eventName == "GUILD_DELETE")
-        {
-            if (onGuildDelete !is null)
-                onGuildDelete(UnavailableGuild.fromJSON(envelope.data));
-            return;
-        }
-
-        if (envelope.eventName == "GUILD_MEMBER_REMOVE")
-        {
-            if (onGuildMemberRemove !is null)
-                onGuildMemberRemove(parseGuildMemberRemove(envelope.data));
-            return;
-        }
-
-        if (envelope.eventName == "GUILD_BAN_ADD")
-        {
-            if (onGuildBanAdd !is null)
-                onGuildBanAdd(parseGuildBan(envelope.data));
-            return;
-        }
-
-        if (envelope.eventName == "GUILD_BAN_REMOVE")
-        {
-            if (onGuildBanRemove !is null)
-                onGuildBanRemove(parseGuildBan(envelope.data));
-            return;
-        }
-
-        if (envelope.eventName == "CHANNEL_CREATE")
-        {
-            if (onChannelCreate !is null)
-                onChannelCreate(Channel.fromJSON(envelope.data));
-            return;
-        }
-
-        if (envelope.eventName == "CHANNEL_UPDATE")
-        {
-            if (onChannelUpdate !is null)
-                onChannelUpdate(Channel.fromJSON(envelope.data));
-            return;
-        }
-
-        if (envelope.eventName == "CHANNEL_DELETE")
-        {
-            if (onChannelDelete !is null)
-                onChannelDelete(Channel.fromJSON(envelope.data));
-            return;
-        }
-
-        if (envelope.eventName == "CHANNEL_PINS_UPDATE")
-        {
-            if (onChannelPinsUpdate !is null)
-                onChannelPinsUpdate(parseChannelPinsUpdate(envelope.data));
-            return;
-        }
-
-        if (envelope.eventName == "MESSAGE_CREATE")
-        {
-            if (onMessageCreate !is null)
-                onMessageCreate(Message.fromJSON(envelope.data));
-            return;
-        }
-
-        if (envelope.eventName == "MESSAGE_UPDATE")
-        {
-            if (onMessageUpdate !is null)
-                onMessageUpdate(Message.fromJSON(envelope.data));
-            return;
-        }
-
-        if (envelope.eventName == "MESSAGE_DELETE")
-        {
-            if (onMessageDelete !is null)
-                onMessageDelete(parseMessageDelete(envelope.data));
-            return;
-        }
-
-        if (envelope.eventName == "MESSAGE_REACTION_ADD")
-        {
-            if (onMessageReactionAdd !is null)
-                onMessageReactionAdd(parseMessageReaction(envelope.data));
-            return;
-        }
-
-        if (envelope.eventName == "MESSAGE_REACTION_REMOVE")
-        {
-            if (onMessageReactionRemove !is null)
-                onMessageReactionRemove(parseMessageReaction(envelope.data));
-            return;
-        }
-
-        if (envelope.eventName == "MESSAGE_REACTION_REMOVE_ALL")
-        {
-            if (onMessageReactionRemoveAll !is null)
-                onMessageReactionRemoveAll(parseMessageReactionRemoveAll(envelope.data));
-            return;
-        }
-
-        if (envelope.eventName == "MESSAGE_REACTION_REMOVE_EMOJI")
-        {
-            if (onMessageReactionRemoveEmoji !is null)
-                onMessageReactionRemoveEmoji(parseMessageReaction(envelope.data));
-            return;
-        }
-
-        if (envelope.eventName == "TYPING_START")
-        {
-            if (onTypingStart !is null)
-                onTypingStart(parseTypingStart(envelope.data));
-            return;
-        }
-
-        if (envelope.eventName == "GUILD_ROLE_CREATE")
-        {
-            if (onGuildRoleCreate !is null)
-                onGuildRoleCreate(parseGuildRole(envelope.data));
-            return;
-        }
-
-        if (envelope.eventName == "GUILD_ROLE_UPDATE")
-        {
-            if (onGuildRoleUpdate !is null)
-                onGuildRoleUpdate(parseGuildRole(envelope.data));
-            return;
-        }
-
-        if (envelope.eventName == "GUILD_ROLE_DELETE")
-        {
-            if (onGuildRoleDelete !is null)
-                onGuildRoleDelete(parseGuildRoleDelete(envelope.data));
-            return;
-        }
-
-        if (envelope.eventName == "INVITE_CREATE")
-        {
-            if (onInviteCreate !is null)
-                onInviteCreate(parseInvite(envelope.data));
-            return;
-        }
-
-        if (envelope.eventName == "INVITE_DELETE")
-        {
-            if (onInviteDelete !is null)
-                onInviteDelete(parseInvite(envelope.data));
-            return;
-        }
-
-        if (envelope.eventName == "WEBHOOKS_UPDATE")
-        {
-            if (onWebhooksUpdate !is null)
-                onWebhooksUpdate(parseWebhooksUpdate(envelope.data));
-            return;
-        }
-
-        if (envelope.eventName == "THREAD_CREATE")
-        {
-            if (onThreadCreate !is null)
-                onThreadCreate(Channel.fromJSON(envelope.data));
-            return;
-        }
-
-        if (envelope.eventName == "THREAD_UPDATE")
-        {
-            if (onThreadUpdate !is null)
-                onThreadUpdate(Channel.fromJSON(envelope.data));
-            return;
-        }
-
-        if (envelope.eventName == "THREAD_DELETE")
-        {
-            if (onThreadDelete !is null)
-                onThreadDelete(parseThreadDelete(envelope.data));
-            return;
-        }
-
-        if (envelope.eventName == "INTERACTION_CREATE")
-        {
-            if (onInteractionCreate !is null)
-                onInteractionCreate(Interaction.fromJSON(envelope.data));
-            return;
-        }
-
-        if (envelope.eventName == "GUILD_MEMBER_ADD")
-        {
-            if (onGuildMemberAdd !is null)
-                onGuildMemberAdd(parseGuildMemberAdd(envelope.data));
-            return;
-        }
-
-        if (envelope.eventName == "PRESENCE_UPDATE")
-        {
-            if (onPresenceUpdate !is null)
-                onPresenceUpdate(parsePresenceUpdate(envelope.data));
-            return;
-        }
-
-        reportUnhandledDispatch(envelope.eventName);
+        synchronized (_dispatchSubscriptionsMutex)
+            _dispatchSubscriptions[key] = Variant(survivors);
     }
 
     private GatewayEnvelope receiveEnvelope()
@@ -1584,10 +1768,11 @@ private string fatalCloseHint(int closeCode)
 
 private string normalizedGatewayUrl(string url)
 {
+    immutable gatewayVersion = DiscordGatewayVersion.to!string;
     if (!url.canFind("encoding="))
         url ~= url.canFind("?") ? "&encoding=json" : gatewayQueryPrefix(url) ~ "encoding=json";
     if (!url.canFind("v="))
-        url ~= url.canFind("?") ? "&v=10" : gatewayQueryPrefix(url) ~ "v=10";
+        url ~= url.canFind("?") ? "&v=" ~ gatewayVersion : gatewayQueryPrefix(url) ~ "v=" ~ gatewayVersion;
     return url;
 }
 
@@ -1696,6 +1881,98 @@ unittest
     assert(deleteCalls == 1);
     assert(deletedGuild.id == Snowflake(10));
     assert(deletedGuild.unavailable);
+}
+
+unittest
+{
+    auto client = new GatewayClient(GatewayClientConfig("token", 0, "wss://gateway.discord.gg"));
+
+    size_t regularCalls;
+    size_t onceCalls;
+
+    void delegate(Guild) regular = (Guild guild) {
+        auto _ = guild;
+        regularCalls++;
+    };
+
+    client.on!Guild(regular);
+    client.once!Guild((Guild guild) {
+        auto _ = guild;
+        onceCalls++;
+    });
+
+    auto makeEnvelope = (string eventName, JSONValue payload) {
+        GatewayEnvelope envelope;
+        envelope.opcode = GatewayOpcode.Dispatch;
+        envelope.eventName = eventName;
+        envelope.data = payload;
+        return envelope;
+    };
+
+    auto payload = JSONValue(["id": JSONValue("10"), "name": JSONValue("home"), "owner_id": JSONValue("7")]);
+    client.handleDispatch(makeEnvelope("GUILD_CREATE", payload));
+    client.handleDispatch(makeEnvelope("GUILD_CREATE", payload));
+    client.off!Guild(regular);
+    client.handleDispatch(makeEnvelope("GUILD_CREATE", payload));
+
+    assert(regularCalls == 2);
+    assert(onceCalls == 1);
+}
+
+unittest
+{
+    auto client = new GatewayClient(GatewayClientConfig("token", 0, "wss://gateway.discord.gg"));
+
+    size_t anyMessageCalls;
+    size_t createCalls;
+    size_t updateCalls;
+
+    client.on!Message((Message message) {
+        auto _ = message;
+        anyMessageCalls++;
+    });
+    client.on!GatewayMessageCreateEvent((GatewayMessageCreateEvent event) {
+        auto _ = event;
+        createCalls++;
+    });
+    client.on!GatewayMessageUpdateEvent((GatewayMessageUpdateEvent event) {
+        auto _ = event;
+        updateCalls++;
+    });
+
+    auto makeEnvelope = (string eventName, JSONValue payload) {
+        GatewayEnvelope envelope;
+        envelope.opcode = GatewayOpcode.Dispatch;
+        envelope.eventName = eventName;
+        envelope.data = payload;
+        return envelope;
+    };
+
+    auto createPayload = JSONValue([
+        "id": JSONValue("100"),
+        "channel_id": JSONValue("10"),
+        "content": JSONValue("hello"),
+        "author": JSONValue([
+            "id": JSONValue("9"),
+            "username": JSONValue("u")
+        ])
+    ]);
+
+    auto updatePayload = JSONValue([
+        "id": JSONValue("100"),
+        "channel_id": JSONValue("10"),
+        "author": JSONValue([
+            "id": JSONValue("9"),
+            "username": JSONValue("u")
+        ])
+    ]);
+
+    client.handleDispatch(makeEnvelope("MESSAGE_CREATE", createPayload));
+    client.handleDispatch(makeEnvelope("MESSAGE_UPDATE", updatePayload));
+
+    assert(anyMessageCalls == 2);
+    assert(createCalls == 1);
+    assert(updateCalls == 1);
 }
 
 unittest
@@ -2001,7 +2278,7 @@ unittest
 unittest
 {
     auto url = normalizedGatewayUrl("wss://gateway.discord.gg");
-    assert(url == "wss://gateway.discord.gg/?encoding=json&v=10");
+    assert(url == "wss://gateway.discord.gg/?encoding=json&v=" ~ DiscordGatewayVersion.to!string);
     assert(gatewayToken("Bot secret") == "secret");
     assert(gatewayToken("secret") == "secret");
 }

@@ -7,6 +7,7 @@
 module ddiscord.core.http.client;
 
 import core.sync.mutex : Mutex;
+import core.thread : Thread;
 import ddiscord.util.errors : formatError;
 import ddiscord.util.identity : DdiscordUserAgent;
 import ddiscord.util.limits : DiscordApiBase;
@@ -18,7 +19,7 @@ import requests.streams : ConnectError, TimeoutException;
 import std.algorithm : canFind;
 import std.array : appender;
 import std.conv : to;
-import std.datetime : Duration;
+import std.datetime : Duration, dur;
 import std.json : JSONType, JSONValue, parseJSON;
 import std.string : strip;
 
@@ -118,6 +119,7 @@ struct HttpError
     ushort statusCode;
     string responseBody;
     string[string] headers;
+    Nullable!Duration retryAfter;
 }
 
 /// A transport hook used for testing.
@@ -131,6 +133,12 @@ struct HttpClientConfig
     string userAgent = DdiscordUserAgent;
     Duration timeout;
     size_t sessionPoolSize = 2;
+    bool autoRetryRateLimits = true;
+    uint maxRateLimitRetries = 3;
+    bool autoRetryServerErrors = true;
+    uint maxServerErrorRetries = 3;
+    Duration retryBaseDelay = dur!"msecs"(500);
+    Duration maxRetryDelay = dur!"seconds"(30);
     string[string] defaultHeaders;
     Nullable!HttpTransport transport;
 }
@@ -175,13 +183,60 @@ final class HttpClient
         if (prepared.isErr)
             return Result!(HttpResponse, HttpError).err(prepared.error);
 
+        return sendWithRetry(prepared.value);
+    }
+
+    private Result!(HttpResponse, HttpError) sendWithRetry(HttpRequest request)
+    {
+        uint rateLimitRetries;
+        uint serverErrorRetries;
+        auto retryDelay = _config.retryBaseDelay;
+
+        while (true)
+        {
+            auto response = executeWithConfiguredTransport(request);
+            if (response.isOk)
+                return response;
+
+            auto error = response.error;
+
+            if (
+                _config.autoRetryRateLimits &&
+                error.kind == HttpErrorKind.RateLimited &&
+                rateLimitRetries < _config.maxRateLimitRetries
+            )
+            {
+                rateLimitRetries++;
+                auto waitTime = error.retryAfter.getOr(_config.retryBaseDelay);
+                sleepFor(waitTime);
+                continue;
+            }
+
+            if (
+                _config.autoRetryServerErrors &&
+                isRetryableFailure(error.kind) &&
+                serverErrorRetries < _config.maxServerErrorRetries
+            )
+            {
+                serverErrorRetries++;
+                sleepFor(retryDelay);
+                retryDelay = nextRetryDelay(retryDelay, _config.maxRetryDelay);
+                continue;
+            }
+
+            return response;
+        }
+    }
+
+    private Result!(HttpResponse, HttpError) executeWithConfiguredTransport(HttpRequest request)
+    {
         if (!_config.transport.isNull)
         {
             auto transport = _config.transport.get;
-            return transport(prepared.value);
+            return transport(request);
         }
 
-        return execute(prepared.value);
+        return execute(request);
     }
 
     private Result!(HttpRequest, HttpError) prepare(HttpRequest request)
@@ -393,6 +448,7 @@ final class HttpClient
 
         if (response.statusCode == 429)
         {
+            auto retryAfter = parseRetryAfter(response.headers, body);
             return httpError(
                 HttpErrorKind.RateLimited,
                 "Discord rate limited the request.",
@@ -400,7 +456,8 @@ final class HttpClient
                 "Respect `Retry-After` and `X-RateLimit-*` headers before retrying.",
                 body,
                 response.statusCode,
-                response.headers
+                response.headers,
+                retryAfter
             );
         }
 
@@ -436,7 +493,8 @@ private HttpError httpError(
     string hint = "",
     string detail = "",
     ushort statusCode = 0,
-    string[string] headers = null
+    string[string] headers = null,
+    Nullable!Duration retryAfter = Nullable!Duration.init
 )
 {
     HttpError error;
@@ -446,6 +504,7 @@ private HttpError httpError(
     error.statusCode = statusCode;
     error.responseBody = detail;
     error.headers = headers.dup;
+    error.retryAfter = retryAfter;
     error.hint = hint;
     error.message = formatError("http", summary, detail.length == 0 ? error.method ~ " " ~ error.url : detail, hint);
     return error;
@@ -513,6 +572,135 @@ private string httpMethodName(HttpMethod method)
     }
 }
 
+private bool isRetryableFailure(HttpErrorKind kind)
+{
+    return kind == HttpErrorKind.Server ||
+        kind == HttpErrorKind.Timeout ||
+        kind == HttpErrorKind.Transport;
+}
+
+private Duration nextRetryDelay(Duration delay, Duration maxDelay)
+{
+    if (delay <= Duration.zero)
+        return delay;
+
+    auto doubled = delay + delay;
+    if (maxDelay <= Duration.zero || doubled <= maxDelay)
+        return doubled;
+    return maxDelay;
+}
+
+private void sleepFor(Duration amount)
+{
+    if (amount > Duration.zero)
+        Thread.sleep(amount);
+}
+
+private Nullable!string findHeaderValue(string[string] headers, string name)
+{
+    auto normalized = normalizeHeaderName(name);
+    foreach (key, value; headers)
+    {
+        if (normalizeHeaderName(key) == normalized)
+            return Nullable!string.of(value.strip);
+    }
+    return Nullable!string.init;
+}
+
+private Nullable!Duration parseRetryAfter(string[string] headers, string body)
+{
+    auto headerValue = findHeaderValue(headers, "Retry-After");
+    if (!headerValue.isNull)
+    {
+        auto parsed = parseSecondsSafe(headerValue.get);
+        if (!parsed.isNull)
+            return parsed;
+    }
+
+    if (body.length == 0)
+        return Nullable!Duration.init;
+
+    try
+    {
+        auto json = parseJSON(body);
+        auto retryAfter = json.object.get("retry_after", JSONValue.init);
+        if (retryAfter.type == JSONType.float_)
+            return parseSecondsSafe(retryAfter.floating.to!string);
+        if (retryAfter.type == JSONType.integer)
+            return parseSecondsSafe(retryAfter.integer.to!string);
+        if (retryAfter.type == JSONType.uinteger)
+            return parseSecondsSafe(retryAfter.uinteger.to!string);
+        if (retryAfter.type == JSONType.string)
+            return parseSecondsSafe(retryAfter.str);
+    }
+    catch (Exception)
+    {
+        return Nullable!Duration.init;
+    }
+
+    return Nullable!Duration.init;
+}
+
+private Nullable!Duration parseSecondsSafe(string value)
+{
+    auto trimmed = value.strip;
+    if (trimmed.length == 0)
+        return Nullable!Duration.init;
+
+    try
+    {
+        bool sawDecimal;
+        size_t decimalIndex;
+        foreach (index, ch; trimmed)
+        {
+            if (ch == '.')
+            {
+                if (sawDecimal)
+                    return Nullable!Duration.init;
+                sawDecimal = true;
+                decimalIndex = index;
+            }
+            else if (!(ch >= '0' && ch <= '9'))
+            {
+                return Nullable!Duration.init;
+            }
+        }
+
+        string wholePart = trimmed;
+        string fractionalPart;
+
+        if (sawDecimal)
+        {
+            wholePart = trimmed[0 .. decimalIndex];
+            fractionalPart = trimmed[decimalIndex + 1 .. $];
+        }
+
+        if (wholePart.length == 0)
+            wholePart = "0";
+
+        auto seconds = wholePart.to!long;
+        auto parsed = dur!"seconds"(seconds);
+
+        if (fractionalPart.length != 0)
+        {
+            if (fractionalPart.length > 3)
+                fractionalPart = fractionalPart[0 .. 3];
+            while (fractionalPart.length < 3)
+                fractionalPart ~= "0";
+            parsed += dur!"msecs"(fractionalPart.to!long);
+        }
+
+        if (parsed <= Duration.zero)
+            return Nullable!Duration.init;
+
+        return Nullable!Duration.of(parsed);
+    }
+    catch (Exception)
+    {
+        return Nullable!Duration.init;
+    }
+}
+
 unittest
 {
     HttpClientConfig config;
@@ -566,4 +754,92 @@ unittest
 
     auto result = client.send(request);
     assert(result.isErr);
+}
+
+unittest
+{
+    string[string] headers;
+    headers["Retry-After"] = "1.5";
+    auto retryAfter = parseRetryAfter(headers, "");
+    assert(!retryAfter.isNull);
+    assert(retryAfter.get == dur!"msecs"(1_500));
+}
+
+unittest
+{
+    auto retryAfter = parseRetryAfter(null, `{"retry_after":0.25}`);
+    assert(!retryAfter.isNull);
+    assert(retryAfter.get == dur!"msecs"(250));
+}
+
+unittest
+{
+    uint attempts;
+    HttpTransport transport = (HttpRequest request) {
+        attempts++;
+        if (attempts < 3)
+        {
+            HttpError error;
+            error.kind = HttpErrorKind.RateLimited;
+            error.message = "rate limited";
+            error.method = "GET";
+            error.url = request.url;
+            error.retryAfter = Nullable!Duration.of(dur!"msecs"(1));
+            return Result!(HttpResponse, HttpError).err(error);
+        }
+
+        HttpResponse response;
+        response.statusCode = 200;
+        return Result!(HttpResponse, HttpError).ok(response);
+    };
+
+    HttpClientConfig config;
+    config.token = "token";
+    config.maxRateLimitRetries = 3;
+    config.retryBaseDelay = dur!"msecs"(1);
+    config.transport = Nullable!HttpTransport.of(transport);
+
+    auto client = new HttpClient(config);
+    HttpRequest request;
+    request.url = "/users/@me";
+
+    auto result = client.send(request);
+    assert(result.isOk);
+    assert(attempts == 3);
+}
+
+unittest
+{
+    uint attempts;
+    HttpTransport transport = (HttpRequest request) {
+        attempts++;
+        if (attempts < 3)
+        {
+            HttpError error;
+            error.kind = HttpErrorKind.Server;
+            error.message = "server error";
+            error.method = "GET";
+            error.url = request.url;
+            return Result!(HttpResponse, HttpError).err(error);
+        }
+
+        HttpResponse response;
+        response.statusCode = 200;
+        return Result!(HttpResponse, HttpError).ok(response);
+    };
+
+    HttpClientConfig config;
+    config.token = "token";
+    config.maxServerErrorRetries = 3;
+    config.retryBaseDelay = dur!"msecs"(1);
+    config.maxRetryDelay = dur!"msecs"(1);
+    config.transport = Nullable!HttpTransport.of(transport);
+
+    auto client = new HttpClient(config);
+    HttpRequest request;
+    request.url = "/users/@me";
+
+    auto result = client.send(request);
+    assert(result.isOk);
+    assert(attempts == 3);
 }

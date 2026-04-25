@@ -2,6 +2,45 @@
 
 All notable changes to `ddiscord` should be documented in this file.
 
+## [0.3.2.1]
+
+### Added
+
+- HTTP error metadata now includes typed retry timing via `HttpError.retryAfter` (`Nullable!Duration`).
+- `HttpClientConfig` gained retry controls for transport-level resilience: `autoRetryRateLimits`, `maxRateLimitRetries`, `autoRetryServerErrors`, `maxServerErrorRetries`, `retryBaseDelay`, and `maxRetryDelay`.
+- HTTP client retry parsing now reads both `Retry-After` headers and JSON `retry_after` payload values.
+- New HTTP-client unittest coverage for retry-delay parsing and automatic retry behavior (rate-limit and server-error paths).
+- Gateway dispatch internals now use a registered handler table (`eventName -> DispatchHandler`) instead of a monolithic branch chain.
+- `GatewayClient` now supports typed multi-listener subscriptions via `on!T(...)`, `once!T(...)`, and `off!T(...)`.
+- New typed gateway payload marker `GatewayResumedInfo` for `RESUMED` lifecycle subscriptions.
+- New event-specific typed gateway wrappers for disambiguating shared model payloads:
+  `GatewayMessageCreateEvent`, `GatewayMessageUpdateEvent`, `GatewayChannelCreateEvent`,
+  `GatewayChannelUpdateEvent`, `GatewayChannelDeleteEvent`, `GatewayThreadCreateEvent`,
+  and `GatewayThreadUpdateEvent`.
+- Command-context UX APIs that return response payloads when available:
+  `CommandContext.sendMessage(...)`, `replyMessage(...)`, `followupMessage(...)`, and `editResponse(...)`.
+- Route-context response helpers that preserve payload access:
+  `PrefixContext.respondMessage(...)`, `SlashContext.respondMessage(...)`, and
+  `HybridContext.respondMessage(...)`.
+- New gateway unittest coverage for typed subscription semantics (multi-listener invocation, one-shot listener removal, and explicit unsubscription).
+- New gateway unittest coverage verifying that message create/update wrapper subscriptions remain independently routable while legacy `on!Message(...)` listeners still receive both payloads.
+- New command-context unittest coverage for message-returning response helpers across prefix and interaction flows.
+
+### Changed
+
+- `HttpClient.send(...)` now runs through an internal retry loop that can automatically retry `429` responses and transient server/transport failures with backoff.
+- REST transport setup now explicitly disables HTTP-layer retries in `RealDiscordRest` so REST remains the single owner of retry/rate-limit orchestration.
+- Gateway `READY` and `RESUMED` dispatch handling was split into dedicated handlers while preserving the same public callback API.
+- Gateway dispatch handlers now also emit typed subscription payloads in parallel with legacy `onX` callback fields.
+- Client shard wiring now consumes typed gateway subscriptions (`gateway.on!T(...)`) for lifecycle and selected typed dispatch payloads (`GatewayReadyInfo`, `GatewayResumedInfo`, `Guild`, `UnavailableGuild`, `Interaction`, `GatewayGuildMemberAddInfo`, `GatewayPresenceUpdateInfo`).
+- Client message routing now consumes dedicated message wrapper subscriptions (`GatewayMessageCreateEvent` / `GatewayMessageUpdateEvent`) to avoid payload-type ambiguity between create and update dispatches.
+- Existing `send(...)`, `reply(...)`, `followup(...)`, and `edit(...)` command-context helpers now delegate through shared message-returning implementations for more consistent behavior and error propagation.
+- Gateway URL normalization now uses the shared `DiscordGatewayVersion` constant instead of a hardcoded protocol version string.
+
+### Fixed
+
+- Eliminated duplicate retry attempts when using `RestClient` over `HttpClient` by preventing stacked retry loops across both layers.
+
 ## [0.3.2]
 
 ### Added

@@ -177,16 +177,42 @@ struct CommandContext
     /// Sends a message in the current command context.
     AsyncTask!void send(string content, bool ephemeral = false)
     {
-        auto payload = MessageCreate(content);
-        return send(payload, ephemeral);
+        auto sent = sendMessage(content, ephemeral).awaitResult();
+        if (sent.isErr)
+            return AsyncTask!void.failure(sent.error);
+
+        return AsyncTask!void.success();
     }
 
     /// Sends a payload in the current command context.
     AsyncTask!void send(MessageCreate payload, bool ephemeral = false)
     {
+        auto sent = sendMessage(payload, ephemeral).awaitResult();
+        if (sent.isErr)
+            return AsyncTask!void.failure(sent.error);
+
+        return AsyncTask!void.success();
+    }
+
+    /// Sends a message and returns the created payload when Discord returns one.
+    ///
+    /// For initial interaction callback responses, Discord does not return the
+    /// created message body; in that case this returns `Nullable!Message.init`.
+    AsyncTask!(Nullable!Message) sendMessage(string content, bool ephemeral = false)
+    {
+        auto payload = MessageCreate(content);
+        return sendMessage(payload, ephemeral);
+    }
+
+    /// Sends a payload and returns the created payload when Discord returns one.
+    ///
+    /// For initial interaction callback responses, Discord does not return the
+    /// created message body; in that case this returns `Nullable!Message.init`.
+    AsyncTask!(Nullable!Message) sendMessage(MessageCreate payload, bool ephemeral = false)
+    {
         auto ephemeralError = validateEphemeralUsage(ephemeral, "send");
         if (!ephemeralError.isNull)
-            return AsyncTask!void.failure(ephemeralError.get);
+            return AsyncTask!(Nullable!Message).failure(ephemeralError.get);
 
         if (ephemeral)
             payload.setFlag(MessageFlags.Ephemeral);
@@ -197,17 +223,18 @@ struct CommandContext
             {
                 auto created = rest.interactions.followup(interaction.get.token, payload).awaitResult();
                 if (created.isErr)
-                    return AsyncTask!void.failure(created.error);
+                    return AsyncTask!(Nullable!Message).failure(created.error);
 
-                return AsyncTask!void.success();
+                interactionResponded = true;
+                return AsyncTask!(Nullable!Message).success(Nullable!Message.of(created.value));
             }
 
             auto sent = rest.interactions.send(interaction.get.id, interaction.get.token, payload).awaitResult();
             if (sent.isErr)
-                return AsyncTask!void.failure(sent.error);
+                return AsyncTask!(Nullable!Message).failure(sent.error);
 
             interactionResponded = true;
-            return AsyncTask!void.success();
+            return AsyncTask!(Nullable!Message).success(Nullable!Message.init);
         }
 
         auto channelId = currentChannel.id;
@@ -216,9 +243,9 @@ struct CommandContext
 
         auto created = rest.messages.create(channelId, payload).awaitResult();
         if (created.isErr)
-            return AsyncTask!void.failure(created.error);
+            return AsyncTask!(Nullable!Message).failure(created.error);
 
-        return AsyncTask!void.success();
+        return AsyncTask!(Nullable!Message).success(Nullable!Message.of(created.value));
     }
 
     /// Sends a message with one binary attachment in the current command context.
@@ -240,24 +267,52 @@ struct CommandContext
     /// Replies to the source message using Discord's native reply payload.
     AsyncTask!void reply(string content, bool mentionAuthor = false, bool ephemeral = false)
     {
-        auto payload = MessageCreate(content);
-        return reply(payload, mentionAuthor, ephemeral);
+        auto replied = replyMessage(content, mentionAuthor, ephemeral).awaitResult();
+        if (replied.isErr)
+            return AsyncTask!void.failure(replied.error);
+
+        return AsyncTask!void.success();
     }
 
     /// Replies to the source message using Discord's native reply payload.
     AsyncTask!void reply(MessageCreate payload, bool mentionAuthor = false, bool ephemeral = false)
     {
+        auto replied = replyMessage(payload, mentionAuthor, ephemeral).awaitResult();
+        if (replied.isErr)
+            return AsyncTask!void.failure(replied.error);
+
+        return AsyncTask!void.success();
+    }
+
+    /// Replies to the source and returns the created payload when Discord returns one.
+    AsyncTask!(Nullable!Message) replyMessage(
+        string content,
+        bool mentionAuthor = false,
+        bool ephemeral = false
+    )
+    {
+        auto payload = MessageCreate(content);
+        return replyMessage(payload, mentionAuthor, ephemeral);
+    }
+
+    /// Replies to the source and returns the created payload when Discord returns one.
+    AsyncTask!(Nullable!Message) replyMessage(
+        MessageCreate payload,
+        bool mentionAuthor = false,
+        bool ephemeral = false
+    )
+    {
         auto ephemeralError = validateEphemeralUsage(ephemeral, "reply");
         if (!ephemeralError.isNull)
-            return AsyncTask!void.failure(ephemeralError.get);
+            return AsyncTask!(Nullable!Message).failure(ephemeralError.get);
 
         if (ephemeral)
             payload.setFlag(MessageFlags.Ephemeral);
 
         if (!message.isNull)
-            return send(message.get.reply(payload, mentionAuthor), false);
+            return sendMessage(message.get.reply(payload, mentionAuthor), false);
 
-        return send(payload, false);
+        return sendMessage(payload, false);
     }
 
     /// Sends a deferred acknowledgement for interaction-based commands.
@@ -507,18 +562,38 @@ struct CommandContext
     /// Sends a follow-up message for a deferred or already-acknowledged interaction.
     AsyncTask!void followup(string content, bool ephemeral = false)
     {
-        auto payload = MessageCreate(content);
-        if (ephemeral)
-            payload.setFlag(MessageFlags.Ephemeral);
-        return followup(payload);
+        auto created = followupMessage(content, ephemeral).awaitResult();
+        if (created.isErr)
+            return AsyncTask!void.failure(created.error);
+
+        return AsyncTask!void.success();
     }
 
     /// Sends a follow-up payload for a deferred or already-acknowledged interaction.
     AsyncTask!void followup(MessageCreate payload)
     {
+        auto created = followupMessage(payload).awaitResult();
+        if (created.isErr)
+            return AsyncTask!void.failure(created.error);
+
+        return AsyncTask!void.success();
+    }
+
+    /// Sends a follow-up message and returns the created payload.
+    AsyncTask!Message followupMessage(string content, bool ephemeral = false)
+    {
+        auto payload = MessageCreate(content);
+        if (ephemeral)
+            payload.setFlag(MessageFlags.Ephemeral);
+        return followupMessage(payload);
+    }
+
+    /// Sends a follow-up payload and returns the created payload.
+    AsyncTask!Message followupMessage(MessageCreate payload)
+    {
         if (interaction.isNull || interaction.get.token.length == 0)
         {
-            return AsyncTask!void.failure(formatError(
+            return AsyncTask!Message.failure(formatError(
                 "context",
                 "Interaction follow-up messages require an active interaction token.",
                 "",
@@ -528,10 +603,10 @@ struct CommandContext
 
         auto created = rest.interactions.followup(interaction.get.token, payload).awaitResult();
         if (created.isErr)
-            return AsyncTask!void.failure(created.error);
+            return AsyncTask!Message.failure(created.error);
 
         interactionResponded = true;
-        return AsyncTask!void.success();
+        return AsyncTask!Message.success(created.value);
     }
 
     /// Sends an interaction follow-up with one binary attachment.
@@ -555,18 +630,38 @@ struct CommandContext
     /// Edits the original interaction response.
     AsyncTask!void edit(string content, bool ephemeral = false)
     {
-        auto payload = MessageCreate(content);
-        if (ephemeral)
-            payload.setFlag(MessageFlags.Ephemeral);
-        return edit(payload);
+        auto edited = editResponse(content, ephemeral).awaitResult();
+        if (edited.isErr)
+            return AsyncTask!void.failure(edited.error);
+
+        return AsyncTask!void.success();
     }
 
     /// Edits the original interaction response payload.
     AsyncTask!void edit(MessageCreate payload)
     {
+        auto edited = editResponse(payload).awaitResult();
+        if (edited.isErr)
+            return AsyncTask!void.failure(edited.error);
+
+        return AsyncTask!void.success();
+    }
+
+    /// Edits the original interaction response and returns the updated payload.
+    AsyncTask!Message editResponse(string content, bool ephemeral = false)
+    {
+        auto payload = MessageCreate(content);
+        if (ephemeral)
+            payload.setFlag(MessageFlags.Ephemeral);
+        return editResponse(payload);
+    }
+
+    /// Edits the original interaction response payload and returns the update.
+    AsyncTask!Message editResponse(MessageCreate payload)
+    {
         if (interaction.isNull || interaction.get.token.length == 0)
         {
-            return AsyncTask!void.failure(formatError(
+            return AsyncTask!Message.failure(formatError(
                 "context",
                 "Editing the original interaction response requires an active interaction token.",
                 "",
@@ -576,11 +671,11 @@ struct CommandContext
 
         auto edited = rest.interactions.edit(interaction.get.token, payload).awaitResult();
         if (edited.isErr)
-            return AsyncTask!void.failure(edited.error);
+            return AsyncTask!Message.failure(edited.error);
 
         interactionResponded = true;
         interactionAcknowledged = true;
-        return AsyncTask!void.success();
+        return AsyncTask!Message.success(edited.value);
     }
 
     /// Edits the original interaction response and adds one binary attachment.
@@ -724,6 +819,18 @@ struct PrefixContext
         return command.send(payload);
     }
 
+    /// Prefix-friendly alias for `sendMessage`.
+    AsyncTask!(Nullable!Message) respondMessage(string content)
+    {
+        return command.sendMessage(content);
+    }
+
+    /// Prefix-friendly alias for `sendMessage`.
+    AsyncTask!(Nullable!Message) respondMessage(MessageCreate payload)
+    {
+        return command.sendMessage(payload);
+    }
+
     /// Reply directly to the source message, mentioning by default.
     AsyncTask!void replyToSource(string content, bool mentionAuthor = true)
     {
@@ -757,6 +864,18 @@ struct SlashContext
     AsyncTask!void respond(MessageCreate payload, bool ephemeral = false)
     {
         return command.send(payload, ephemeral);
+    }
+
+    /// Slash-friendly alias for `sendMessage`.
+    AsyncTask!(Nullable!Message) respondMessage(string content, bool ephemeral = false)
+    {
+        return command.sendMessage(content, ephemeral);
+    }
+
+    /// Slash-friendly alias for `sendMessage`.
+    AsyncTask!(Nullable!Message) respondMessage(MessageCreate payload, bool ephemeral = false)
+    {
+        return command.sendMessage(payload, ephemeral);
     }
 
     /// Sends an ephemeral slash response.
@@ -839,6 +958,22 @@ struct HybridContext
         if (fromSlash)
             return command.send(payload, ephemeralOnSlash);
         return command.send(payload);
+    }
+
+    /// Unified response helper that returns created payloads when available.
+    AsyncTask!(Nullable!Message) respondMessage(string content, bool ephemeralOnSlash = false)
+    {
+        if (fromSlash)
+            return command.sendMessage(content, ephemeralOnSlash);
+        return command.sendMessage(content);
+    }
+
+    /// Unified payload response helper that returns created payloads when available.
+    AsyncTask!(Nullable!Message) respondMessage(MessageCreate payload, bool ephemeralOnSlash = false)
+    {
+        if (fromSlash)
+            return command.sendMessage(payload, ephemeralOnSlash);
+        return command.sendMessage(payload);
     }
 }
 
@@ -1103,4 +1238,102 @@ unittest
     auto payload = parseJSON(cast(string) captured.body);
     auto dataFlags = payload.object.get("flags", JSONValue.init);
     assert(dataFlags.type == JSONType.null_);
+}
+
+unittest
+{
+    import ddiscord.core.http.client : HttpError, HttpRequest, HttpResponse, HttpTransport;
+    import ddiscord.rest : RestClientConfig;
+    import ddiscord.util.result : Result;
+    import ddiscord.util.snowflake : Snowflake;
+    import std.algorithm : canFind;
+    import std.json : JSONValue, parseJSON;
+
+    HttpRequest[] captured;
+    HttpTransport transport = (request) {
+        captured ~= request;
+
+        HttpResponse response;
+        response.statusCode = 200;
+        response.body = cast(ubyte[]) `{"id":"90","channel_id":"99","content":"ok","author":{"id":"2","username":"bot","bot":true}}`.dup;
+        return Result!(HttpResponse, HttpError).ok(response);
+    };
+
+    RestClientConfig config;
+    config.token = "token";
+    config.transport = Nullable!HttpTransport.of(transport);
+
+    CommandContext ctx;
+    ctx.rest = new RestClient(config);
+    ctx.currentChannel.id = Snowflake(99);
+
+    auto sent = ctx.sendMessage("hello").awaitResult();
+    assert(sent.isOk);
+    assert(!sent.value.isNull);
+    assert(sent.value.get.id == Snowflake(90));
+
+    Message source;
+    source.id = Snowflake(55);
+    source.channelId = Snowflake(99);
+    ctx.message = Nullable!Message.of(source);
+
+    auto replied = ctx.replyMessage("reply", true).awaitResult();
+    assert(replied.isOk);
+    assert(!replied.value.isNull);
+    assert(captured.length == 2);
+
+    auto body = parseJSON(cast(string) captured[1].body);
+    auto reference = body.object.get("message_reference", JSONValue.init);
+    assert(reference.object.get("message_id", JSONValue.init).str == "55");
+}
+
+unittest
+{
+    import ddiscord.core.http.client : HttpError, HttpRequest, HttpResponse, HttpTransport;
+    import ddiscord.rest : RestClientConfig;
+    import ddiscord.util.result : Result;
+    import ddiscord.util.snowflake : Snowflake;
+    import std.algorithm : canFind;
+
+    HttpRequest[] captured;
+    HttpTransport transport = (request) {
+        captured ~= request;
+
+        HttpResponse response;
+        response.statusCode = 200;
+        if (request.url.canFind("/callback"))
+            response.body = cast(ubyte[]) `{}`.dup;
+        else
+            response.body = cast(ubyte[]) `{"id":"42","channel_id":"99","content":"interaction-ok","author":{"id":"2","username":"bot","bot":true}}`.dup;
+        return Result!(HttpResponse, HttpError).ok(response);
+    };
+
+    RestClientConfig config;
+    config.token = "token";
+    config.transport = Nullable!HttpTransport.of(transport);
+
+    CommandContext ctx;
+    ctx.rest = new RestClient(config);
+    ctx.source = CommandSource.Slash;
+    Interaction interaction;
+    interaction.id = Snowflake(33);
+    interaction.token = "abc";
+    ctx.interaction = Nullable!Interaction.of(interaction);
+
+    auto initial = ctx.sendMessage("first", true).awaitResult();
+    assert(initial.isOk);
+    assert(initial.value.isNull);
+    assert(captured.length == 1);
+
+    auto followup = ctx.followupMessage("second", true).awaitResult();
+    assert(followup.isOk);
+    assert(followup.value.id == Snowflake(42));
+    assert(captured.length >= 2);
+    assert(captured[$ - 1].url.canFind("/webhooks/"));
+
+    auto edited = ctx.editResponse("third", true).awaitResult();
+    assert(edited.isOk);
+    assert(edited.value.id == Snowflake(42));
+    assert(captured.length >= 3);
+    assert(captured[$ - 1].url.canFind("/messages/@original"));
 }

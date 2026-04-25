@@ -219,6 +219,10 @@ private final class RealDiscordRest
         httpConfig.token = config.token;
         httpConfig.userAgent = config.userAgent;
         httpConfig.timeout = config.timeout;
+        // REST owns retry policy through RestRateLimiter and performRequest().
+        // Keep HTTP transport retries disabled here to avoid duplicate retries.
+        httpConfig.autoRetryRateLimits = false;
+        httpConfig.autoRetryServerErrors = false;
         if (!config.transport.isNull)
             httpConfig.transport = config.transport;
 
