@@ -64,6 +64,5 @@ void main()
     client.setPresence(StatusType.Online, Activity(ActivityType.Playing, "service injection"));
 
     client.run();
-    writeln("[services] synced commands: ", client.commands.applicationCommands.length);
     client.wait();
 }

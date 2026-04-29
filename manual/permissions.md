@@ -1,5 +1,7 @@
 # Permissions Guide
 
+> Navigation: [Index](index.md) | [Quickstart](quickstart.md) | [Bot Structures](bot-structures.md) | [Commands](commands.md) | [Plugins and Lua](plugins-and-lua.md) | [Troubleshooting](troubleshooting.md)
+
 `ddiscord` exposes a public permission calculator so command checks and custom moderation logic can share the same rules.
 
 ## What it covers

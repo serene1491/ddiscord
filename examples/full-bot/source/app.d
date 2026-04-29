@@ -67,6 +67,5 @@ void main()
     client.setPresence(StatusType.Online, Activity(ActivityType.Playing, "server tools"));
 
     client.run();
-    writeln("[full] synced commands: ", client.commands.applicationCommands.length);
     client.wait();
 }

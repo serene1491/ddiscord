@@ -59,6 +59,5 @@ void main()
     client.setPresence(StatusType.Online, Activity(ActivityType.Watching, "event traffic"));
 
     client.run();
-    writeln("[events] synced commands: ", client.commands.applicationCommands.length);
     client.wait();
 }

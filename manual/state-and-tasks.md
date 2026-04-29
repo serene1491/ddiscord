@@ -1,5 +1,7 @@
 # State and Tasks
 
+> Navigation: [Index](index.md) | [Quickstart](quickstart.md) | [Bot Structures](bot-structures.md) | [Commands](commands.md) | [Plugins and Lua](plugins-and-lua.md) | [Troubleshooting](troubleshooting.md)
+
 Two small systems make a big difference in real bots:
 
 - `StateStore` for scoped bot state
@@ -67,7 +69,7 @@ client.registerTaskGroup!BackgroundTasks();
 - recurring tasks (`TaskMode.Every`, default)
 - delayed one-shot tasks (`TaskMode.Delay`)
 - cron-style `@every:<seconds>s` expressions via string constructor (`TaskMode.Cron`)
-- loop-style helper constructor inspired by discord.py:
+- loop-style helper constructor
   `@Task.loop(seconds: ..., minutes: ..., hours: ..., label: "...", count: ..., reconnect: ...)`
 - explicit helpers for readability:
   `@Task.every(...)`, `@Task.delay(...)`, and `@Task.cron(...)`

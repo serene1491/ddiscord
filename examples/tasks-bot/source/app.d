@@ -57,12 +57,10 @@ void onReady(ReadyEventContext ctx)
 @Stateful
 struct BackgroundTasks
 {
-    @Inject Logger logger;
-
-    @Task(dur!"minutes"(5), label: "tasks-heartbeat", runOnRegister: true)
+    @Task(dur!"minutes"(30), label: "tasks-heartbeat")
     void heartbeat()
     {
-        logger.information("tasks-example", "scheduler heartbeat still running");
+        // Example recurring task intentionally keeps a low-noise no-op body.
     }
 }
 
@@ -81,6 +79,5 @@ void main()
     client.setPresence(StatusType.Online, Activity(ActivityType.Playing, "task reminders"));
 
     client.run();
-    writeln("[tasks] synced commands: ", client.commands.applicationCommands.length);
     client.wait();
 }

@@ -1,6 +1,7 @@
 module app;
 
 import ddiscord;
+import ddiscord.client_text : PrefixInvocation, parsePrefixInvocation, tokenizePrefixContent;
 import ddiscord.services : ServiceContainer;
 import models : SavedScript;
 import ddiscord.util.result : Result;
@@ -11,7 +12,7 @@ import std.file : exists;
 import std.path : buildPath;
 import std.process : spawnProcess, wait;
 import std.stdio : writeln;
-import std.string : indexOf, split, startsWith, strip;
+import std.string : startsWith, strip;
 import std.ascii : toLower;
 import store : ScriptStore;
 
@@ -22,20 +23,20 @@ final class LuaScriptApi
 {
     CommandContext ctx;
     SavedScript script;
-    string[] argv;
+    string rawArgs;
     bool replied;
 
-    this(CommandContext ctx, SavedScript script, string[] argv)
+    this(CommandContext ctx, SavedScript script, string rawArgs)
     {
         this.ctx = ctx;
         this.script = script;
-        this.argv = argv.dup;
+        this.rawArgs = rawArgs;
     }
 
     @LuaExpose("reply", LuaCapability.DiscordReply)
-    void reply(string content)
+    void reply(LuaValue content)
     {
-        ctx.send(content).await();
+        ctx.reply(content.toDisplayString()).await();
         replied = true;
     }
 
@@ -52,12 +53,13 @@ final class LuaScriptApi
     @LuaExpose("args", LuaCapability.ContextRead)
     string args()
     {
-        return argv.join(" ");
+        return rawArgs;
     }
 
     @LuaExpose("arg", LuaCapability.ContextRead)
     string arg(long index)
     {
+        auto argv = tokenizePrefixContent(rawArgs);
         auto resolved = cast(ptrdiff_t) index - 1;
         if (resolved < 0 || resolved >= argv.length)
             return "";
@@ -77,9 +79,9 @@ final class LuaScriptApi
     }
 
     @LuaExpose("log", LuaCapability.LogWrite)
-    void logMessage(string message)
+    void logMessage(LuaValue message)
     {
-        ctx.services.get!Logger().information("lua-script", "[" ~ script.name ~ "] " ~ message);
+        ctx.services.get!Logger().information("lua-script", "[" ~ script.name ~ "] " ~ message.toDisplayString());
     }
 }
 
@@ -205,7 +207,7 @@ void runScript(
         return;
     }
 
-    auto executed = executeScript(ctx, script.value, splitArgs(args));
+    auto executed = executeScript(ctx, script.value, args.strip);
     if (executed.isErr)
         ctx.send(executed.error, ctx.source == CommandSource.Slash).await();
 }
@@ -235,7 +237,6 @@ void main()
     client.registerCommands();
     client.setPresence(StatusType.Online, Activity(ActivityType.Playing, "Your scripts"));
     client.run();
-    writeln("[lua] synced commands: ", client.commands.applicationCommands.length);
     client.wait();
 }
 
@@ -262,15 +263,15 @@ private void runSavedPrefixScript(Client client, MessageCreateEvent event)
     auto ctx = client.prefixContext(event.message.content, event.message.author, channel);
     ctx.message = Nullable!Message.of(event.message);
 
-    auto executed = executeScript(ctx, script.value, splitArgs(invocation.args));
+    auto executed = executeScript(ctx, script.value, invocation.args.strip);
     if (executed.isErr)
         ctx.send(executed.error).await();
 }
 
-private Result!(bool, string) executeScript(CommandContext ctx, SavedScript script, string[] argv)
+private Result!(bool, string) executeScript(CommandContext ctx, SavedScript script, string rawArgs)
 {
     auto scripting = ctx.services.get!ScriptingEngine();
-    auto api = new LuaScriptApi(ctx, script, argv);
+    auto api = new LuaScriptApi(ctx, script, rawArgs);
     auto runtime = scripting.open!LuaScriptApi(
         api,
         LuaSandboxProfile.Untrusted,
@@ -282,12 +283,16 @@ private Result!(bool, string) executeScript(CommandContext ctx, SavedScript scri
         return Result!(bool, string).err("Lua error in `" ~ script.name ~ "`: " ~ result.error.message);
 
     auto output = result.value.strip;
-    if (!api.replied && output.length != 0 && output != "nil")
+    if (!api.replied && shouldSendScriptOutput(output))
         ctx.send(output).await();
-    else if (!api.replied && output == "nil")
-        ctx.send("`" ~ script.name ~ "` completed.", ctx.source == CommandSource.Slash).await();
 
     return Result!(bool, string).ok(true);
+}
+
+private bool shouldSendScriptOutput(string output)
+{
+    auto normalized = output.strip;
+    return normalized.length != 0 && normalized != "nil";
 }
 
 private Nullable!string validateReservedName(string rawName)
@@ -335,44 +340,9 @@ private void ensureDatabaseReady()
         throw new Exception("Could not initialize the Dorm SQLite schema.");
 }
 
-private struct PrefixInvocation
-{
-    string name;
-    string args;
-}
-
 private PrefixInvocation parsePrefixedName(string prefix, string content)
 {
-    PrefixInvocation invocation;
-    if (!content.startsWith(prefix))
-        return invocation;
-
-    auto body = content[prefix.length .. $].strip;
-    auto split = body.indexOf(' ');
-    if (split == -1)
-    {
-        invocation.name = asciiLower(body);
-        return invocation;
-    }
-
-    invocation.name = asciiLower(body[0 .. split]);
-    invocation.args = body[split + 1 .. $].strip;
-    return invocation;
-}
-
-private string[] splitArgs(string rawArgs)
-{
-    if (rawArgs.strip.length == 0)
-        return null;
-
-    string[] argv;
-    foreach (part; rawArgs.split(' '))
-    {
-        auto value = part.strip;
-        if (value.length != 0)
-            argv ~= value;
-    }
-    return argv;
+    return parsePrefixInvocation(prefix, content);
 }
 
 private ScriptStore requireScriptStore(ServiceContainer services)

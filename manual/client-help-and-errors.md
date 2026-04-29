@@ -1,5 +1,7 @@
 # Built-in Help and Errors
 
+> Navigation: [Index](index.md) | [Quickstart](quickstart.md) | [Bot Structures](bot-structures.md) | [Commands](commands.md) | [Plugins and Lua](plugins-and-lua.md) | [Troubleshooting](troubleshooting.md)
+
 ## Built-in help
 
 The client registers a built-in `help` command by default unless you already provide your own

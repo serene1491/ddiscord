@@ -1,5 +1,7 @@
 # Client Config and Lifecycle
 
+> Navigation: [Index](index.md) | [Quickstart](quickstart.md) | [Bot Structures](bot-structures.md) | [Commands](commands.md) | [Plugins and Lua](plugins-and-lua.md) | [Troubleshooting](troubleshooting.md)
+
 ## Building a client
 
 ```d

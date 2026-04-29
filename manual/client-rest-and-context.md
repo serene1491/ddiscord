@@ -1,5 +1,7 @@
 # REST Shortcuts and Command Context
 
+> Navigation: [Index](index.md) | [Quickstart](quickstart.md) | [Bot Structures](bot-structures.md) | [Commands](commands.md) | [Plugins and Lua](plugins-and-lua.md) | [Troubleshooting](troubleshooting.md)
+
 ## Presence
 
 ```d
@@ -33,7 +35,7 @@ Useful additions include:
 - `client.guilds.timeoutMember(...)`, `client.guilds.clearMemberTimeout(...)`, `client.guilds.kick(...)`, `client.guilds.ban(...)`, and `client.guilds.unban(...)` (all with optional audit-log reason)
 - `client.threads.createFromMessage(...)`, `client.threads.create(...)`, `client.threads.join(...)`, `client.threads.leave(...)`, and `client.threads.archive(...)`
 - `client.webhooks.execute(...)` for webhook-token message dispatch
-- `client.slash.sync(...)` when you want direct command-manifest sync
+- `client.slash.sync(...)` when you want direct slash-command sync
 
 ## Service container shortcuts
 
@@ -116,7 +118,7 @@ if (!ctx.messageRef.isNull)
 }
 ```
 
-These map to the same REST endpoints with thin wrappers, so you keep ergonomics without extra runtime overhead.
+These map to the same REST endpoints with thin wrappers, so you keep ergonomics without extra execution overhead.
 
 The command layer also exposes route-specific context shapes when you want tighter typing:
 

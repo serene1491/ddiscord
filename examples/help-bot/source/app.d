@@ -74,6 +74,5 @@ void main()
     client.registerCommands();
     client.setPresence(StatusType.Online, Activity(ActivityType.Watching, "help pages"));
     client.run();
-    writeln("[help] synced commands: ", client.commands.applicationCommands.length);
     client.wait();
 }

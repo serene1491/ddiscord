@@ -1,6 +1,17 @@
 # Commands Guide
 
+> Navigation: [Index](index.md) | [Quickstart](quickstart.md) | [Bot Structures](bot-structures.md) | [Commands](commands.md) | [Plugins and Lua](plugins-and-lua.md) | [Troubleshooting](troubleshooting.md)
+
 `ddiscord` uses UDAs as the primary command API.
+
+## Route selection guide
+
+Pick route by UX:
+
+1. Prefix-only (`@PrefixCommand`): fastest iteration, text-centric communities
+2. Slash-only (`@SlashCommand`): discoverable UX, safer typed options
+3. Hybrid (`@HybridCommand`): one implementation for both worlds
+4. Context menu (`@Command(..., routes: CommandRoute.ContextMenu*)`): message/user actions
 
 ## Prefix command
 
@@ -11,6 +22,12 @@ void ping(PrefixContext ctx)
     ctx.reply("Pong!").await();
 }
 ```
+
+Common prefix ergonomics:
+
+1. Use `@Greedy` for the last free-text argument.
+2. Keep validation close to handler entry.
+3. Return actionable user errors (short and specific).
 
 ## Slash command
 
@@ -23,6 +40,12 @@ void info(SlashContext ctx, Nullable!User target = Nullable!User.init)
 }
 ```
 
+Common slash ergonomics:
+
+1. Put optional values last with defaults.
+2. Use `ephemeral: true` for user-specific output.
+3. Keep option names short and lowercase.
+
 ## Hybrid command
 
 ```d
@@ -32,6 +55,13 @@ void roll(HybridContext ctx, long sides = 6)
     ctx.reply("Rolling d" ~ sides.to!string).await();
 }
 ```
+
+Use hybrid when both prefix and slash users should share one implementation.
+
+Hybrid caveat:
+
+1. Prefix and slash input ergonomics differ.
+2. Keep handler logic route-agnostic and branch only on output behavior when needed.
 
 ## Policies
 
@@ -71,6 +101,12 @@ Additional UDA policies are also available:
 - `@GuildOnly` for server-only commands
 - `@DirectMessageOnly` for DM-only commands
 - `@UseMiddleware("name")` for named middleware hooks
+
+Policy layering tip:
+
+1. Prefer declarative UDA policy first (`@GuildOnly`, `@RequirePermissions`, `@RateLimit`)
+2. Add middleware for cross-cutting checks reused by multiple commands
+3. Keep command-specific validation inside the handler
 
 ## Install targets and interaction contexts
 
@@ -224,6 +260,12 @@ client.registerAllCommands!AdminCommands();
 
 If you want explicit registration paths, `registerCommands!`, `registerCommandGroup!`, and `registerPlugin!` still exist. `registerAllCommands!` is useful when you want a specific compile-time registration list.
 
+Registration strategy:
+
+1. Small bots: `registerAllCommands()`
+2. Medium bots: `registerAllCommands!GroupA, GroupB()`
+3. Plugin-heavy bots: explicit group/plugin registration for tighter control
+
 ## What `CommandContext` gives you
 
 - `ctx.reply(...)`
@@ -263,3 +305,18 @@ void report(CommandContext ctx)
     ctx.showModal(modal).await();
 }
 ```
+
+## Testing checklist
+
+For each new command, validate:
+
+1. Happy path response
+2. Invalid input path and user-facing error text
+3. Policy rejection behavior (`owner`, `permissions`, `guild/dm`)
+4. Slash and prefix parity when hybrid
+
+Related guides:
+
+- [Interactions Guide](interactions.md)
+- [Permissions Guide](permissions.md)
+- [Troubleshooting](troubleshooting.md)

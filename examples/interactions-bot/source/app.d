@@ -96,6 +96,5 @@ void main()
     client.setPresence(StatusType.Online, Activity(ActivityType.Playing, "components + modals"));
 
     client.run();
-    writeln("[interactions] synced commands: ", client.commands.applicationCommands.length);
     client.wait();
 }

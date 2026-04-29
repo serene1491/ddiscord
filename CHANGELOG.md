@@ -2,6 +2,30 @@
 
 All notable changes to `ddiscord` should be documented in this file.
 
+## [0.3.4]
+
+### Changed
+
+- `CommandErrorBehavior.surfaceUnknownCommand = false` now also reduces unknown-command logging
+  noise by downgrading those failures to debug logs.
+- `examples/lua-scripting-bot` now accepts dynamic Lua values in host APIs:
+  `reply(...)` and `log(...)` now accept `LuaValue` and render via `toDisplayString()`.
+  between slash and prefix flows.
+- `examples/lua-scripting-bot` Lua replies now use native `ctx.reply(...)`, and script execution no
+  longer emits redundant `"<script> completed."` outputs when no explicit content is returned.
+- Example startup logging was streamlined across runnable consoles by removing redundant
+  `"[...] synced commands"` lines, and the recurring heartbeat log noise in `tasks-bot` was reduced.
+- Documentation wording was polished across key manual pages with simpler terms.
+
+### Fixed
+
+- Lua host argument binding now accepts `LuaValue` parameters directly in `@LuaExpose` methods,
+  fixing false "incompatible type" failures for APIs that intentionally consume dynamic Lua input.
+- Prefix command parsing now preserves raw multiline content for trailing `@Greedy string`
+  parameters instead of tokenizing/flattening whitespace, fixing script payload corruption.
+- Prefix parsing helpers were unified under `ddiscord.client_text`, including a shared
+  `parsePrefixInvocation(...)` utility used by examples to avoid duplicated parser logic.
+
 ## [0.3.3]
 
 ### Added
@@ -136,7 +160,7 @@ All notable changes to `ddiscord` should be documented in this file.
 - Command middleware runtime hooks: `client.useMiddleware(...)` and `client.registerMiddleware(...)`, including built-in names `guild_only`, `dm_only`, and `owner_only`.
 - Lua runtime capability-denial hints when scripts call globals filtered out by permissions.
 - Scheduled-task UDA `@Task(...)` with `TaskMode` (`Every`, `Delay`, `Cron`) for declarative recurring/delayed bot jobs.
-- Discord.py-style task constructors on the `Task` UDA payload: `Task.loop(...)`, `Task.every(...)`, `Task.delay(...)`, and `Task.cron(...)`.
+- `Task` UDA payload: `Task.loop(...)`, `Task.every(...)`, `Task.delay(...)`, and `Task.cron(...)`.
 - Task auto-registration APIs: `client.registerTasks(...)`, `client.registerTaskGroup!T()`, plus module scanning support in `registerAllCommands(...)`.
 - Task filtering support in `CommandRegistrationFilter` (`withoutTasks`) and candidate matching.
 - Client service-container shortcuts: `addService`, `addServiceFactory`, `service`, `tryService`, and `removeService`.

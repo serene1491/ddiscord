@@ -107,6 +107,7 @@ struct LuaExportDescriptor
 {
     string symbolName;
     string exportName;
+    string hostSignature;
     LuaCapability permission;
     LuaExposeMode mode = LuaExposeMode.Function;
     LuaValueMutability valueMutability = LuaValueMutability.Auto;
@@ -259,6 +260,7 @@ private struct LuaCallableDescriptor
 {
     string symbolName;
     string exportName;
+    string hostSignature;
     LuaCapability permission;
     LuaExposeMode mode = LuaExposeMode.Function;
     Result!(LuaValue, ScriptError) delegate(LuaValue[]) invoke;
@@ -268,6 +270,7 @@ private struct LuaValueDescriptor
 {
     string symbolName;
     string exportName;
+    string hostSignature;
     LuaCapability permission;
     LuaExposeMode mode = LuaExposeMode.Value;
     LuaValueMutability valueMutability = LuaValueMutability.Auto;
@@ -346,7 +349,12 @@ private final class LuaVm
         }
 
         foreach (descriptor; restrictedExports)
+        {
             _restrictedExports[descriptor.exportName] = descriptor.permission;
+            auto rootName = luaExportRootName(descriptor.exportName);
+            if (rootName.length != 0 && !(rootName in _restrictedExports))
+                _restrictedExports[rootName] = descriptor.permission;
+        }
 
         luaL_openlibs(_state);
         applySandbox();
@@ -541,14 +549,16 @@ private final class LuaVm
 
             if (!apiDescriptor.enabled || apiDescriptor.exportGlobals)
             {
-                pushCallable(thunk);
-                lua_setglobal(_state, toStringz(callable.exportName));
+                setGlobalExport(callable.exportName, () {
+                    pushCallable(thunk);
+                });
             }
 
             if (apiTableIndex != 0)
             {
-                pushCallable(thunk);
-                lua_setfield(_state, apiTableIndex, toStringz(callable.exportName));
+                setTableExport(apiTableIndex, callable.exportName, () {
+                    pushCallable(thunk);
+                });
             }
         }
     }
@@ -577,16 +587,93 @@ private final class LuaVm
 
             if (!apiDescriptor.enabled || apiDescriptor.exportGlobals)
             {
-                pushExportedValue(_state, resolved.value, valueDescriptor.readonlyValue);
-                lua_setglobal(_state, toStringz(valueDescriptor.exportName));
+                setGlobalExport(valueDescriptor.exportName, () {
+                    pushExportedValue(_state, resolved.value, valueDescriptor.readonlyValue);
+                });
             }
 
             if (apiTableIndex != 0)
             {
-                pushExportedValue(_state, resolved.value, valueDescriptor.readonlyValue);
-                lua_setfield(_state, apiTableIndex, toStringz(valueDescriptor.exportName));
+                setTableExport(apiTableIndex, valueDescriptor.exportName, () {
+                    pushExportedValue(_state, resolved.value, valueDescriptor.readonlyValue);
+                });
             }
         }
+    }
+
+    private void setGlobalExport(string exportPath, void delegate() pushExport)
+    {
+        auto path = splitLuaExportPath(exportPath);
+        if (path.length == 0)
+            return;
+
+        if (path.length == 1)
+        {
+            pushExport();
+            lua_setglobal(_state, toStringz(path[0]));
+            return;
+        }
+
+        auto stackTop = lua_gettop(_state);
+        scope(exit) lua_settop(_state, stackTop);
+
+        auto rootTableIndex = ensureGlobalTable(path[0]);
+        auto parentIndex = ensureNestedTablePath(rootTableIndex, path[1 .. $ - 1]);
+        pushExport();
+        lua_setfield(_state, parentIndex, toStringz(path[$ - 1]));
+    }
+
+    private void setTableExport(int tableIndex, string exportPath, void delegate() pushExport)
+    {
+        auto path = splitLuaExportPath(exportPath);
+        if (path.length == 0)
+            return;
+
+        if (path.length == 1)
+        {
+            pushExport();
+            lua_setfield(_state, tableIndex, toStringz(path[0]));
+            return;
+        }
+
+        auto stackTop = lua_gettop(_state);
+        scope(exit) lua_settop(_state, stackTop);
+
+        auto parentIndex = ensureNestedTablePath(tableIndex, path[0 .. $ - 1]);
+        pushExport();
+        lua_setfield(_state, parentIndex, toStringz(path[$ - 1]));
+    }
+
+    private int ensureGlobalTable(string name)
+    {
+        lua_getglobal(_state, toStringz(name));
+        if (lua_type(_state, -1) == LuaTypeTable)
+            return lua_absindex(_state, -1);
+
+        luaPop(_state, 1);
+        lua_createtable(_state, 0, 8);
+        lua_setglobal(_state, toStringz(name));
+        lua_getglobal(_state, toStringz(name));
+        return lua_absindex(_state, -1);
+    }
+
+    private int ensureNestedTablePath(int rootTableIndex, string[] path)
+    {
+        auto currentIndex = rootTableIndex;
+        foreach (segment; path)
+        {
+            lua_getfield(_state, currentIndex, toStringz(segment));
+            if (lua_type(_state, -1) != LuaTypeTable)
+            {
+                luaPop(_state, 1);
+                lua_createtable(_state, 0, 8);
+                lua_setfield(_state, currentIndex, toStringz(segment));
+                lua_getfield(_state, currentIndex, toStringz(segment));
+            }
+            currentIndex = lua_absindex(_state, -1);
+        }
+
+        return currentIndex;
     }
 
     private int ensureApiTable(LuaApiDescriptor apiDescriptor)
@@ -789,7 +876,8 @@ private final class LuaVm
     {
         foreach (marker; [
             "attempt to call a nil value (global '",
-            "attempt to index a nil value (global '"
+            "attempt to index a nil value (global '",
+            "attempt to index a function value (global '"
         ])
         {
             auto markerStart = message.indexOf(marker);
@@ -810,6 +898,39 @@ private final class LuaVm
 
         return "";
     }
+}
+
+private string[] splitLuaExportPath(string exportPath)
+{
+    if (exportPath.length == 0)
+        return null;
+
+    string[] segments;
+    size_t segmentStart = 0;
+
+    foreach (index; 0 .. exportPath.length + 1)
+    {
+        auto atBoundary = index == exportPath.length
+            || (index < exportPath.length && exportPath[index] == '.');
+        if (!atBoundary)
+            continue;
+
+        if (index == segmentStart)
+            return [exportPath];
+
+        segments ~= exportPath[segmentStart .. index];
+        segmentStart = index + 1;
+    }
+
+    return segments;
+}
+
+private string luaExportRootName(string exportPath)
+{
+    auto path = splitLuaExportPath(exportPath);
+    if (path.length == 0)
+        return "";
+    return path[0];
 }
 
 /// Execution-time runtime handle.
@@ -1227,11 +1348,17 @@ final class ScriptingEngine
 
         auto box = new BindingBox!T(binding);
         auto collected = collectExports!T(box);
-        auto callables = filterCallables(collected.callables, permissions);
-        auto restrictedCallablesOnly = restrictedCallables(collected.callables, permissions);
-        auto values = filterValues(collected.values, permissions);
-        auto restrictedValuesOnly = restrictedValues(collected.values, permissions);
         auto apiDescriptor = collectLuaApiDescriptor!T();
+        auto callables = materializeCallables(filterCallables(collected.callables, permissions), apiDescriptor);
+        auto restrictedCallablesOnly = materializeCallables(
+            restrictedCallables(collected.callables, permissions),
+            apiDescriptor
+        );
+        auto values = materializeValues(filterValues(collected.values, permissions), apiDescriptor);
+        auto restrictedValuesOnly = materializeValues(
+            restrictedValues(collected.values, permissions),
+            apiDescriptor
+        );
         enforceUniqueExports(callables, values);
 
         LuaRuntime runtime;
@@ -1244,7 +1371,67 @@ final class ScriptingEngine
             profile,
             callables,
             values,
-            apiDescriptor,
+            LuaApiDescriptor.init,
+            runtime.restrictedExports,
+            limits
+        );
+        return runtime;
+    }
+
+    /// Opens one runtime from multiple binding objects and merges their Lua surfaces.
+    LuaRuntime openMany(Bindings...)(
+        Bindings bindings,
+        LuaSandboxProfile profile = LuaSandboxProfile.Untrusted,
+        LuaCapability[] permissions = null,
+        LuaRuntimeLimits limits = LuaRuntimeLimits.init
+    )
+        if (Bindings.length > 0)
+    {
+        if (limits.maxExecutionTime <= Duration.zero)
+            limits.maxExecutionTime = DefaultLuaExecutionTimeout;
+        if (limits.maxMemoryBytes == 0)
+            limits.maxMemoryBytes = DefaultLuaMemoryLimitBytes;
+        if (limits.instructionCheckInterval == 0)
+            limits.instructionCheckInterval = DefaultLuaInstructionCheckInterval;
+
+        LuaCallableDescriptor[] callables;
+        LuaCallableDescriptor[] restrictedCallablesOnly;
+        LuaValueDescriptor[] values;
+        LuaValueDescriptor[] restrictedValuesOnly;
+
+        static foreach (index, BindingT; Bindings)
+        {
+            {
+                auto box = new BindingBox!BindingT(bindings[index]);
+                auto collected = collectExports!BindingT(box);
+                auto apiDescriptor = collectLuaApiDescriptor!BindingT();
+
+                callables ~= materializeCallables(filterCallables(collected.callables, permissions), apiDescriptor);
+                restrictedCallablesOnly ~= materializeCallables(
+                    restrictedCallables(collected.callables, permissions),
+                    apiDescriptor
+                );
+                values ~= materializeValues(filterValues(collected.values, permissions), apiDescriptor);
+                restrictedValuesOnly ~= materializeValues(
+                    restrictedValues(collected.values, permissions),
+                    apiDescriptor
+                );
+            }
+        }
+
+        enforceUniqueExports(callables, values);
+
+        LuaRuntime runtime;
+        runtime.profile = profile;
+        runtime.permissions = permissions.dup;
+        runtime.limits = limits;
+        runtime.exports = toExportDescriptors(callables, values);
+        runtime.restrictedExports = toExportDescriptors(restrictedCallablesOnly, restrictedValuesOnly);
+        runtime._vm = new LuaVm(
+            profile,
+            callables,
+            values,
+            LuaApiDescriptor.init,
             runtime.restrictedExports,
             limits
         );
@@ -1427,6 +1614,50 @@ private LuaValueDescriptor[] restrictedValues(
     return restricted;
 }
 
+private LuaCallableDescriptor[] materializeCallables(
+    LuaCallableDescriptor[] callables,
+    LuaApiDescriptor apiDescriptor
+)
+{
+    if (!apiDescriptor.enabled || apiDescriptor.namespaceName.length == 0)
+        return callables.dup;
+
+    LuaCallableDescriptor[] materialized;
+    foreach (descriptor; callables)
+    {
+        if (apiDescriptor.exportGlobals)
+            materialized ~= descriptor;
+
+        auto namespaced = descriptor;
+        namespaced.exportName = apiDescriptor.namespaceName ~ "." ~ descriptor.exportName;
+        materialized ~= namespaced;
+    }
+
+    return materialized;
+}
+
+private LuaValueDescriptor[] materializeValues(
+    LuaValueDescriptor[] values,
+    LuaApiDescriptor apiDescriptor
+)
+{
+    if (!apiDescriptor.enabled || apiDescriptor.namespaceName.length == 0)
+        return values.dup;
+
+    LuaValueDescriptor[] materialized;
+    foreach (descriptor; values)
+    {
+        if (apiDescriptor.exportGlobals)
+            materialized ~= descriptor;
+
+        auto namespaced = descriptor;
+        namespaced.exportName = apiDescriptor.namespaceName ~ "." ~ descriptor.exportName;
+        materialized ~= namespaced;
+    }
+
+    return materialized;
+}
+
 private void enforceUniqueExports(
     LuaCallableDescriptor[] callables,
     LuaValueDescriptor[] values
@@ -1479,6 +1710,7 @@ private LuaExportDescriptor[] toExportDescriptors(
         LuaExportDescriptor descriptor;
         descriptor.symbolName = callable.symbolName;
         descriptor.exportName = callable.exportName;
+        descriptor.hostSignature = callable.hostSignature;
         descriptor.permission = callable.permission;
         descriptor.mode = LuaExposeMode.Function;
         descriptor.valueMutability = LuaValueMutability.Auto;
@@ -1491,6 +1723,7 @@ private LuaExportDescriptor[] toExportDescriptors(
         LuaExportDescriptor descriptor;
         descriptor.symbolName = value.symbolName;
         descriptor.exportName = value.exportName;
+        descriptor.hostSignature = value.hostSignature;
         descriptor.permission = value.permission;
         descriptor.mode = LuaExposeMode.Value;
         descriptor.valueMutability = value.valueMutability;
@@ -1518,6 +1751,35 @@ private LuaApiDescriptor collectLuaApiDescriptor(T)()
     return descriptor;
 }
 
+private string hostCallableSignature(alias memberSymbol)(string memberName)
+{
+    alias ParamTypes = Parameters!memberSymbol;
+    alias ReturnT = ReturnType!memberSymbol;
+
+    string signature = ReturnT.stringof ~ " " ~ memberName ~ "(";
+    static foreach (index, ParamT; ParamTypes)
+    {
+        static if (index != 0)
+            signature ~= ", ";
+        signature ~= ParamT.stringof ~ " arg" ~ (index + 1).to!string;
+    }
+    signature ~= ")";
+    return signature;
+}
+
+private string hostValueSignature(alias memberSymbol)(string memberName)
+{
+    static if (isCallable!memberSymbol)
+    {
+        alias ReturnT = ReturnType!memberSymbol;
+        return ReturnT.stringof ~ " " ~ memberName ~ "() [value]";
+    }
+    else
+    {
+        return memberSymbol.stringof ~ " " ~ memberName ~ " [value]";
+    }
+}
+
 private LuaCollectedExports collectExports(T)(BindingBox!T box)
 {
     LuaCollectedExports collected;
@@ -1533,6 +1795,13 @@ private LuaCollectedExports collectExports(T)(BindingBox!T box)
                     static if (is(typeof(attr) == LuaExpose))
                     {
                         enum resolvedName = attr.name.length == 0 ? memberName : attr.name;
+                        static if (resolvedName.indexOf(".") != -1)
+                        {
+                            static assert(
+                                false,
+                                "`@LuaExpose` names must not include dots. Use `@LuaApi` namespaces to model nested tables."
+                            );
+                        }
                         static if (attr.mode == LuaExposeMode.Function)
                         {
                             static if (!isCallable!memberSymbol)
@@ -1547,6 +1816,7 @@ private LuaCollectedExports collectExports(T)(BindingBox!T box)
                                 LuaCallableDescriptor descriptor;
                                 descriptor.symbolName = memberName;
                                 descriptor.exportName = resolvedName;
+                                descriptor.hostSignature = hostCallableSignature!memberSymbol(memberName);
                                 descriptor.permission = attr.permission;
                                 descriptor.mode = LuaExposeMode.Function;
                                 descriptor.invoke = makeLuaInvoker!(T, memberName)(box);
@@ -1558,6 +1828,7 @@ private LuaCollectedExports collectExports(T)(BindingBox!T box)
                             LuaValueDescriptor descriptor;
                             descriptor.symbolName = memberName;
                             descriptor.exportName = resolvedName;
+                            descriptor.hostSignature = hostValueSignature!memberSymbol(memberName);
                             descriptor.permission = attr.permission;
                             descriptor.mode = LuaExposeMode.Value;
                             descriptor.valueMutability = attr.valueMutability;
@@ -1796,7 +2067,11 @@ private Result!(T, ScriptError) toHostArgument(T)(
     size_t argumentIndex
 )
 {
-    static if (is(T == string))
+    static if (is(Unqual!T == LuaValue))
+    {
+        return Result!(T, ScriptError).ok(cast(T) value);
+    }
+    else static if (is(T == string))
     {
         if (value.kind == LuaValue.Kind.String)
             return Result!(T, ScriptError).ok(value.stringValue);
@@ -2047,6 +2322,14 @@ private size_t extractLine(string message)
 
 unittest
 {
+    auto split = splitLuaExportPath("botApi.double");
+    assert(split.length == 2);
+    assert(split[0] == "botApi");
+    assert(split[1] == "double");
+}
+
+unittest
+{
     struct SampleApi
     {
         @LuaExpose("double", LuaCapability.DiscordReply)
@@ -2153,6 +2436,29 @@ unittest
 
 unittest
 {
+    @LuaApi(namespaceName: "state", exportGlobals: false)
+    struct NamespacedRestrictedApi
+    {
+        @LuaExpose("set", LuaCapability.StateWrite)
+        void setValue(string key, string value)
+        {
+            auto _ = key;
+            auto __ = value;
+        }
+    }
+
+    auto runtime = (new ScriptingEngine).open!NamespacedRestrictedApi(
+        NamespacedRestrictedApi.init,
+        permissions: [LuaCapability.ContextRead]
+    );
+    auto result = runtime.eval("state.set('x', '1')");
+
+    assert(result.isErr);
+    assert(result.error.message.canFind("state"));
+}
+
+unittest
+{
     struct ValueApi
     {
         @LuaExpose("author", LuaCapability.ContextRead, LuaExposeMode.Value)
@@ -2197,9 +2503,14 @@ unittest
         NamespacedApi.init,
         permissions: [LuaCapability.ContextRead, LuaCapability.DiscordReply]
     );
+    assert(runtime.hasExport("botApi.double"), runtime.exportNames.join(","));
+    assert(runtime.hasExport("botApi.author"), runtime.exportNames.join(","));
+    auto tableExists = runtime.eval("return botApi ~= nil");
+    assert(tableExists.isOk, tableExists.error.message);
+    assert(tableExists.value == "true", tableExists.value);
 
     auto doubled = runtime.eval("return botApi.double(21)");
-    assert(doubled.isOk);
+    assert(doubled.isOk, doubled.error.message);
     assert(doubled.value == "42");
 
     auto author = runtime.eval("return botApi.author.username");
@@ -2208,6 +2519,73 @@ unittest
 
     auto missing = runtime.eval("return double(21)");
     assert(missing.isErr);
+}
+
+unittest
+{
+    @LuaApi(namespaceName: "log", exportGlobals: false)
+    struct LogNamespacedApi
+    {
+        @LuaExpose("info", LuaCapability.LogWrite)
+        long info(long value)
+        {
+            return value + 1;
+        }
+    }
+
+    @LuaApi(namespaceName: "macchi", exportGlobals: false)
+    struct MacchiNamespacedApi
+    {
+        @LuaExpose("author", LuaCapability.ContextRead, LuaExposeMode.Value)
+        LuaTable author()
+        {
+            return LuaTable.safe("username", "ada");
+        }
+    }
+
+    auto runtime = (new ScriptingEngine).openMany!(LogNamespacedApi, MacchiNamespacedApi)(
+        LogNamespacedApi.init,
+        MacchiNamespacedApi.init,
+        permissions: [LuaCapability.LogWrite, LuaCapability.ContextRead]
+    );
+
+    auto logged = runtime.eval("return log.info(41)");
+    assert(logged.isOk);
+    assert(logged.value == "42");
+
+    auto author = runtime.eval("return macchi.author.username");
+    assert(author.isOk);
+    assert(author.value == "ada");
+}
+
+unittest
+{
+    @LuaApi(namespaceName: "log", exportGlobals: false)
+    struct DynamicLogApi
+    {
+        @LuaExpose("info", LuaCapability.LogWrite)
+        string info(LuaValue value)
+        {
+            return value.toDisplayString();
+        }
+    }
+
+    auto runtime = (new ScriptingEngine).open!DynamicLogApi(
+        DynamicLogApi.init,
+        permissions: [LuaCapability.LogWrite]
+    );
+
+    auto fromString = runtime.eval("return log.info('hello')");
+    assert(fromString.isOk);
+    assert(fromString.value == "hello");
+
+    auto fromNumber = runtime.eval("return log.info(41)");
+    assert(fromNumber.isOk);
+    assert(fromNumber.value == "41");
+
+    auto fromNil = runtime.eval("return log.info(nil)");
+    assert(fromNil.isOk);
+    assert(fromNil.value == "nil");
 }
 
 unittest

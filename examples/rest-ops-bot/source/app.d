@@ -313,6 +313,5 @@ void main()
     client.setPresence(StatusType.Online, Activity(ActivityType.Listening, "REST ops"));
 
     client.run();
-    writeln("[rest-ops] synced commands: ", client.commands.applicationCommands.length);
     client.wait();
 }

@@ -1,5 +1,7 @@
 # ddiscord Philosophy
 
+> Navigation: [Index](index.md) | [Quickstart](quickstart.md) | [Bot Structures](bot-structures.md) | [Commands](commands.md) | [Plugins and Lua](plugins-and-lua.md) | [Troubleshooting](troubleshooting.md)
+
 `ddiscord` is being shaped as a production-grade runtime, not a toy wrapper.
 
 ## Principles

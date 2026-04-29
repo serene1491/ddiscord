@@ -317,7 +317,7 @@ struct Task
         this.reconnect = reconnect;
     }
 
-    /// Discord.py-inspired task loop constructor (`seconds` + `minutes` + `hours`).
+    /// Task loop constructor (`seconds` + `minutes` + `hours`).
     static Task loop(
         double seconds = 0,
         double minutes = 0,

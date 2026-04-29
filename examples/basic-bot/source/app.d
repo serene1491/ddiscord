@@ -76,6 +76,5 @@ void main()
     client.setPresence(StatusType.Online, Activity(ActivityType.Watching, "your commands"));
 
     client.run();
-    writeln("[basic] synced commands: ", client.commands.applicationCommands.length);
     client.wait();
 }

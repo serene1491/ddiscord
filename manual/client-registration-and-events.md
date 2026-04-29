@@ -1,5 +1,7 @@
 # Registration and Events
 
+> Navigation: [Index](index.md) | [Quickstart](quickstart.md) | [Bot Structures](bot-structures.md) | [Commands](commands.md) | [Plugins and Lua](plugins-and-lua.md) | [Troubleshooting](troubleshooting.md)
+
 ## Registration
 
 The shortest entrypoints auto-scan the calling module:
@@ -12,7 +14,7 @@ client.registerAllCommands();
 
 - `registerCommands()` registers only command handlers from the current module
 - `registerTasks()` registers only `@Task` handlers from the current module
-- `registerAllCommands()` also includes `@Event`, `@Task`, stateful groups, and plugin descriptor types
+- `registerAllCommands()` also includes `@Event`, `@Task`, stateful groups, and plugin types
 
 Template registration is also available:
 
@@ -100,10 +102,10 @@ Useful events include:
 
 `ReadyEvent` includes `gatewayVersion`, the placeholder guild list carried by the initial `READY`,
 and `resumeGatewayUrl`. Each shipped event also carries a typed `context` field with cached/current
-entities and runtime services for follow-up work.
+entities and shared services for follow-up work.
 
 For example:
 
 - `MessageCreateEventContext` carries `message`, `user`, `guild`, `member`, `channel`, plus `cache`, `state`, `services`, `rest`, and `logger`
-- `InteractionCreateEventContext` carries `interaction` and the same shared runtime surface
+- `InteractionCreateEventContext` carries `interaction` and the same shared app surface
 - `CommandExecutedEventContext` and `CommandFailedEventContext` also expose the originating command context and route-aware helpers such as `prefix`, `slash`, `contextMenu`, and `hybrid`

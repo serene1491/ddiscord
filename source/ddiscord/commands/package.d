@@ -15,6 +15,7 @@ import ddiscord.commands.contexts : CommandContextParameterCount, FirstCommandCo
     resolveCommandContextParameter;
 import ddiscord.commands.metadata : appendIntegrationTypes, appendInteractionContexts,
     normalizedIntegrationTypes, normalizedInteractionContexts, projectedContextsFromPolicy;
+import ddiscord.client_text : tokenizePrefixContent;
 import ddiscord.core.http.client : HttpError, HttpResponse, HttpTransport;
 import ddiscord.context.autocomplete : AutocompleteContext;
 import ddiscord.context.command : CommandContext, CommandSource, ContextMenuContext, HybridContext,
@@ -277,7 +278,8 @@ final class CommandRegistry
             ));
         }
 
-        auto tokens = tokenize(content[prefix.length .. $]);
+        auto body = content[prefix.length .. $];
+        auto tokens = tokenize(body);
         if (tokens.length == 0)
         {
             return Result!(ParsedCommand, string).err(formatError(
@@ -301,8 +303,14 @@ final class CommandRegistry
 
         ParsedCommand parsed;
         parsed.name = tokens[0];
-        parsed.args = tokens[1 .. $].dup;
         parsed.descriptor = descriptor;
+
+        auto rawArgs = prefixRawArguments(body);
+        if (descriptorHasGreedyTail(descriptor.get))
+            parsed.args = parsePrefixArgsWithGreedy(rawArgs, descriptor.get.options.length);
+        else
+            parsed.args = tokenize(rawArgs);
+
         return Result!(ParsedCommand, string).ok(parsed);
     }
 
@@ -1434,24 +1442,82 @@ private string defaultOptionDescription(string parameterName)
 
 private string[] tokenize(string input)
 {
-    string[] tokens;
-    char quote;
+    return tokenizePrefixContent(input);
+}
+
+private bool isPrefixWhitespace(char ch)
+{
+    return ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r';
+}
+
+private string prefixRawArguments(string body)
+{
+    size_t cursor = 0;
+    while (cursor < body.length && isPrefixWhitespace(body[cursor]))
+        cursor++;
+    while (cursor < body.length && !isPrefixWhitespace(body[cursor]))
+        cursor++;
+    while (cursor < body.length && isPrefixWhitespace(body[cursor]))
+        cursor++;
+    return body[cursor .. $];
+}
+
+private bool descriptorHasGreedyTail(CommandDescriptor descriptor)
+{
+    if (descriptor.options.length == 0)
+        return false;
+    return descriptor.options[$ - 1].greedy;
+}
+
+private string[] parsePrefixArgsWithGreedy(string rawArgs, size_t optionCount)
+{
+    if (optionCount == 0)
+        return tokenize(rawArgs);
+
+    if (optionCount == 1)
+    {
+        if (rawArgs.length == 0)
+            return null;
+        return [rawArgs];
+    }
+
+    auto requiredLeadingCount = optionCount - 1;
+    string[] leading;
+    auto tailStart = consumePrefixLeadingTokens(rawArgs, requiredLeadingCount, leading);
+    if (tailStart == size_t.max)
+        return tokenize(rawArgs);
+
+    string[] args = leading.dup;
+    if (tailStart < rawArgs.length)
+        args ~= rawArgs[tailStart .. $];
+    return args;
+}
+
+private size_t consumePrefixLeadingTokens(string rawArgs, size_t count, out string[] tokens)
+{
+    tokens = null;
+    if (count == 0)
+        return 0;
+
     bool inQuote;
+    char quote;
+    bool preserveQuoteChars;
     string current;
 
-    foreach (ch; input)
+    foreach (index, ch; rawArgs)
     {
         if (inQuote)
         {
             if (ch == quote)
             {
+                if (preserveQuoteChars)
+                    current ~= ch;
                 inQuote = false;
             }
             else
             {
                 current ~= ch;
             }
-
             continue;
         }
 
@@ -1459,17 +1525,26 @@ private string[] tokenize(string input)
         {
             inQuote = true;
             quote = ch;
+            preserveQuoteChars = current.length != 0;
+            if (preserveQuoteChars)
+                current ~= ch;
             continue;
         }
 
-        if (ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r')
+        if (isPrefixWhitespace(ch))
         {
-            if (current.length != 0)
-            {
-                tokens ~= current;
-                current = null;
-            }
+            if (current.length == 0)
+                continue;
 
+            tokens ~= current;
+            current = null;
+            if (tokens.length == count)
+            {
+                auto cursor = index + 1;
+                while (cursor < rawArgs.length && isPrefixWhitespace(rawArgs[cursor]))
+                    cursor++;
+                return cursor;
+            }
             continue;
         }
 
@@ -1477,9 +1552,13 @@ private string[] tokenize(string input)
     }
 
     if (current.length != 0)
+    {
         tokens ~= current;
+        if (tokens.length == count)
+            return rawArgs.length;
+    }
 
-    return tokens;
+    return size_t.max;
 }
 
 private template HasInjectAttr(T, string memberName)
@@ -2058,7 +2137,7 @@ private Result!(CommandExecution, string) invokeFreePrefix(alias fn)(
             "commands",
             "Too many prefix arguments were provided.",
             "Command `" ~ commandName!fn() ~ "` received extra arguments starting at `" ~ rawArgs[cursor] ~ "`.",
-            "Remove the extra input or mark the last string parameter as greedy if it should capture the remainder."
+            "Remove the extra input or use a final `string` parameter to capture the remainder."
         ));
     }
 
@@ -2257,7 +2336,7 @@ private Result!(CommandExecution, string) invokeStatefulPrefix(T, alias member)(
             "commands",
             "Too many prefix arguments were provided.",
             "Command `" ~ commandName!member() ~ "` received extra arguments starting at `" ~ rawArgs[cursor] ~ "`.",
-            "Remove the extra input or mark the last string parameter as greedy if it should capture the remainder."
+            "Remove the extra input or use a final `string` parameter to capture the remainder."
         ));
     }
 
@@ -2509,6 +2588,100 @@ unittest
     auto parsed = registry.parsePrefix("!", "!ping").expect("parse failed");
     assert(parsed.name == "ping");
     assert(parsed.descriptor.get.displayName == "ping");
+}
+
+unittest
+{
+    @Command("save-script", routes: CommandRoute.Prefix)
+    void saveScript(CommandContext ctx, string name, string scopeValue, @Greedy string source)
+    {
+        auto _ = name;
+        auto __ = scopeValue;
+        ctx.send(source).await();
+    }
+
+    auto services = new ServiceContainer;
+    auto registry = new CommandRegistry(services);
+    auto rest = unittestRestClient();
+    registerHandlers!(saveScript)(registry);
+
+    CommandContext ctx;
+    ctx.rest = rest;
+    ctx.services = services;
+
+    auto result = registry.executePrefix(
+        ctx,
+        "&",
+        `&save-script say2 server log.info("hello world")`
+    );
+    assert(result.isOk, result.error);
+    assert(rest.messages.history.length == 1);
+    assert(rest.messages.history[0].content == `log.info("hello world")`);
+}
+
+unittest
+{
+    @Stateful
+    struct GreedyStatefulCommands
+    {
+        @Command("echo-script", routes: CommandRoute.Prefix)
+        void echoScript(CommandContext ctx, string name, @Greedy string source)
+        {
+            auto _ = name;
+            ctx.send(source).await();
+        }
+    }
+
+    auto services = new ServiceContainer;
+    auto registry = new CommandRegistry(services);
+    auto rest = unittestRestClient();
+    registry.register!GreedyStatefulCommands();
+
+    CommandContext ctx;
+    ctx.rest = rest;
+    ctx.services = services;
+
+    auto result = registry.executePrefix(
+        ctx,
+        "!",
+        `!echo-script say2 log.info("hello world")`
+    );
+    assert(result.isOk, result.error);
+    assert(rest.messages.history.length == 1);
+    assert(rest.messages.history[0].content == `log.info("hello world")`);
+}
+
+unittest
+{
+    @Command("save-script", routes: CommandRoute.Prefix)
+    void saveScript(CommandContext ctx, string name, string scopeValue, @Greedy string source)
+    {
+        auto _ = name;
+        auto __ = scopeValue;
+        ctx.send(source).await();
+    }
+
+    auto services = new ServiceContainer;
+    auto registry = new CommandRegistry(services);
+    auto rest = unittestRestClient();
+    registerHandlers!(saveScript)(registry);
+
+    CommandContext ctx;
+    ctx.rest = rest;
+    ctx.services = services;
+
+    auto payload = "&save-script nether server\n"
+        ~ "-- Built-in guide script: nether\n"
+        ~ "local function trim(value)\n"
+        ~ "    return (value:gsub(\"^%s+\", \"\"):gsub(\"%s+$\", \"\"))\n"
+        ~ "end\n";
+
+    auto result = registry.executePrefix(ctx, "&", payload);
+    assert(result.isOk, result.error);
+    assert(rest.messages.history.length == 1);
+    assert(rest.messages.history[0].content.canFind("-- Built-in guide script: nether\n"));
+    assert(rest.messages.history[0].content.canFind("gsub(\"^%s+\", \"\")"));
+    assert(rest.messages.history[0].content.canFind("\nlocal function trim(value)\n"));
 }
 
 unittest

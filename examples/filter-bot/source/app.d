@@ -41,6 +41,5 @@ void main()
 
     client.setPresence(StatusType.Online, Activity(ActivityType.Playing, "filter checks"));
     client.run();
-    writeln("[filter] synced commands: ", client.commands.applicationCommands.length);
     client.wait();
 }

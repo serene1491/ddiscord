@@ -2604,6 +2604,17 @@ final class Client
         }
         else
         {
+            auto kind = classifyCommandFailure(result.error);
+            if (kind == CommandErrorKind.UnknownCommand && !errorBehavior.surfaceUnknownCommand)
+            {
+                logger.debugMessage(
+                    "commands",
+                    "Skipped unknown " ~ route ~ " command for `" ~ user.username ~ "` (" ~ user.id.toString ~
+                    ") after " ~ durationMs.to!string ~ "ms."
+                );
+                return;
+            }
+
             logger.error(
                 "commands",
                 "Failed to execute " ~ route ~ " command for `" ~ user.username ~ "` (" ~ user.id.toString ~

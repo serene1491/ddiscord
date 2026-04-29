@@ -254,6 +254,5 @@ void main()
     client.setPresence(StatusType.Online, Activity(ActivityType.Playing, "gateway integration checks"));
 
     client.run();
-    writeln("[test] synced commands: ", client.commands.applicationCommands.length);
     client.wait();
 }

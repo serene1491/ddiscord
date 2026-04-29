@@ -95,6 +95,5 @@ void main()
     client.registerAllCommands();
     client.setPresence(StatusType.Online, Activity(ActivityType.Listening, "Lua plugins"));
     client.run();
-    writeln("[plugin] discovered plugins: ", client.plugins.registeredNames);
     client.wait();
 }
