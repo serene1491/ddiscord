@@ -2,6 +2,20 @@
 
 All notable changes to `ddiscord` should be documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- Scripting hardening in `LuaRuntimeLimits` with a new `maxInstructions` cap (disabled by
+  default when set to `0`) and dedicated unittest coverage for instruction-limit failures.
+
+### Fixed
+
+- Lua runtime instruction limiting now remains effective across `yield/resume` cycles instead
+  of allowing reset-based bypass patterns.
+- Lua runtime memory accounting now uses overflow-safe byte aggregation before enforcing
+  `maxMemoryBytes`.
+
 ## [0.3.5]
 
 ### Added

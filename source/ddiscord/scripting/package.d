@@ -99,6 +99,7 @@ struct LuaRuntimeLimits
 {
     Duration maxExecutionTime = DefaultLuaExecutionTimeout;
     size_t maxMemoryBytes = DefaultLuaMemoryLimitBytes;
+    size_t maxInstructions = 0;
     uint instructionCheckInterval = DefaultLuaInstructionCheckInterval;
 }
 
@@ -318,6 +319,8 @@ private final class LuaVm
     private bool _suspended;
     private string _suspendedChunkName;
     private MonoTime _executionDeadline;
+    private size_t _executedInstructions;
+    private size_t _instructionStride;
 
     this(
         LuaSandboxProfile profile,
@@ -329,13 +332,7 @@ private final class LuaVm
     )
     {
         _profile = profile;
-        _limits = limits;
-        if (_limits.maxExecutionTime <= Duration.zero)
-            _limits.maxExecutionTime = DefaultLuaExecutionTimeout;
-        if (_limits.maxMemoryBytes == 0)
-            _limits.maxMemoryBytes = DefaultLuaMemoryLimitBytes;
-        if (_limits.instructionCheckInterval == 0)
-            _limits.instructionCheckInterval = DefaultLuaInstructionCheckInterval;
+        _limits = normalizeLuaRuntimeLimits(limits);
 
         _state = luaL_newstate();
         if (_state is null)
@@ -700,6 +697,10 @@ private final class LuaVm
         _threadRef = luaL_ref(_state, LuaRegistryIndex);
         _suspended = false;
         _suspendedChunkName = chunkName;
+        _executedInstructions = 0;
+        auto hookInterval = runtimeHookInterval();
+        _instructionStride = cast(size_t) hookInterval;
+        lua_sethook(_thread, &enforceLuaRuntimeLimits, LuaMaskCount, hookInterval);
         return _thread;
     }
 
@@ -725,17 +726,7 @@ private final class LuaVm
         _executionDeadline = MonoTime.currTime + _limits.maxExecutionTime;
         auto previousHookVm = _activeLuaVmForHook;
         _activeLuaVmForHook = this;
-        auto hookInterval = _limits.instructionCheckInterval > cast(uint) int.max
-            ? int.max
-            : cast(int) _limits.instructionCheckInterval;
-        if (hookInterval <= 0)
-            hookInterval = cast(int) DefaultLuaInstructionCheckInterval;
-        lua_sethook(thread, &enforceLuaRuntimeLimits, LuaMaskCount, hookInterval);
-        scope(exit)
-        {
-            lua_sethook(thread, cast(lua_Hook) null, 0, 0);
-            _activeLuaVmForHook = previousHookVm;
-        }
+        scope(exit) _activeLuaVmForHook = previousHookVm;
 
         int nresults = 0;
         auto status = lua_resume(thread, _state, nargs, &nresults);
@@ -792,6 +783,26 @@ private final class LuaVm
 
     private string runtimeLimitViolation(lua_State* state)
     {
+        if (_limits.maxInstructions > 0)
+        {
+            if (size_t.max - _executedInstructions < _instructionStride)
+                _executedInstructions = size_t.max;
+            else
+                _executedInstructions += _instructionStride;
+
+            if (_executedInstructions > _limits.maxInstructions)
+            {
+                return "Lua execution exceeded instruction limit (`" ~
+                    _limits.maxInstructions.to!string ~ "`, executed ~`" ~
+                    _executedInstructions.to!string ~ "`).";
+            }
+
+            // When max-instruction tracking is active, sample expensive checks
+            // at the configured interval instead of every instruction hook.
+            if ((_executedInstructions % cast(size_t) _limits.instructionCheckInterval) != 0)
+                return "";
+        }
+
         if (MonoTime.currTime > _executionDeadline)
         {
             return "Lua execution exceeded time limit (`" ~
@@ -802,7 +813,19 @@ private final class LuaVm
         auto bytesRemainder = lua_gc(state, LuaGcCountB, 0);
         if (kilobytes >= 0 && bytesRemainder >= 0)
         {
-            auto totalBytes = cast(size_t) kilobytes * 1024 + cast(size_t) bytesRemainder;
+            size_t totalBytes = 0;
+            auto totalKilobytes = cast(size_t) kilobytes;
+            auto remainderBytes = cast(size_t) bytesRemainder;
+            if (totalKilobytes > size_t.max / 1024)
+                totalBytes = size_t.max;
+            else
+            {
+                totalBytes = totalKilobytes * 1024;
+                if (size_t.max - totalBytes < remainderBytes)
+                    totalBytes = size_t.max;
+                else
+                    totalBytes += remainderBytes;
+            }
             if (totalBytes > _limits.maxMemoryBytes)
             {
                 return "Lua execution exceeded memory limit (`" ~
@@ -816,9 +839,15 @@ private final class LuaVm
 
     private void releaseThread()
     {
+        auto thread = _thread;
         _suspended = false;
         _suspendedChunkName = "";
         _thread = null;
+        _executedInstructions = 0;
+        _instructionStride = 0;
+
+        if (thread !is null)
+            lua_sethook(thread, cast(lua_Hook) null, 0, 0);
 
         if (_state is null)
             return;
@@ -846,6 +875,11 @@ private final class LuaVm
     {
         lua_pushnil(_state);
         lua_setglobal(_state, toStringz(name));
+    }
+
+    private int runtimeHookInterval()
+    {
+        return runtimeHookIntervalForLimits(_limits);
     }
 
     private string lastErrorMessage(lua_State* state)
@@ -1328,6 +1362,31 @@ private extern (C) void enforceLuaRuntimeLimits(lua_State* state, lua_Debug* ar)
     lua_error(state);
 }
 
+private LuaRuntimeLimits normalizeLuaRuntimeLimits(LuaRuntimeLimits limits)
+{
+    if (limits.maxExecutionTime <= Duration.zero)
+        limits.maxExecutionTime = DefaultLuaExecutionTimeout;
+    if (limits.maxMemoryBytes == 0)
+        limits.maxMemoryBytes = DefaultLuaMemoryLimitBytes;
+    if (limits.instructionCheckInterval == 0)
+        limits.instructionCheckInterval = DefaultLuaInstructionCheckInterval;
+    return limits;
+}
+
+private int runtimeHookIntervalForLimits(LuaRuntimeLimits limits)
+{
+    if (limits.maxInstructions > 0)
+        return 1;
+
+    if (limits.instructionCheckInterval > cast(uint) int.max)
+        return int.max;
+
+    auto hookInterval = cast(int) limits.instructionCheckInterval;
+    if (hookInterval <= 0)
+        return cast(int) DefaultLuaInstructionCheckInterval;
+    return hookInterval;
+}
+
 /// Minimal scripting engine surface.
 final class ScriptingEngine
 {
@@ -1339,12 +1398,7 @@ final class ScriptingEngine
         LuaRuntimeLimits limits = LuaRuntimeLimits.init
     )
     {
-        if (limits.maxExecutionTime <= Duration.zero)
-            limits.maxExecutionTime = DefaultLuaExecutionTimeout;
-        if (limits.maxMemoryBytes == 0)
-            limits.maxMemoryBytes = DefaultLuaMemoryLimitBytes;
-        if (limits.instructionCheckInterval == 0)
-            limits.instructionCheckInterval = DefaultLuaInstructionCheckInterval;
+        limits = normalizeLuaRuntimeLimits(limits);
 
         auto box = new BindingBox!T(binding);
         auto collected = collectExports!T(box);
@@ -1387,12 +1441,7 @@ final class ScriptingEngine
     )
         if (Bindings.length > 0)
     {
-        if (limits.maxExecutionTime <= Duration.zero)
-            limits.maxExecutionTime = DefaultLuaExecutionTimeout;
-        if (limits.maxMemoryBytes == 0)
-            limits.maxMemoryBytes = DefaultLuaMemoryLimitBytes;
-        if (limits.instructionCheckInterval == 0)
-            limits.instructionCheckInterval = DefaultLuaInstructionCheckInterval;
+        limits = normalizeLuaRuntimeLimits(limits);
 
         LuaCallableDescriptor[] callables;
         LuaCallableDescriptor[] restrictedCallablesOnly;
@@ -2836,4 +2885,66 @@ unittest
 
     assert(memoryLimited.isErr);
     assert(memoryLimited.error.message.canFind("memory limit"));
+}
+
+unittest
+{
+    struct EmptyApi
+    {
+    }
+
+    LuaRuntimeLimits limits;
+    limits.maxExecutionTime = dur!"seconds"(2);
+    limits.maxMemoryBytes = 4 * 1024 * 1024;
+    limits.maxInstructions = 5_000;
+    limits.instructionCheckInterval = 200;
+
+    auto runtime = (new ScriptingEngine).open!EmptyApi(
+        EmptyApi.init,
+        limits: limits
+    );
+    auto instructionLimited = runtime.eval("local n=0 while true do n = n + 1 end");
+
+    assert(instructionLimited.isErr);
+    assert(instructionLimited.error.message.canFind("instruction limit"));
+}
+
+unittest
+{
+    struct EmptyApi
+    {
+    }
+
+    LuaRuntimeLimits limits;
+    limits.maxExecutionTime = dur!"seconds"(2);
+    limits.maxMemoryBytes = 4 * 1024 * 1024;
+    limits.maxInstructions = 1_000;
+    limits.instructionCheckInterval = 200;
+
+    auto runtime = (new ScriptingEngine).open!EmptyApi(
+        EmptyApi.init,
+        limits: limits
+    );
+    auto yielded = runtime.evalStepTyped(
+        "local i=0 while true do i=i+1 coroutine.yield(i) end"
+    );
+
+    assert(yielded.isOk);
+    assert(yielded.value.yielded);
+
+    bool hitInstructionLimit;
+    foreach (_; 0 .. 5_000)
+    {
+        auto resumed = runtime.resumeStepTyped();
+        if (resumed.isErr)
+        {
+            assert(resumed.error.message.canFind("instruction limit"));
+            hitInstructionLimit = true;
+            break;
+        }
+
+        assert(resumed.value.yielded);
+    }
+
+    assert(hitInstructionLimit);
 }
