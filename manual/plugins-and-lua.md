@@ -192,6 +192,35 @@ About callbacks and yield:
 2. You can model host coordination with an `onYield` callback concept.
 3. Avoid hardcoded payload schemas in the runtime core unless your product requires a fixed contract.
 
+## Lua VM lifecycle and runtime guard flow
+
+When a script/call starts, the runtime creates a fresh coroutine thread and installs a
+count-based Lua hook for guard checks.
+
+Lifecycle flow:
+
+1. begin thread (`evalStep*`, `evalFileStep*`, `callStep*`)
+2. load chunk or resolve callable
+3. activate runtime guard context (deadline + active VM hook context)
+4. `lua_resume(...)`
+5. resolve outcome:
+6. `yield`: keep coroutine suspended and resume later with `resumeStep*`
+7. `complete`: return first result and release coroutine resources
+8. `error`: enrich script error and release coroutine resources
+
+Guard checks run through the installed hook and enforce:
+
+- execution timeout (`maxExecutionTime`)
+- memory cap (`maxMemoryBytes`)
+- optional total instruction cap (`maxInstructions`, disabled when `0`)
+
+Instruction-limit behavior notes:
+
+1. Instruction counting persists across `yield/resume` on the same suspended coroutine.
+2. When `maxInstructions > 0`, hook checks run every instruction and expensive checks are
+   sampled at `instructionCheckInterval`.
+3. On coroutine release/cancel, hook state and instruction counters are reset.
+
 ## Sandbox model
 
 Untrusted runtimes do not get direct access to:

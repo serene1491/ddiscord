@@ -22,6 +22,11 @@ All notable changes to `ddiscord` should be documented in this file.
   activation/deactivation, coroutine outcome handling (`yield`/`complete`/`error`), and
   hook/cleanup setup while preserving existing scripting behavior.
 
+### Changed
+
+- Manual Lua documentation now includes a dedicated "Lua VM lifecycle and runtime guard flow"
+  section covering thread lifecycle stages, resume outcomes, and guard enforcement behavior.
+
 ## [0.3.5]
 
 ### Added
