@@ -16,6 +16,12 @@ All notable changes to `ddiscord` should be documented in this file.
 - Lua runtime memory accounting now uses overflow-safe byte aggregation before enforcing
   `maxMemoryBytes`.
 
+### Refactored
+
+- Lua VM lifecycle flow was decomposed into focused internal helpers for runtime guard
+  activation/deactivation, coroutine outcome handling (`yield`/`complete`/`error`), and
+  hook/cleanup setup while preserving existing scripting behavior.
+
 ## [0.3.5]
 
 ### Added

@@ -697,10 +697,8 @@ private final class LuaVm
         _threadRef = luaL_ref(_state, LuaRegistryIndex);
         _suspended = false;
         _suspendedChunkName = chunkName;
-        _executedInstructions = 0;
-        auto hookInterval = runtimeHookInterval();
-        _instructionStride = cast(size_t) hookInterval;
-        lua_sethook(_thread, &enforceLuaRuntimeLimits, LuaMaskCount, hookInterval);
+        resetInstructionTracking();
+        installRuntimeHook(_thread);
         return _thread;
     }
 
@@ -723,54 +721,19 @@ private final class LuaVm
             ));
         }
 
-        _executionDeadline = MonoTime.currTime + _limits.maxExecutionTime;
-        auto previousHookVm = _activeLuaVmForHook;
-        _activeLuaVmForHook = this;
-        scope(exit) _activeLuaVmForHook = previousHookVm;
+        auto previousHookVm = activateRuntimeGuard();
+        scope(exit) deactivateRuntimeGuard(previousHookVm);
 
         int nresults = 0;
         auto status = lua_resume(thread, _state, nargs, &nresults);
 
         if (status == LuaYield)
-        {
-            auto value = firstResultFromThread(thread, nresults);
-            lua_settop(thread, 0);
-            if (value.isErr)
-            {
-                releaseThread();
-                return Result!(LuaStepResult, ScriptError).err(value.error);
-            }
-
-            _suspended = true;
-            _suspendedChunkName = chunkName;
-
-            LuaStepResult step;
-            step.state = LuaStepState.Yielded;
-            step.value = value.value;
-            return Result!(LuaStepResult, ScriptError).ok(step);
-        }
+            return handleYieldedStep(thread, nresults, chunkName);
 
         if (status == LuaOk)
-        {
-            auto value = firstResultFromThread(thread, nresults);
-            lua_settop(thread, 0);
-            if (value.isErr)
-            {
-                releaseThread();
-                return Result!(LuaStepResult, ScriptError).err(value.error);
-            }
+            return handleCompletedStep(thread, nresults);
 
-            LuaStepResult step;
-            step.state = LuaStepState.Completed;
-            step.value = value.value;
-            releaseThread();
-            return Result!(LuaStepResult, ScriptError).ok(step);
-        }
-
-        auto message = stackString(thread, -1);
-        lua_settop(thread, 0);
-        releaseThread();
-        return Result!(LuaStepResult, ScriptError).err(scriptError(enrichLuaError(message), chunkName));
+        return handleFailedStep(thread, chunkName);
     }
 
     private Result!(LuaValue, ScriptError) firstResultFromThread(lua_State* thread, int nresults)
@@ -843,11 +806,10 @@ private final class LuaVm
         _suspended = false;
         _suspendedChunkName = "";
         _thread = null;
-        _executedInstructions = 0;
-        _instructionStride = 0;
+        resetInstructionTracking();
 
         if (thread !is null)
-            lua_sethook(thread, cast(lua_Hook) null, 0, 0);
+            removeRuntimeHook(thread);
 
         if (_state is null)
             return;
@@ -880,6 +842,81 @@ private final class LuaVm
     private int runtimeHookInterval()
     {
         return runtimeHookIntervalForLimits(_limits);
+    }
+
+    private LuaVm activateRuntimeGuard()
+    {
+        _executionDeadline = MonoTime.currTime + _limits.maxExecutionTime;
+        auto previousHookVm = _activeLuaVmForHook;
+        _activeLuaVmForHook = this;
+        return previousHookVm;
+    }
+
+    private void deactivateRuntimeGuard(LuaVm previousHookVm)
+    {
+        _activeLuaVmForHook = previousHookVm;
+    }
+
+    private Result!(LuaStepResult, ScriptError) handleYieldedStep(lua_State* thread, int nresults, string chunkName)
+    {
+        auto value = firstResultFromThread(thread, nresults);
+        lua_settop(thread, 0);
+        if (value.isErr)
+        {
+            releaseThread();
+            return Result!(LuaStepResult, ScriptError).err(value.error);
+        }
+
+        _suspended = true;
+        _suspendedChunkName = chunkName;
+
+        LuaStepResult step;
+        step.state = LuaStepState.Yielded;
+        step.value = value.value;
+        return Result!(LuaStepResult, ScriptError).ok(step);
+    }
+
+    private Result!(LuaStepResult, ScriptError) handleCompletedStep(lua_State* thread, int nresults)
+    {
+        auto value = firstResultFromThread(thread, nresults);
+        lua_settop(thread, 0);
+        if (value.isErr)
+        {
+            releaseThread();
+            return Result!(LuaStepResult, ScriptError).err(value.error);
+        }
+
+        LuaStepResult step;
+        step.state = LuaStepState.Completed;
+        step.value = value.value;
+        releaseThread();
+        return Result!(LuaStepResult, ScriptError).ok(step);
+    }
+
+    private Result!(LuaStepResult, ScriptError) handleFailedStep(lua_State* thread, string chunkName)
+    {
+        auto message = stackString(thread, -1);
+        lua_settop(thread, 0);
+        releaseThread();
+        return Result!(LuaStepResult, ScriptError).err(scriptError(enrichLuaError(message), chunkName));
+    }
+
+    private void installRuntimeHook(lua_State* thread)
+    {
+        auto hookInterval = runtimeHookInterval();
+        _instructionStride = cast(size_t) hookInterval;
+        lua_sethook(thread, &enforceLuaRuntimeLimits, LuaMaskCount, hookInterval);
+    }
+
+    private void removeRuntimeHook(lua_State* thread)
+    {
+        lua_sethook(thread, cast(lua_Hook) null, 0, 0);
+    }
+
+    private void resetInstructionTracking()
+    {
+        _executedInstructions = 0;
+        _instructionStride = 0;
     }
 
     private string lastErrorMessage(lua_State* state)
