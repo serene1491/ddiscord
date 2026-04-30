@@ -6,8 +6,6 @@
  */
 module ddiscord.scripting.lua54;
 
-pragma(lib, "lua5.4");
-
 extern (C):
 
 struct lua_State;

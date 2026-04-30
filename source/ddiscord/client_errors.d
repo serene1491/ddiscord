@@ -6,7 +6,7 @@
  */
 module ddiscord.client_errors;
 
-import ddiscord.client_types : CommandErrorBehavior, CommandErrorContext, CommandErrorKind;
+import ddiscord.client_support.types : CommandErrorBehavior, CommandErrorContext, CommandErrorKind;
 import ddiscord.models.message : MessageCreate;
 import std.algorithm : canFind;
 import std.string : indexOf, strip;

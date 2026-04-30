@@ -56,6 +56,18 @@ cd examples/lua-scripting-bot && dub run
 cd examples/rest-ops-bot && dub run
 ```
 
+You can also build all example projects and then run `test-bot` with one command:
+
+```sh
+./scripts/test.sh
+```
+
+To keep `test-bot` running continuously at the end:
+
+```sh
+./scripts/test.sh --bot-seconds 0
+```
+
 The consoles load shared environment values from `examples/.env` and `examples/.env.local`.
 
 Accepted token variables for the examples:
@@ -63,6 +75,7 @@ Accepted token variables for the examples:
 - `DISCORD_TOKEN`
 - `TOKEN`
 - `BOT_PREFIX` for prefix-based examples
+- `TEST_BOT_RUN_SECONDS` to auto-stop `test-bot` after N seconds (`0` keeps it running)
 - `GREETING_PREFIX` to customize the greeting text used by `services-bot`
 - `BOT_OWNER_ID` or `OWNER_ID` for the owner-only Lua eval command in `plugin-bot`
 - `PLUGINS_DIR` to override the default plugin directory used by `plugin-bot`

@@ -2,6 +2,48 @@
 
 All notable changes to `ddiscord` should be documented in this file.
 
+## [0.3.5]
+
+### Added
+
+- Repository helper script `scripts/test.sh` to build the library, build every runnable
+  example project, and execute `examples/test-bot` with full runtime logs.
+- Optional timed shutdown for `examples/test-bot` via `TEST_BOT_RUN_SECONDS`, enabling
+  non-interactive smoke runs while preserving continuous mode with `0`.
+
+### Changed
+
+- `agent-docs` guidance was tightened and de-duplicated to reduce ambiguity while keeping
+  core quality, testing, and policy rules explicit (`AGENT.md`, `ARCHITECTURE.md`,
+  `CONVENTIONS.md`, `CONTRIBUTING.md`, `IMPLEMENTATION_GUIDE.md`, and `TESTING.md`).
+- Examples documentation now includes the unified build-and-run helper flow and timed
+  `test-bot` execution controls.
+
+### Fixed
+
+- `examples/test-bot` now validates `roll` command input (`sides >= 2`) instead of allowing
+  invalid random ranges.
+- `examples/test-bot` now handles invalid `TEST_BOT_RUN_SECONDS` values gracefully by
+  reporting the issue and continuing in continuous mode.
+
+### Refactored
+
+- Continued large-file decomposition for internal maintainability:
+  - extracted REST public support types into `source/ddiscord/rest_types.d`
+  - extracted REST payload types into `source/ddiscord/rest_payloads.d`
+  - extracted REST internal stores into `source/ddiscord/rest_internal.d`
+  - extracted client runtime support types into `source/ddiscord/client_runtime_types.d`
+  - extracted command task and policy surfaces into
+    `source/ddiscord/command_task_types.d` and `source/ddiscord/command_policy_types.d`
+- Organized support modules into clearer subdirectories while preserving compatibility:
+  - `source/ddiscord/client_support/types.d` and `source/ddiscord/client_support/runtime_types.d`
+  - `source/ddiscord/rest_support/types.d`, `source/ddiscord/rest_support/payloads.d`,
+    and `source/ddiscord/rest_support/internal.d`
+  - `source/ddiscord/commands/task_types.d` and `source/ddiscord/commands/policy_types.d`
+  - legacy flat modules kept as import shims to avoid breaking downstream imports
+- `source/ddiscord/scripting/lua54.d` now relies on `dub.json` library linkage without a
+  duplicated `pragma(lib, ...)` declaration.
+
 ## [0.3.4]
 
 ### Changed

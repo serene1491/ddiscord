@@ -7,7 +7,6 @@
 module ddiscord.rest;
 
 import core.thread : Thread;
-import core.sync.mutex : Mutex;
 import core.time : MonoTime;
 import ddiscord.core.http.client : HttpClient, HttpClientConfig, HttpError, HttpErrorKind,
     HttpMethod, HttpRequest, HttpResponse, HttpTransport;
@@ -30,6 +29,11 @@ import ddiscord.util.limits : DiscordApiBase;
 import ddiscord.util.optional : Nullable;
 import ddiscord.util.result : Result;
 import ddiscord.util.snowflake : Snowflake;
+import ddiscord.rest_support.internal : ApplicationCommandStore, MessageHistory;
+public import ddiscord.rest_support.payloads : InteractionCallbackType, ModifyCurrentApplication,
+    ModifyCurrentUser;
+public import ddiscord.rest_support.types : GatewayBotInfo, GatewaySessionStartLimit, LatencySample,
+    MessageQuery, ReactionQuery, RestClientConfig;
 import std.algorithm : canFind;
 import std.conv : to;
 import std.datetime : Clock, Duration, dur;
@@ -37,185 +41,6 @@ import std.datetime.timezone : UTC;
 import std.json : JSONType, JSONValue, parseJSON;
 import std.string : strip;
 import std.uri : encodeComponent;
-
-/// Minimal latency sample.
-struct LatencySample
-{
-    long milliseconds;
-
-    /// Returns the latency in the requested unit.
-    long total(string unit)() const
-    {
-        static if (unit == "msecs")
-            return milliseconds;
-        else
-            return milliseconds;
-    }
-}
-
-/// Runtime configuration for the public REST client.
-struct RestClientConfig
-{
-    string token;
-    Nullable!Snowflake applicationId;
-    string apiBase = DiscordApiBase;
-    string userAgent = DdiscordUserAgent;
-    Duration timeout = dur!"seconds"(15);
-    bool autoRetryRateLimits = true;
-    uint maxRateLimitRetries = 3;
-    bool autoRetryServerErrors = true;
-    uint maxServerErrorRetries = 3;
-    Duration retryBaseDelay = dur!"msecs"(500);
-    Duration maxRetryDelay = dur!"seconds"(30);
-    Nullable!HttpTransport transport;
-    LatencySample* latencyTarget;
-}
-
-/// Query options for listing channel messages.
-struct MessageQuery
-{
-    Nullable!Snowflake before;
-    Nullable!Snowflake after;
-    Nullable!Snowflake around;
-    ushort limit = 50;
-}
-
-/// Query options for listing users who reacted with one emoji.
-struct ReactionQuery
-{
-    ushort limit = 25;
-    Nullable!Snowflake after;
-}
-
-/// Session start limits returned by `GET /gateway/bot`.
-struct GatewaySessionStartLimit
-{
-    uint total;
-    uint remaining;
-    uint resetAfterMilliseconds;
-    uint maxConcurrency;
-}
-
-/// Gateway discovery payload returned by Discord.
-struct GatewayBotInfo
-{
-    string url;
-    uint shards;
-    GatewaySessionStartLimit sessionStartLimit;
-}
-
-/// Interaction callback type.
-enum InteractionCallbackType : int
-{
-    ChannelMessageWithSource = 4,
-    DeferredChannelMessageWithSource = 5,
-    DeferredUpdateMessage = 6,
-    UpdateMessage = 7,
-    ApplicationCommandAutocompleteResult = 8,
-    Modal = 9,
-}
-
-/// Current-user update payload.
-struct ModifyCurrentUser
-{
-    Nullable!string username;
-    Nullable!string avatar;
-    Nullable!string banner;
-
-    JSONValue toJSON() const
-    {
-        JSONValue json;
-        if (!username.isNull)
-            json["username"] = username.get;
-        if (!avatar.isNull)
-            json["avatar"] = avatar.get;
-        if (!banner.isNull)
-            json["banner"] = banner.get;
-        return json;
-    }
-}
-
-/// Current-application update payload.
-struct ModifyCurrentApplication
-{
-    Nullable!string description;
-
-    JSONValue toJSON() const
-    {
-        JSONValue json;
-        if (!description.isNull)
-            json["description"] = description.get;
-        return json;
-    }
-}
-
-private final class MessageHistory
-{
-    private Mutex _mutex;
-    private Message[] _messages;
-    private ulong _nextId = 1;
-
-    this()
-    {
-        _mutex = new Mutex;
-    }
-
-    void store(Message message)
-    {
-        synchronized (_mutex)
-        {
-            if (message.id.value == 0)
-                message.id = Snowflake(_nextId++);
-            _messages ~= message;
-        }
-    }
-
-    Message[] items()
-    {
-        synchronized (_mutex)
-            return _messages.dup;
-    }
-
-    Message[] inChannel(Snowflake channelId)
-    {
-        Message[] items;
-        synchronized (_mutex)
-        {
-            foreach (message; _messages)
-            {
-                if (message.channelId == channelId)
-                    items ~= message;
-            }
-        }
-        return items;
-    }
-}
-
-private final class ApplicationCommandStore
-{
-    private Mutex _mutex;
-    private ApplicationCommandDefinition[] _commands;
-
-    this()
-    {
-        _mutex = new Mutex;
-    }
-
-    ApplicationCommandDefinition[] overwrite(ApplicationCommandDefinition[] definitions)
-    {
-        synchronized (_mutex)
-        {
-            _commands = definitions.dup;
-            return _commands.dup;
-        }
-    }
-
-    ApplicationCommandDefinition[] items()
-    {
-        synchronized (_mutex)
-            return _commands.dup;
-    }
-}
 
 private final class RealDiscordRest
 {

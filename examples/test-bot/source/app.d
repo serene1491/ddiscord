@@ -1,8 +1,10 @@
 module app;
 
+import core.thread : Thread;
+import core.time : dur;
 import ddiscord;
 import std.array : join;
-import std.conv : to;
+import std.conv : ConvException, to;
 import std.format : format;
 import std.path : buildPath;
 import std.random : uniform;
@@ -15,6 +17,23 @@ private Nullable!Snowflake optionalSnowflake(EnvLoader env, string key)
     if (value.length == 0)
         return Nullable!Snowflake.init;
     return Nullable!Snowflake.of(Snowflake(value.to!ulong));
+}
+
+private ulong parseAutoStopSeconds(EnvLoader env)
+{
+    auto raw = env.get!string("TEST_BOT_RUN_SECONDS", "0").strip;
+    if (raw.length == 0)
+        return 0;
+
+    try
+    {
+        return raw.to!ulong;
+    }
+    catch (ConvException)
+    {
+        writeln("[test] invalid TEST_BOT_RUN_SECONDS=", raw, " (expected integer); running continuously");
+        return 0;
+    }
 }
 
 private string formatLatency(CommandContext ctx)
@@ -134,6 +153,12 @@ void handleEcho(HybridContext ctx, string text = "hello from ddiscord")
 @Command("roll", description: "Roll a dice from a prefix command", routes: CommandRoute.Prefix)
 void handleRoll(CommandContext ctx, long sides = 6)
 {
+    if (sides < 2)
+    {
+        ctx.send("sides must be >= 2").await();
+        return;
+    }
+
     auto result = uniform(1L, sides + 1L);
     ctx.send(format!"rolled %d on d%d"(result, sides)).await();
 }
@@ -171,6 +196,7 @@ void main()
     auto env = loadEnv(buildPath(".."));
     auto startupChannelId = optionalSnowflake(env, "TEST_CHANNEL_ID");
     auto testServerId = optionalSnowflake(env, "TEST_SERVER_ID");
+    auto autoStopSeconds = parseAutoStopSeconds(env);
 
     auto client = new Client(ClientConfig(
         token: env.get!string("DISCORD_TOKEN", env.require!string("TOKEN")),
@@ -186,19 +212,20 @@ void main()
         foreach (line; lines)
             writeln("[test] ", line);
 
-        if (startupChannelId.isNull)
-            return;
+        if (!startupChannelId.isNull)
+        {
+            auto report = "test-bot ready | synced=" ~ client.commands.applicationCommands.length.to!string ~
+                "\n" ~ lines.join("\n");
+            if (report.length > 1800)
+                report = report[0 .. 1800] ~ "\n... truncated ...";
 
-        auto report = "test-bot ready | synced=" ~ client.commands.applicationCommands.length.to!string ~
-            "\n" ~ lines.join("\n");
-        if (report.length > 1800)
-            report = report[0 .. 1800] ~ "\n... truncated ...";
+            auto sent = client.messages.create(startupChannelId.get, MessageCreate(report)).awaitResult();
+            if (sent.isOk)
+                writeln("[test] startup report sent to channel ", startupChannelId.get.toString);
+            else
+                writeln("[test] startup report failed: ", shortError(sent.error));
+        }
 
-        auto sent = client.messages.create(startupChannelId.get, MessageCreate(report)).awaitResult();
-        if (sent.isOk)
-            writeln("[test] startup report sent to channel ", startupChannelId.get.toString);
-        else
-            writeln("[test] startup report failed: ", shortError(sent.error));
     });
 
     client.on!ResumedEvent((_event) {
@@ -254,5 +281,18 @@ void main()
     client.setPresence(StatusType.Online, Activity(ActivityType.Playing, "gateway integration checks"));
 
     client.run();
+
+    if (autoStopSeconds > 0)
+    {
+        writeln("[test] auto-stop armed for ", autoStopSeconds, "s");
+        auto stopThread = new Thread({
+            Thread.sleep(dur!"seconds"(cast(long) autoStopSeconds));
+            writeln("[test] stopping after ", autoStopSeconds, "s");
+            client.stop();
+        });
+        stopThread.isDaemon = true;
+        stopThread.start();
+    }
+
     client.wait();
 }

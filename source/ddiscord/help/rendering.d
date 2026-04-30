@@ -6,7 +6,7 @@
  */
 module ddiscord.help.rendering;
 
-import ddiscord.client_types : CommandHelpEntry, CommandHelpPage;
+import ddiscord.client_support.types : CommandHelpEntry, CommandHelpPage;
 import ddiscord.help.navigation : BuiltInHelpAccentColor, BuiltInHelpNextLabel,
     BuiltInHelpNoopCustomId, BuiltInHelpPreviousLabel;
 import ddiscord.interactions.components : ActionRow, Button, ButtonStyle, Container,

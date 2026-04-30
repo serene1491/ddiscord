@@ -6,7 +6,7 @@
  */
 module ddiscord.client_filters;
 
-import ddiscord.client_types : CommandRegistrationFilter, RegistrationCandidate;
+import ddiscord.client_support.types : CommandRegistrationFilter, RegistrationCandidate;
 import std.algorithm : canFind;
 
 bool matchesRegistrationFilter(

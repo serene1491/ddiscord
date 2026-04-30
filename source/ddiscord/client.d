@@ -6,8 +6,8 @@
  */
 module ddiscord.client;
 
-public import ddiscord.client_types : CommandErrorBehavior, CommandErrorContext, CommandErrorKind,
-    CommandHelpBehavior, CommandHelpEntry, CommandHelpPage, CommandRegistrationFilter,
+public import ddiscord.client_support.types : ClientConfig, CommandErrorBehavior, CommandErrorContext,
+    CommandErrorKind, CommandHelpBehavior, CommandHelpEntry, CommandHelpPage, CommandRegistrationFilter,
     DispatchQueueHealth;
 
 import core.sync.condition : Condition;
@@ -20,8 +20,10 @@ import ddiscord.client_filters : matchesRegistrationFilter;
 import ddiscord.client_event_contexts : ClientEventContextBuilders;
 import ddiscord.client_queue : DispatchQueuePushOutcome, compactQueue, pushBounded, queueDepth;
 import ddiscord.client_runtime : UptimeSample, snowflakeLatencyMilliseconds;
+import ddiscord.client_support.runtime_types : DispatchItem, GatewayAutoReshardWatchdogLabel,
+    GatewayReadyWatchdogLabel, ShardRuntime;
 import ddiscord.client_text : attemptedPrefixCommandName;
-import ddiscord.client_types : HelpRequest, RegistrationCandidate;
+import ddiscord.client_support.types : HelpRequest, RegistrationCandidate;
 import ddiscord.commands : Command, CommandCategory, CommandDescriptor, CommandExecution,
     CommandExecutionSettings, CommandMiddleware, CommandOptionDescriptor, CommandRegistry,
     CommandRoute, Autocomplete, HideFromHelp, HybridCommand, Inject, MessageCommand, ParsedCommand, PrefixCommand,
@@ -101,61 +103,6 @@ import std.json : JSONValue;
 import std.string : startsWith, strip;
 import std.traits : Parameters, fullyQualifiedName, isCallable;
 import std.typecons : Tuple;
-
-/// Client configuration.
-private enum DefaultMaxDispatchQueueSize = 4096;
-private enum DefaultDispatchOverflowLogEvery = 100;
-
-struct ClientConfig
-{
-    string token;
-    uint intents;
-    string prefix = "!";
-    string pluginsDir = "./plugins";
-    bool allowLoosePlugins = true;
-    bool allowPluginEntrypointEscape = false;
-    bool requireExplicitPluginPermissions = false;
-    Nullable!Snowflake ownerId;
-    Nullable!Snowflake applicationId;
-    bool autoSyncCommands = true;
-    LogLevel logLevel = LogLevel.Information;
-    Nullable!HttpTransport transport;
-    bool logUnhandledGatewayDispatchEvents = false;
-    size_t gatewayUnhandledDispatchLogEvery = 100;
-    bool enableSharding;
-    bool autoSharding = true;
-    uint shardCount;
-    bool autoReshard;
-    Duration autoReshardCheckInterval = dur!"minutes"(10);
-    size_t maxDispatchQueueSize = DefaultMaxDispatchQueueSize;
-    bool dropOldestDispatchOnOverflow = true;
-    size_t dispatchOverflowLogEvery = DefaultDispatchOverflowLogEvery;
-}
-
-private enum GatewayReadyWatchdogLabel = "gateway-ready-watchdog";
-private enum GatewayAutoReshardWatchdogLabel = "gateway-auto-reshard-watchdog";
-
-private struct ShardRuntime
-{
-    uint shardId;
-    GatewayClient gateway;
-    Thread thread;
-}
-
-private struct DispatchItem
-{
-    enum Kind
-    {
-        Message,
-        Interaction,
-    }
-
-    Kind kind;
-    Message message;
-    Interaction interaction;
-    Channel channel;
-    ulong permissions;
-}
 
 /// High-level client façade for the MVP library.
 final class Client

@@ -29,6 +29,7 @@ Optional environment values:
 - `TEST_CHANNEL_ID` to send a startup validation message after `READY`
 - `TEST_SERVER_ID` to run additional guild/member/roles checks after `READY`
 - `BOT_PREFIX` to override the default `!`
+- `TEST_BOT_RUN_SECONDS` to stop the bot automatically after N seconds (`0` = keep running)
 
 Useful things to try after startup:
 
