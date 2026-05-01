@@ -133,6 +133,9 @@ final class Client
     private bool _pluginsActive;
     private Mutex _dispatchMutex;
     private Condition _dispatchAvailable;
+    private Mutex _shutdownJoinMutex;
+    private Condition _shutdownJoinAvailable;
+    private bool _shutdownJoinInProgress;
     private DispatchItem[] _dispatchQueue;
     private size_t _dispatchQueueHead;
     private ulong _nextHelpQueryTokenId;
@@ -163,6 +166,8 @@ final class Client
         tasks.logger = logger;
         _dispatchMutex = new Mutex;
         _dispatchAvailable = new Condition(_dispatchMutex);
+        _shutdownJoinMutex = new Mutex;
+        _shutdownJoinAvailable = new Condition(_shutdownJoinMutex);
 
         services.add!Client(this);
         services.add!ServiceContainer(services);
@@ -910,6 +915,10 @@ final class Client
     /// Blocks until the live gateway thread finishes.
     void wait()
     {
+        acquireShutdownJoinTurn();
+        scope (exit)
+            releaseShutdownJoinTurn();
+
         joinShardThreads();
         if (_dispatchThread !is null)
         {
@@ -923,7 +932,9 @@ final class Client
         }
     }
 
-    /// Stops the live gateway session if one is running.
+    /// Requests shutdown for the live gateway session if one is running.
+    ///
+    /// Call `wait()` to block until all background threads have exited.
     void stop()
     {
         _running = false;
@@ -935,17 +946,7 @@ final class Client
         deactivatePluginsIfNeeded();
         logger.information("client", "Stopping the Discord client.");
         signalDispatchLoop();
-        stopAllGateways();
-        if (_dispatchThread !is null)
-        {
-            _dispatchThread.join();
-            _dispatchThread = null;
-        }
-        if (_taskThread !is null)
-        {
-            _taskThread.join();
-            _taskThread = null;
-        }
+        stopGatewaysWithoutJoin();
     }
 
     /// Returns messages sent through the REST surface history.
@@ -1800,6 +1801,25 @@ final class Client
     {
         stopGatewaysWithoutJoin();
         joinShardThreads();
+    }
+
+    private void acquireShutdownJoinTurn()
+    {
+        synchronized (_shutdownJoinMutex)
+        {
+            while (_shutdownJoinInProgress)
+                _shutdownJoinAvailable.wait();
+            _shutdownJoinInProgress = true;
+        }
+    }
+
+    private void releaseShutdownJoinTurn()
+    {
+        synchronized (_shutdownJoinMutex)
+        {
+            _shutdownJoinInProgress = false;
+            _shutdownJoinAvailable.notifyAll();
+        }
     }
 
     private void joinShardThreads()
@@ -3863,6 +3883,36 @@ unittest
     auto client = new Client(ClientConfig("token", cast(uint) GatewayIntent.Guilds));
     client._running = true;
     assertThrown!DdiscordException(client.run());
+}
+
+unittest
+{
+    auto client = new Client(ClientConfig("token", cast(uint) GatewayIntent.Guilds));
+    client._running = true;
+
+    client._dispatchThread = new Thread({
+        Thread.sleep(dur!"msecs"(25));
+    });
+    client._taskThread = new Thread({
+        Thread.sleep(dur!"msecs"(25));
+    });
+    client._dispatchThread.start();
+    client._taskThread.start();
+
+    bool waitReturned;
+    auto waiter = new Thread({
+        client.wait();
+        waitReturned = true;
+    });
+    waiter.start();
+
+    Thread.sleep(dur!"msecs"(2));
+    client.stop();
+    waiter.join();
+
+    assert(waitReturned);
+    assert(client._dispatchThread is null);
+    assert(client._taskThread is null);
 }
 
 unittest

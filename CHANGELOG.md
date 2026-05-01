@@ -26,6 +26,11 @@ All notable changes to `ddiscord` should be documented in this file.
   failures.
 - Transport failures with `status code 0` now include concrete exception-class detail when no
   nested message is available, improving network diagnosis.
+- Client shutdown coordination now serializes thread-join phases shared by `wait()` and `stop()`,
+  reducing join-race risk during concurrent shutdown requests.
+- `scripts/test.sh` now skips the live `test-bot` execution when no shell token
+  (`DISCORD_TOKEN`/`TOKEN`) is present, while still building all examples; set
+  `TEST_BOT_FORCE_RUN=1` to force the live run step.
 
 ### Refactored
 

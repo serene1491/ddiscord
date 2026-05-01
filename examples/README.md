@@ -62,6 +62,10 @@ You can also build all example projects and then run `test-bot` with one command
 ./scripts/test.sh
 ```
 
+When `DISCORD_TOKEN`/`TOKEN` is not set in the current shell, `scripts/test.sh` now skips the
+live `test-bot` run step after building examples. To force the live run anyway, set
+`TEST_BOT_FORCE_RUN=1`.
+
 To keep `test-bot` running continuously at the end:
 
 ```sh
@@ -76,6 +80,8 @@ Accepted token variables for the examples:
 - `TOKEN`
 - `BOT_PREFIX` for prefix-based examples
 - `TEST_BOT_RUN_SECONDS` to auto-stop `test-bot` after N seconds (`0` keeps it running)
+- `TEST_BOT_FORCE_RUN=1` to force the `scripts/test.sh` live `test-bot` run even when no token
+  is present in the current shell environment
 - `GREETING_PREFIX` to customize the greeting text used by `services-bot`
 - `BOT_OWNER_ID` or `OWNER_ID` for the owner-only Lua eval command in `plugin-bot`
 - `PLUGINS_DIR` to override the default plugin directory used by `plugin-bot`

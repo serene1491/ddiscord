@@ -285,13 +285,9 @@ void main()
     if (autoStopSeconds > 0)
     {
         writeln("[test] auto-stop armed for ", autoStopSeconds, "s");
-        auto stopThread = new Thread({
-            Thread.sleep(dur!"seconds"(cast(long) autoStopSeconds));
-            writeln("[test] stopping after ", autoStopSeconds, "s");
-            client.stop();
-        });
-        stopThread.isDaemon = true;
-        stopThread.start();
+        Thread.sleep(dur!"seconds"(cast(long) autoStopSeconds));
+        writeln("[test] exiting after ", autoStopSeconds, "s");
+        return;
     }
 
     client.wait();
