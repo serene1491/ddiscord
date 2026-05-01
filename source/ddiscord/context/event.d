@@ -295,6 +295,8 @@ struct MessageComponentEventContext
     alias event this;
     Interaction interaction;
     string customId;
+    string[] values;
+    InteractionSubmittedComponent[] submittedComponents;
 }
 
 /// Modal-submit interaction event context.

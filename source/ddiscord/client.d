@@ -75,7 +75,7 @@ import ddiscord.models.application_command : ApplicationCommandDefinition, Appli
     ApplicationCommandOptionType, ApplicationCommandType, AutocompleteChoice, InteractionType;
 import ddiscord.models.channel : Channel;
 import ddiscord.models.guild : Guild, UnavailableGuild;
-import ddiscord.models.interaction : Interaction, InteractionOption;
+import ddiscord.models.interaction : Interaction, InteractionOption, InteractionSubmittedComponent;
 import ddiscord.models.member : GuildMember;
 import ddiscord.models.message : Message, MessageCreate;
 import ddiscord.models.presence : Activity, StatusType;
@@ -3934,6 +3934,41 @@ unittest
     auto choices = payload.object.get("data", JSONValue.init).object.get("choices", JSONValue.init).array;
     assert(choices.length == 2);
     assert(choices[0].object.get("name", JSONValue.init).str == "Song hea");
+}
+
+unittest
+{
+    auto client = new Client(ClientConfig("token", cast(uint) GatewayIntent.Guilds));
+    bool sawComponent;
+    string[] selectedValues;
+    string customId;
+    string[] submittedValues;
+
+    client.on!MessageComponentEvent((event) {
+        sawComponent = true;
+        customId = event.context.customId;
+        selectedValues = event.context.values.dup;
+        if (event.context.submittedComponents.length != 0)
+            submittedValues = event.context.submittedComponents[0].values.dup;
+    });
+
+    Interaction interaction;
+    interaction.id = Snowflake(88);
+    interaction.type = InteractionType.MessageComponent;
+    interaction.token = "component-token";
+    interaction.customId = "favorite_bug";
+    interaction.values = ["ant", "moth"];
+    InteractionSubmittedComponent submitted;
+    submitted.customId = "favorite_bug";
+    submitted.values = ["ant", "moth"];
+    interaction.submittedComponents = [submitted];
+
+    auto result = client.receiveInteraction(interaction);
+    assert(result.isOk);
+    assert(sawComponent);
+    assert(customId == "favorite_bug");
+    assert(selectedValues == ["ant", "moth"]);
+    assert(submittedValues == ["ant", "moth"]);
 }
 
 unittest

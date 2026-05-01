@@ -384,6 +384,8 @@ mixin template ClientEventContextBuilders()
         ctx.event = buildInteractionCreateEventContext(interaction, channel).event;
         ctx.interaction = interaction;
         ctx.customId = interaction.customId;
+        ctx.values = interaction.values.dup;
+        ctx.submittedComponents = interaction.submittedComponents.dup;
         return ctx;
     }
 

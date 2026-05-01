@@ -15,6 +15,17 @@ All notable changes to `ddiscord` should be documented in this file.
   of allowing reset-based bypass patterns.
 - Lua runtime memory accounting now uses overflow-safe byte aggregation before enforcing
   `maxMemoryBytes`.
+- Message-component event UX now exposes direct selection values on
+  `MessageComponentEventContext.values` (and mirrors submitted components) so dropdown flows are
+  consumable without digging into raw interaction payload fields.
+- Command error rendering now keeps actionable Discord API validation details (including
+  `Invalid Form Body` payloads) visible to users instead of falling back to a generic
+  `"The command could not be completed."` message.
+- HTTP request failures that surface as `RequestException` now recover embedded status codes
+  (including `422`) and preserve API payload detail instead of being downgraded to transport-only
+  failures.
+- Transport failures with `status code 0` now include concrete exception-class detail when no
+  nested message is available, improving network diagnosis.
 
 ### Refactored
 

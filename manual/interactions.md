@@ -111,6 +111,11 @@ client.on!ModalSubmitEvent((event) {
 });
 ```
 
+For dropdown/select interactions, `MessageComponentEventContext` now mirrors:
+- `customId`
+- `values` (selected option values)
+- `submittedComponents` (raw submitted component entries when present)
+
 ## Autocomplete
 
 The transport pieces are present in the library:

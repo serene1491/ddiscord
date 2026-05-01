@@ -38,6 +38,8 @@ showing up in logs.
 
 The default renderer keeps user-facing output concise (summary + short actionable hint) while full
 failure details remain in bot logs.
+It now also attempts to surface concise Discord API details (for example `Invalid Form Body`)
+instead of collapsing those cases into generic fallback text.
 
 The built-in behavior can report:
 
@@ -46,6 +48,10 @@ The built-in behavior can report:
 - missing or invalid arguments
 - handler failures
 - other library-side command execution failures
+
+When Discord rejects a payload with validation details (for example malformed components,
+unsupported direct-response UI combinations, or attachment-shape issues), the default renderer
+includes a short parsed detail and a targeted hint.
 
 Control it through `client.errorBehavior`:
 

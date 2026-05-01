@@ -9,6 +9,7 @@ module ddiscord.client_errors;
 import ddiscord.client_support.types : CommandErrorBehavior, CommandErrorContext, CommandErrorKind;
 import ddiscord.models.message : MessageCreate;
 import std.algorithm : canFind;
+import std.json : JSONType, JSONValue, parseJSON;
 import std.string : indexOf, strip;
 
 /// Classifies an internal command error string into a user-facing category.
@@ -29,7 +30,10 @@ CommandErrorKind classifyCommandFailure(string error)
     }
 
     if (error.canFind("could not be converted to the expected type") ||
-        error.canFind("received an invalid value"))
+        error.canFind("received an invalid value") ||
+        error.canFind("Invalid Form Body") ||
+        error.canFind("payload as semantically invalid") ||
+        error.canFind("status code 422"))
     {
         return CommandErrorKind.InvalidArgument;
     }
@@ -122,7 +126,7 @@ private string userFacingFailureSummary(CommandErrorContext context)
         case CommandErrorKind.HandlerFailure:
             return "The command failed while it was running.";
         case CommandErrorKind.Unknown:
-            return "The command could not be completed.";
+            return inferUnknownSummary(context.error);
     }
 }
 
@@ -142,12 +146,9 @@ private string userFacingFailureDetail(CommandErrorContext context)
     if (hintStart != -1)
         detail = detail[0 .. hintStart];
 
-    // Keep user-facing failures concise instead of dumping the full internal error.
-    detail = detail.strip;
+    detail = normalizeUserFacingDetail(detail);
     if (detail.length == 0)
         return "";
-    if (detail.length > 220)
-        detail = detail[0 .. 220] ~ "...";
     return detail;
 }
 
@@ -177,10 +178,158 @@ private string userFacingFailureHint(string prefix, CommandErrorContext context)
                 return "This command is on cooldown. Try again in a moment.";
             return "";
         case CommandErrorKind.HandlerFailure:
-            return "The failure was logged on the bot side for debugging.";
+            return contextualHandlerHint(context.error);
         case CommandErrorKind.Unknown:
+            auto specialized = specializedInteractionHint(context.error);
+            if (specialized.length != 0)
+                return specialized;
+            if (context.error.canFind("status code 0"))
+                return "The request failed before receiving an HTTP response. Check DNS/connectivity, proxy, and TLS logs.";
             return "Try again in a moment. If it keeps failing, inspect the bot logs.";
     }
+}
+
+private string inferUnknownSummary(string error)
+{
+    if (error.canFind("[ddiscord/http]"))
+        return "A Discord API request failed before the command could finish.";
+    if (error.canFind("[ddiscord/rest]"))
+        return "A Discord REST operation failed while handling this command.";
+    if (error.canFind("[ddiscord/context]"))
+        return "The command could not send its response.";
+    return "The command could not be completed.";
+}
+
+private string normalizeUserFacingDetail(string rawDetail)
+{
+    auto detail = rawDetail.strip;
+    if (detail.length == 0)
+        return "";
+
+    static string commandFailurePrefix = "Command `";
+    auto failedWithIndex = detail.indexOf("failed with:");
+    if (
+        detail.length >= commandFailurePrefix.length &&
+        detail[0 .. commandFailurePrefix.length] == commandFailurePrefix &&
+        failedWithIndex != -1
+    )
+    {
+        auto start = failedWithIndex + cast(ptrdiff_t) "failed with:".length;
+        detail = detail[start .. $].strip;
+    }
+
+    auto jsonSummary = summarizeDiscordJsonError(detail);
+    if (jsonSummary.length != 0)
+        detail = jsonSummary;
+
+    if (detail.length > 220)
+        detail = detail[0 .. 220] ~ "...";
+    return detail;
+}
+
+private string summarizeDiscordJsonError(string detail)
+{
+    auto jsonSlice = extractJsonSnippet(detail);
+    if (jsonSlice.length == 0)
+        return "";
+
+    try
+    {
+        auto parsed = parseJSON(jsonSlice);
+        auto message = parsed.object.get("message", JSONValue.init);
+        if (message.type != JSONType.string)
+            return "";
+
+        auto root = "Discord API: " ~ message.str;
+        auto code = parsed.object.get("code", JSONValue.init);
+        if (code.type == JSONType.integer || code.type == JSONType.uinteger)
+            root ~= " (code " ~ code.toString() ~ ")";
+
+        auto nested = firstNestedApiError(parsed.object.get("errors", JSONValue.init));
+        if (nested.length != 0)
+            root ~= " — " ~ nested;
+        return root;
+    }
+    catch (Exception)
+    {
+        return "";
+    }
+}
+
+private string extractJsonSnippet(string source)
+{
+    ptrdiff_t open = -1;
+    ptrdiff_t close = -1;
+
+    foreach (index, ch; source)
+    {
+        if (ch == '{' && open == -1)
+            open = cast(ptrdiff_t) index;
+        if (ch == '}')
+            close = cast(ptrdiff_t) index;
+    }
+
+    if (open == -1 || close == -1 || close <= open)
+        return "";
+    return source[open .. close + 1].strip;
+}
+
+private string firstNestedApiError(JSONValue errors)
+{
+    if (errors.type != JSONType.object)
+        return "";
+
+    auto rootErrors = errors.object.get("_errors", JSONValue.init);
+    if (rootErrors.type == JSONType.array && rootErrors.array.length != 0)
+    {
+        auto message = rootErrors.array[0].object.get("message", JSONValue.init);
+        if (message.type == JSONType.string)
+            return message.str;
+    }
+
+    foreach (key, value; errors.object)
+    {
+        if (key == "_errors")
+            continue;
+        auto nested = firstNestedApiError(value);
+        if (nested.length != 0)
+            return key ~ ": " ~ nested;
+    }
+
+    return "";
+}
+
+private string contextualHandlerHint(string error)
+{
+    auto specialized = specializedInteractionHint(error);
+    if (specialized.length != 0)
+        return specialized;
+    if (error.canFind("status code 0"))
+    {
+        return "The handler hit a network-level failure before Discord replied. Check connectivity/proxy/TLS and retry.";
+    }
+    return "The failure was logged on the bot side for debugging.";
+}
+
+private string specializedInteractionHint(string error)
+{
+    if (
+        error.canFind("UNION_TYPE_CHOICES") ||
+        (error.canFind("components") && error.canFind("text input"))
+    )
+    {
+        return "Dropdown/file-style inputs are not available in this direct response payload. Use a component selection flow first, then modal text inputs.";
+    }
+
+    if (
+        error.canFind("attachments") &&
+        (error.canFind("This field is required") || error.canFind("missing"))
+    )
+    {
+        return "Build attachments with `attach(...)`/`attachBytes(...)` or use `sendFile(...)`/`followupFile(...)` so Discord receives attachment ids correctly.";
+    }
+
+    return "";
 }
 
 
@@ -198,4 +347,46 @@ private string joinLines(string[] lines)
     }
 
     return joined;
+}
+
+unittest
+{
+    auto kind = classifyCommandFailure(
+        "[ddiscord/http] Discord rejected the request payload as semantically invalid. Detail: " ~
+        `{"message":"Invalid Form Body","code":50035}` ~
+        " Hint: adjust fields."
+    );
+    assert(kind == CommandErrorKind.InvalidArgument);
+}
+
+unittest
+{
+    auto behavior = CommandErrorBehavior.verbose();
+    CommandErrorContext context;
+    context.kind = CommandErrorKind.Unknown;
+    context.route = "interaction";
+    context.commandName = "ship";
+    context.error = "[ddiscord/http] The HTTP client failed while talking to Discord. " ~
+        "Detail: Command `ship` failed with: " ~
+        `{"message":"Invalid Form Body","code":50035,"errors":{"data":{"_errors":[{"message":"Component validation failed"}]}}}` ~
+        " Hint: inspect payload.";
+
+    auto payload = buildFailurePayload(behavior, "!", context);
+    assert(payload.content.canFind("Discord API request failed"));
+    assert(payload.content.canFind("Discord API: Invalid Form Body"));
+    assert(payload.content.canFind("Component validation failed"));
+}
+
+unittest
+{
+    auto behavior = CommandErrorBehavior.verbose();
+    CommandErrorContext context;
+    context.kind = CommandErrorKind.HandlerFailure;
+    context.route = "interaction";
+    context.commandName = "report";
+    context.error = "[ddiscord/http] status code 422 " ~
+        `{"message":"Invalid Form Body","errors":{"data":{"components":{"_errors":[{"code":"UNION_TYPE_CHOICES","message":"Only one of text input or select is allowed."}]}}}}`;
+
+    auto payload = buildFailurePayload(behavior, "!", context);
+    assert(payload.content.canFind("Dropdown/file-style inputs are not available"));
 }

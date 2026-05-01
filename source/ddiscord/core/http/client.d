@@ -363,13 +363,7 @@ final class HttpClient
             catch (RequestException e)
             {
                 resetRequestSession(slot);
-                return Result!(HttpResponse, HttpError).err(httpError(
-                    HttpErrorKind.Transport,
-                    "The HTTP client failed while talking to Discord.",
-                    request,
-                    "Inspect the nested error detail for transport-specific information.",
-                    e.msg
-                ));
+                return Result!(HttpResponse, HttpError).err(requestExceptionError(request, e));
             }
             catch (Exception e)
             {
@@ -406,84 +400,230 @@ final class HttpClient
     private HttpError statusError(HttpRequest request, HttpResponse response)
     {
         auto body = response.text;
+        return statusErrorForCode(request, response.statusCode, body, response.headers);
+    }
+}
 
-        if (response.statusCode == 401)
-        {
-            return httpError(
-                HttpErrorKind.Authentication,
-                "Discord rejected the request because the bot token was invalid or missing required authentication.",
-                request,
-                "Ensure the token is correct and includes the `Bot ` prefix only once.",
-                body,
-                response.statusCode,
-                response.headers
-            );
-        }
-
-        if (response.statusCode == 403)
-        {
-            return httpError(
-                HttpErrorKind.Forbidden,
-                "Discord refused the request because the bot lacks permission for this action.",
-                request,
-                "Verify the bot's guild permissions, channel overwrites, and application scopes.",
-                body,
-                response.statusCode,
-                response.headers
-            );
-        }
-
-        if (response.statusCode == 404)
-        {
-            return httpError(
-                HttpErrorKind.NotFound,
-                "Discord could not find the requested resource.",
-                request,
-                "Double-check IDs such as channel, message, interaction, or application identifiers.",
-                body,
-                response.statusCode,
-                response.headers
-            );
-        }
-
-        if (response.statusCode == 429)
-        {
-            auto retryAfter = parseRetryAfter(response.headers, body);
-            return httpError(
-                HttpErrorKind.RateLimited,
-                "Discord rate limited the request.",
-                request,
-                "Respect `Retry-After` and `X-RateLimit-*` headers before retrying.",
-                body,
-                response.statusCode,
-                response.headers,
-                retryAfter
-            );
-        }
-
-        if (response.statusCode >= 500)
-        {
-            return httpError(
-                HttpErrorKind.Server,
-                "Discord returned a server-side error.",
-                request,
-                "Retry with backoff. If the problem persists, Discord may be degraded.",
-                body,
-                response.statusCode,
-                response.headers
-            );
-        }
-
+private HttpError statusErrorForCode(
+    HttpRequest request,
+    ushort statusCode,
+    string body,
+    string[string] headers = null
+)
+{
+    if (statusCode == 401)
+    {
         return httpError(
-            HttpErrorKind.UnexpectedStatus,
-            "Discord returned an unexpected HTTP status code.",
+            HttpErrorKind.Authentication,
+            "Discord rejected the request because the bot token was invalid or missing required authentication.",
             request,
-            "Inspect the response body and headers for Discord's error details.",
+            "Ensure the token is correct and includes the `Bot ` prefix only once.",
             body,
-            response.statusCode,
-            response.headers
+            statusCode,
+            headers
         );
     }
+
+    if (statusCode == 403)
+    {
+        return httpError(
+            HttpErrorKind.Forbidden,
+            "Discord refused the request because the bot lacks permission for this action.",
+            request,
+            "Verify the bot's guild permissions, channel overwrites, and application scopes.",
+            body,
+            statusCode,
+            headers
+        );
+    }
+
+    if (statusCode == 404)
+    {
+        return httpError(
+            HttpErrorKind.NotFound,
+            "Discord could not find the requested resource.",
+            request,
+            "Double-check IDs such as channel, message, interaction, or application identifiers.",
+            body,
+            statusCode,
+            headers
+        );
+    }
+
+    if (statusCode == 422)
+    {
+        return httpError(
+            HttpErrorKind.UnexpectedStatus,
+            "Discord rejected the request payload as semantically invalid.",
+            request,
+            "Inspect the API error detail and adjust payload fields such as components, options, or attachments.",
+            body,
+            statusCode,
+            headers
+        );
+    }
+
+    if (statusCode == 429)
+    {
+        auto retryAfter = parseRetryAfter(headers, body);
+        return httpError(
+            HttpErrorKind.RateLimited,
+            "Discord rate limited the request.",
+            request,
+            "Respect `Retry-After` and `X-RateLimit-*` headers before retrying.",
+            body,
+            statusCode,
+            headers,
+            retryAfter
+        );
+    }
+
+    if (statusCode >= 500)
+    {
+        return httpError(
+            HttpErrorKind.Server,
+            "Discord returned a server-side error.",
+            request,
+            "Retry with backoff. If the problem persists, Discord may be degraded.",
+            body,
+            statusCode,
+            headers
+        );
+    }
+
+    return httpError(
+        HttpErrorKind.UnexpectedStatus,
+        "Discord returned an unexpected HTTP status code.",
+        request,
+        "Inspect the response body and headers for Discord's error details.",
+        body,
+        statusCode,
+        headers
+    );
+}
+
+private HttpError requestExceptionError(HttpRequest request, RequestException error)
+{
+    auto detail = transportExceptionDetail(error);
+    auto statusCode = parseStatusCodeFromExceptionMessage(detail);
+
+    if (!statusCode.isNull)
+    {
+        auto payload = extractJsonPayloadFromTransportDetail(detail);
+        auto body = payload.isNull ? detail : payload.get;
+        return statusErrorForCode(request, statusCode.get, body);
+    }
+
+    return httpError(
+        HttpErrorKind.Transport,
+        "The HTTP client failed while talking to Discord.",
+        request,
+        "Inspect the nested error detail for transport-specific information.",
+        detail
+    );
+}
+
+private string transportExceptionDetail(Exception error)
+{
+    auto detail = error.msg.strip;
+    if (detail.length != 0)
+        return detail;
+    return typeid(error).name ~ " without additional message detail.";
+}
+
+private Nullable!ushort parseStatusCodeFromExceptionMessage(string detail)
+{
+    auto lowered = asciiLowercase(detail);
+    if (lowered.length < 3)
+        return Nullable!ushort.init;
+
+    static immutable markers = [
+        "status code ",
+        "status ",
+        "http ",
+        "http/",
+    ];
+
+    foreach (index; 0 .. lowered.length)
+    {
+        foreach (marker; markers)
+        {
+            if (!startsWithAt(lowered, marker, index))
+                continue;
+
+            auto parsed = parseStatusCodeAt(lowered, index + marker.length);
+            if (!parsed.isNull)
+                return parsed;
+        }
+    }
+
+    return Nullable!ushort.init;
+}
+
+private Nullable!string extractJsonPayloadFromTransportDetail(string detail)
+{
+    ptrdiff_t open = -1;
+    ptrdiff_t close = -1;
+
+    foreach (index, ch; detail)
+    {
+        if (ch == '{' && open == -1)
+            open = cast(ptrdiff_t) index;
+        if (ch == '}')
+            close = cast(ptrdiff_t) index;
+    }
+
+    if (open == -1 || close == -1 || close <= open)
+        return Nullable!string.init;
+
+    auto candidate = detail[open .. close + 1].strip;
+    if (candidate.length == 0)
+        return Nullable!string.init;
+    return Nullable!string.of(candidate);
+}
+
+private Nullable!ushort parseStatusCodeAt(string text, size_t start)
+{
+    auto index = start;
+    while (index < text.length && text[index] == ' ')
+        index++;
+
+    if (index + 3 > text.length)
+        return Nullable!ushort.init;
+    if (!isAsciiDigit(text[index]) || !isAsciiDigit(text[index + 1]) || !isAsciiDigit(text[index + 2]))
+        return Nullable!ushort.init;
+    if (index + 3 < text.length && isAsciiDigit(text[index + 3]))
+        return Nullable!ushort.init;
+
+    auto value = (text[index] - '0') * 100 + (text[index + 1] - '0') * 10 + (text[index + 2] - '0');
+    if (value < 100 || value > 599)
+        return Nullable!ushort.init;
+    return Nullable!ushort.of(cast(ushort) value);
+}
+
+private bool startsWithAt(string text, string prefix, size_t index)
+{
+    if (index + prefix.length > text.length)
+        return false;
+    return text[index .. index + prefix.length] == prefix;
+}
+
+private string asciiLowercase(string value)
+{
+    auto builder = appender!string;
+    foreach (ch; value)
+    {
+        if (ch >= 'A' && ch <= 'Z')
+            builder.put(cast(char) (ch + 32));
+        else
+            builder.put(ch);
+    }
+    return builder.data;
+}
+
+private bool isAsciiDigit(char ch)
+{
+    return ch >= '0' && ch <= '9';
 }
 
 private HttpError httpError(
@@ -806,6 +946,41 @@ unittest
     auto result = client.send(request);
     assert(result.isOk);
     assert(attempts == 3);
+}
+
+unittest
+{
+    auto parsed = parseStatusCodeFromExceptionMessage("request failed with status code 422");
+    assert(!parsed.isNull);
+    assert(parsed.get == 422);
+}
+
+unittest
+{
+    HttpRequest request;
+    request.method = HttpMethod.Post;
+    request.url = "/interactions/1/token/callback";
+
+    auto exception = new RequestException(
+        `request failed with status code 422: {"message":"Invalid Form Body","code":50035}`
+    );
+    auto error = requestExceptionError(request, exception);
+    assert(error.kind == HttpErrorKind.UnexpectedStatus);
+    assert(error.statusCode == 422);
+    assert(error.responseBody.canFind(`"Invalid Form Body"`));
+}
+
+unittest
+{
+    HttpRequest request;
+    request.method = HttpMethod.Get;
+    request.url = "/users/@me";
+
+    auto exception = new RequestException("");
+    auto error = requestExceptionError(request, exception);
+    assert(error.kind == HttpErrorKind.Transport);
+    assert(error.statusCode == 0);
+    assert(error.responseBody.canFind("without additional message detail"));
 }
 
 unittest
