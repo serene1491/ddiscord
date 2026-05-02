@@ -39,6 +39,16 @@ All notable changes to `ddiscord` should be documented in this file.
 - HTTP status handling now treats bodyless `4xx` responses as transient transport failures,
   allowing REST retry logic to recover from stale keep-alive/proxy edge cases that often appear
   on the first request after idle periods.
+- Interaction callback routes for autocomplete and modal responses now URL-encode interaction
+  tokens consistently, preventing malformed callback paths when tokens contain reserved characters.
+- REST and HTTP retry loops now only auto-retry transient server/transport failures for
+  idempotent methods (`GET`, `PUT`, `DELETE`), reducing duplicate side effects for write routes.
+- HTTP error diagnostics now redact sensitive interaction/webhook token path segments from logged
+  request URLs while preserving route context.
+- Gateway reconnect and REST/HTTP transient retry backoff now include bounded jitter to reduce
+  synchronized reconnect/retry bursts across shards or process pools.
+- REST global pacing now proactively spaces outbound requests using the configured Discord
+  global request budget instead of relying only on reactive `429` handling.
 
 ### Refactored
 

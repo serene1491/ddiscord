@@ -19,6 +19,9 @@ import std.string : split, strip;
 import core.thread : Thread;
 import core.time : dur;
 
+enum MicrosecondsPerSecond = 1_000_000;
+enum MinimumAcquireSpacingMicroseconds = 1;
+
 /// Parsed outcome of rate-limit handling.
 struct RateLimitOutcome
 {
@@ -43,10 +46,12 @@ final class RestRateLimiter
     private RateLimitBucketState[string] _bucketStates;
     private string[string] _routeToBucket;
     private SysTime _globalResetAt;
+    private SysTime _nextGlobalAcquireAt;
 
     this()
     {
         _stateMutex = new Mutex;
+        _nextGlobalAcquireAt = SysTime.min;
     }
 
     /// Waits until a route is safe to call again.
@@ -60,6 +65,14 @@ final class RestRateLimiter
             if (_globalResetAt > now)
                 waitTime = _globalResetAt - now;
 
+            auto minSpacing = globalAcquireSpacing();
+            if (_nextGlobalAcquireAt > now)
+            {
+                auto globalSpacingWait = _nextGlobalAcquireAt - now;
+                if (globalSpacingWait > waitTime)
+                    waitTime = globalSpacingWait;
+            }
+
             auto bucketId = routeKeyToBucket(routeKey);
             if (!bucketId.isNull)
             {
@@ -71,6 +84,8 @@ final class RestRateLimiter
                         waitTime = bucketWait;
                 }
             }
+
+            _nextGlobalAcquireAt = now + waitTime + minSpacing;
         }
 
         if (waitTime > Duration.zero)
@@ -166,6 +181,18 @@ final class RestRateLimiter
         if (amount <= Duration.zero)
             return;
         Thread.sleep(amount);
+    }
+
+    private Duration globalAcquireSpacing() const
+    {
+        auto globalLimit = globalRequestsPerSecond;
+        if (globalLimit == 0)
+            return Duration.zero;
+
+        auto spacingMicros = MicrosecondsPerSecond / globalLimit;
+        if (spacingMicros == 0)
+            spacingMicros = MinimumAcquireSpacingMicroseconds;
+        return dur!"usecs"(spacingMicros);
     }
 }
 
@@ -359,6 +386,12 @@ private char normalizeAscii(char value)
     if (value >= 'A' && value <= 'Z')
         return cast(char) (value + 32);
     return value;
+}
+
+unittest
+{
+    auto limiter = new RestRateLimiter;
+    assert(limiter.globalAcquireSpacing == dur!"msecs"(20));
 }
 
 unittest

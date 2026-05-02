@@ -42,6 +42,10 @@ import std.json : JSONType, JSONValue, parseJSON;
 import std.string : strip;
 import std.uri : encodeComponent;
 
+enum RetryJitterPercent = 20;
+enum RetryJitterDenominator = 100;
+enum JitterTickBase = 1;
+
 private final class RealDiscordRest
 {
     private RestClientConfig _config;
@@ -1176,10 +1180,14 @@ private final class RealDiscordRest
         data["choices"] = choiceValues;
         body["data"] = data;
 
+        auto encodedInteractionToken = encodeRouteToken(interactionToken, "interaction token");
+        if (encodedInteractionToken.isErr)
+            return Result!(bool, string).err(encodedInteractionToken.error);
+
         auto request = jsonRequest(
             HttpMethod.Post,
             "POST:/interactions/{interaction_id}/{interaction_token}/callback",
-            "/interactions/" ~ interactionId.toString ~ "/" ~ interactionToken ~ "/callback",
+            "/interactions/" ~ interactionId.toString ~ "/" ~ encodedInteractionToken.value ~ "/callback",
             body,
             false
         );
@@ -1199,10 +1207,14 @@ private final class RealDiscordRest
         body["type"] = cast(int) InteractionCallbackType.Modal;
         body["data"] = modal.toJSON();
 
+        auto encodedInteractionToken = encodeRouteToken(interactionToken, "interaction token");
+        if (encodedInteractionToken.isErr)
+            return Result!(bool, string).err(encodedInteractionToken.error);
+
         auto request = jsonRequest(
             HttpMethod.Post,
             "POST:/interactions/{interaction_id}/{interaction_token}/callback",
-            "/interactions/" ~ interactionId.toString ~ "/" ~ interactionToken ~ "/callback",
+            "/interactions/" ~ interactionId.toString ~ "/" ~ encodedInteractionToken.value ~ "/callback",
             body,
             false
         );
@@ -1517,13 +1529,14 @@ private final class RealDiscordRest
 
             if (
                 _config.autoRetryServerErrors &&
+                shouldRetryMethod(request.method) &&
                 shouldRetryServerError(response.error.kind) &&
                 serverErrorRetries < _config.maxServerErrorRetries
             )
             {
                 serverErrorRetries++;
                 if (retryDelay > Duration.zero)
-                    Thread.sleep(retryDelay);
+                    Thread.sleep(jitteredRetryDelay(retryDelay));
                 retryDelay = nextRetryDelay(retryDelay, _config.maxRetryDelay);
                 continue;
             }
@@ -1749,6 +1762,31 @@ private bool shouldRetryServerError(HttpErrorKind kind)
     return kind == HttpErrorKind.Server ||
         kind == HttpErrorKind.Timeout ||
         kind == HttpErrorKind.Transport;
+}
+
+private bool shouldRetryMethod(HttpMethod method)
+{
+    return method == HttpMethod.Get ||
+        method == HttpMethod.Put ||
+        method == HttpMethod.Delete;
+}
+
+private Duration jitteredRetryDelay(Duration delay)
+{
+    if (delay <= Duration.zero)
+        return delay;
+
+    auto baseMs = delay.total!"msecs";
+    if (baseMs <= 0)
+        return delay;
+
+    auto maxJitterMs = (baseMs * RetryJitterPercent) / RetryJitterDenominator;
+    if (maxJitterMs <= 0)
+        return delay;
+
+    auto tick = Clock.currTime.stdTime;
+    auto jitterMs = (tick % (maxJitterMs + JitterTickBase));
+    return delay + dur!"msecs"(jitterMs);
 }
 
 private Duration nextRetryDelay(Duration delay, Duration maxDelay)
@@ -3036,6 +3074,34 @@ unittest
     HttpTransport transport = (request) {
         attempts++;
 
+        HttpError error;
+        error.kind = HttpErrorKind.Transport;
+        error.message = "temporary outage";
+        error.method = "POST";
+        error.url = request.url;
+        error.statusCode = 503;
+        return Result!(HttpResponse, HttpError).err(error);
+    };
+
+    RestClientConfig config;
+    config.token = "token";
+    config.transport = Nullable!HttpTransport.of(transport);
+    config.retryBaseDelay = Duration.zero;
+    config.maxRetryDelay = Duration.zero;
+    config.maxServerErrorRetries = 3;
+
+    auto rest = new RestClient(config);
+    auto result = rest.messages.create(Snowflake(1), MessageCreate("hello")).awaitResult();
+    assert(result.isErr);
+    assert(attempts == 1);
+}
+
+unittest
+{
+    uint attempts;
+    HttpTransport transport = (request) {
+        attempts++;
+
         if (attempts < 3)
         {
             HttpError error;
@@ -3206,6 +3272,50 @@ unittest
     assert(body.canFind(`"custom_id":"bug_modal"`));
     assert(body.canFind(`"title":"Bug Report"`));
     assert(body.canFind(`"custom_id":"summary"`));
+}
+
+unittest
+{
+    HttpRequest[] captured;
+    HttpTransport transport = (request) {
+        captured ~= request;
+        HttpResponse response;
+        response.statusCode = 204;
+        return Result!(HttpResponse, HttpError).ok(response);
+    };
+
+    RestClientConfig config;
+    config.token = "token";
+    config.transport = Nullable!HttpTransport.of(transport);
+
+    auto rest = new RestClient(config);
+    auto choices = [AutocompleteChoice("one", "1")];
+    auto result = rest.interactions.autocomplete(Snowflake(10), "abc/def?x=1", choices).awaitResult();
+    assert(result.isOk);
+    assert(captured.length == 1);
+    assert(captured[0].url.canFind("/interactions/10/abc%2Fdef%3Fx%3D1/callback"));
+}
+
+unittest
+{
+    HttpRequest captured;
+    HttpTransport transport = (request) {
+        captured = request;
+        HttpResponse response;
+        response.statusCode = 204;
+        return Result!(HttpResponse, HttpError).ok(response);
+    };
+
+    RestClientConfig config;
+    config.token = "token";
+    config.transport = Nullable!HttpTransport.of(transport);
+
+    auto rest = new RestClient(config);
+    auto modal = Modal("bug_modal", "Bug Report")
+        .addTextInput(TextInput("summary", "Summary"));
+    auto result = rest.interactions.modal(Snowflake(9), "abc/def?x=1", modal).awaitResult();
+    assert(result.isOk);
+    assert(captured.url.canFind("/interactions/9/abc%2Fdef%3Fx%3D1/callback"));
 }
 
 unittest

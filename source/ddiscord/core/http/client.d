@@ -19,9 +19,9 @@ import requests.streams : ConnectError, TimeoutException;
 import std.algorithm : canFind;
 import std.array : appender;
 import std.conv : to;
-import std.datetime : Duration, dur;
+import std.datetime : Clock, Duration, dur;
 import std.json : JSONType, JSONValue, parseJSON;
-import std.string : strip;
+import std.string : indexOf, strip;
 
 version (Posix)
 {
@@ -143,6 +143,10 @@ struct HttpClientConfig
     Nullable!HttpTransport transport;
 }
 
+enum RetryJitterPercent = 20;
+enum RetryJitterDenominator = 100;
+enum JitterTickBase = 1;
+
 /// Blocking HTTP client with Discord-specific defaults.
 final class HttpClient
 {
@@ -214,12 +218,13 @@ final class HttpClient
 
             if (
                 _config.autoRetryServerErrors &&
+                isRetrySafeMethod(request.method) &&
                 isRetryableFailure(error.kind) &&
                 serverErrorRetries < _config.maxServerErrorRetries
             )
             {
                 serverErrorRetries++;
-                sleepFor(retryDelay);
+                sleepFor(jitteredRetryDelay(retryDelay));
                 retryDelay = nextRetryDelay(retryDelay, _config.maxRetryDelay);
                 continue;
             }
@@ -651,15 +656,16 @@ private HttpError httpError(
 )
 {
     HttpError error;
+    auto safeUrl = sanitizeUrlForLogs(request.url);
     error.kind = kind;
     error.method = httpMethodName(request.method);
-    error.url = request.url;
+    error.url = safeUrl;
     error.statusCode = statusCode;
     error.responseBody = detail;
     error.headers = headers.dup;
     error.retryAfter = retryAfter;
     error.hint = hint;
-    error.message = formatError("http", summary, detail.length == 0 ? error.method ~ " " ~ error.url : detail, hint);
+    error.message = formatError("http", summary, detail.length == 0 ? error.method ~ " " ~ safeUrl : detail, hint);
     return error;
 }
 
@@ -732,9 +738,77 @@ private bool isRetryableFailure(HttpErrorKind kind)
         kind == HttpErrorKind.Transport;
 }
 
+private bool isRetrySafeMethod(HttpMethod method)
+{
+    return method == HttpMethod.Get ||
+        method == HttpMethod.Put ||
+        method == HttpMethod.Delete;
+}
+
+private Duration jitteredRetryDelay(Duration delay)
+{
+    if (delay <= Duration.zero)
+        return delay;
+
+    auto baseMs = delay.total!"msecs";
+    if (baseMs <= 0)
+        return delay;
+
+    auto maxJitterMs = (baseMs * RetryJitterPercent) / RetryJitterDenominator;
+    if (maxJitterMs <= 0)
+        return delay;
+
+    auto tick = Clock.currTime.stdTime;
+    auto jitterMs = (tick % (maxJitterMs + JitterTickBase));
+    return delay + dur!"msecs"(jitterMs);
+}
+
 private bool isBodylessClientError(ushort statusCode, string body)
 {
     return statusCode >= 400 && statusCode < 500 && body.strip.length == 0;
+}
+
+private string sanitizeUrlForLogs(string url)
+{
+    auto safe = url;
+    safe = redactPathSegment(safe, "/interactions/", 2);
+    safe = redactPathSegment(safe, "/webhooks/", 2);
+    return safe;
+}
+
+private string redactPathSegment(string url, string marker, size_t segmentOffset)
+{
+    auto markerIndex = url.indexOf(marker);
+    if (markerIndex < 0)
+        return url;
+
+    auto cursor = cast(size_t) markerIndex + marker.length;
+    foreach (_; 0 .. segmentOffset)
+    {
+        if (cursor >= url.length)
+            return url;
+
+        auto segmentEnd = nextPathDelimiter(url, cursor);
+        if (segmentEnd <= cursor)
+            return url;
+
+        if (_ + 1 == segmentOffset)
+            return url[0 .. cursor] ~ "[redacted]" ~ url[segmentEnd .. $];
+
+        if (segmentEnd >= url.length || url[segmentEnd] != '/')
+            return url;
+        cursor = segmentEnd + 1;
+    }
+
+    return url;
+}
+
+private size_t nextPathDelimiter(string value, size_t start)
+{
+    auto index = start;
+    while (index < value.length && value[index] != '/' && value[index] != '?')
+        index++;
+    return index;
 }
 
 private Duration nextRetryDelay(Duration delay, Duration maxDelay)
@@ -991,6 +1065,36 @@ unittest
 unittest
 {
     HttpRequest request;
+    request.method = HttpMethod.Post;
+    request.url = "/interactions/1/sensitive-token/callback";
+
+    auto error = statusErrorForCode(
+        request,
+        400,
+        `{"message":"Bad Request","code":50035}`
+    );
+    assert(error.url.canFind("/interactions/1/[redacted]/callback"));
+    assert(!error.url.canFind("sensitive-token"));
+}
+
+unittest
+{
+    HttpRequest request;
+    request.method = HttpMethod.Post;
+    request.url = "/webhooks/42/sensitive-token/messages/@original";
+
+    auto error = statusErrorForCode(
+        request,
+        401,
+        `{"message":"401: Unauthorized"}`
+    );
+    assert(error.url.canFind("/webhooks/42/[redacted]/messages/@original"));
+    assert(!error.url.canFind("sensitive-token"));
+}
+
+unittest
+{
+    HttpRequest request;
     request.method = HttpMethod.Get;
     request.url = "/users/@me";
 
@@ -1011,6 +1115,36 @@ unittest
     assert(error.kind == HttpErrorKind.Transport);
     assert(error.statusCode == 400);
     assert(error.responseBody.canFind("status code 400"));
+}
+
+unittest
+{
+    uint attempts;
+    HttpTransport transport = (HttpRequest request) {
+        attempts++;
+        HttpError error;
+        error.kind = HttpErrorKind.Transport;
+        error.message = "transport error";
+        error.method = "POST";
+        error.url = request.url;
+        return Result!(HttpResponse, HttpError).err(error);
+    };
+
+    HttpClientConfig config;
+    config.token = "token";
+    config.maxServerErrorRetries = 3;
+    config.retryBaseDelay = dur!"msecs"(1);
+    config.maxRetryDelay = dur!"msecs"(1);
+    config.transport = Nullable!HttpTransport.of(transport);
+
+    auto client = new HttpClient(config);
+    HttpRequest request;
+    request.method = HttpMethod.Post;
+    request.url = "/channels/1/messages";
+
+    auto result = client.send(request);
+    assert(result.isErr);
+    assert(attempts == 1);
 }
 
 unittest

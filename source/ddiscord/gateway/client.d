@@ -69,6 +69,10 @@ struct GatewayClientConfig
     size_t unhandledDispatchLogEvery = 100;
 }
 
+enum ReconnectJitterPercent = 20;
+enum ReconnectJitterDenominator = 100;
+enum ReconnectJitterBase = 1;
+
 /// READY payload values surfaced to the high-level client.
 struct GatewayReadyInfo
 {
@@ -602,7 +606,7 @@ final class GatewayClient
 
             if (!_stopRequested)
             {
-                Thread.sleep(reconnectDelay);
+                Thread.sleep(reconnectDelayWithJitter(reconnectDelay));
                 reconnectDelay = minDuration(reconnectDelay + reconnectDelay, config.maxReconnectDelay);
             }
         }
@@ -1999,6 +2003,23 @@ private Duration minDuration(Duration left, Duration right)
     return left <= right ? left : right;
 }
 
+private Duration reconnectDelayWithJitter(Duration delay)
+{
+    if (delay <= Duration.zero)
+        return delay;
+
+    auto baseMs = delay.total!"msecs";
+    if (baseMs <= 0)
+        return delay;
+
+    auto maxJitterMs = (baseMs * ReconnectJitterPercent) / ReconnectJitterDenominator;
+    if (maxJitterMs <= 0)
+        return delay;
+
+    auto jitterMs = uniform(0, cast(int) (maxJitterMs + ReconnectJitterBase));
+    return delay + dur!"msecs"(jitterMs);
+}
+
 unittest
 {
     final class CapturingGatewayLogger : ILogger
@@ -2577,6 +2598,13 @@ unittest
     auto delay = firstHeartbeatDelay(dur!"seconds"(10));
     assert(delay >= Duration.zero);
     assert(delay <= dur!"seconds"(10));
+}
+
+unittest
+{
+    auto delay = reconnectDelayWithJitter(dur!"seconds"(10));
+    assert(delay >= dur!"seconds"(10));
+    assert(delay <= dur!"seconds"(12));
 }
 
 unittest
