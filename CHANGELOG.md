@@ -37,6 +37,8 @@ All notable changes to `ddiscord` should be documented in this file.
   `TEST_BOT_IDLE_PROBE_AFTER_SECONDS` through to `examples/test-bot`.
 - `examples/test-bot` now supports a timed post-idle `users.me` probe to surface
   stale-connection/first-request-after-idle regressions during automated smoke runs.
+- Script env loading now resolves `.env`/`.env.local` from both `scripts/` and `examples/`,
+  reducing false token-missing errors when runtime credentials are stored in shared example env files.
 
 ### Refactored
 
