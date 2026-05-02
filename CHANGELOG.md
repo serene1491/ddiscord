@@ -31,6 +31,9 @@ All notable changes to `ddiscord` should be documented in this file.
 - `scripts/test.sh` now skips the live `test-bot` execution when no shell token
   (`DISCORD_TOKEN`/`TOKEN`) is present, while still building all examples; set
   `TEST_BOT_FORCE_RUN=1` to force the live run step.
+- Interaction callback recovery now detects Discord `40060` ("Interaction has already been
+  acknowledged.") and automatically falls back to follow-up responses instead of failing
+  command execution on post-idle callback races.
 
 ### Refactored
 

@@ -121,11 +121,6 @@ Use this when you need:
 - plugins or Lua scripting
 - multiple command modules and event handlers
 
-Notes:
-
-- `commands/` is the recommended folder name because it is familiar for most bot projects.
-- If you already use `botcmd/`, that is still fine. Keep it if your team already adopted it.
-
 ## File ownership model
 
 A practical ownership split for teams:

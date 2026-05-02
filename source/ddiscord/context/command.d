@@ -22,6 +22,7 @@ import ddiscord.tasks : AsyncTask;
 import ddiscord.util.errors : formatError;
 import ddiscord.util.optional : Nullable;
 import ddiscord.util.snowflake : Snowflake;
+import std.algorithm.searching : canFind;
 
 /// Bound message operations helper for command handlers.
 struct CommandMessageRef
@@ -231,7 +232,20 @@ struct CommandContext
 
             auto sent = rest.interactions.send(interaction.get.id, interaction.get.token, payload).awaitResult();
             if (sent.isErr)
+            {
+                if (isInteractionAlreadyAcknowledgedError(sent.error))
+                {
+                    interactionAcknowledged = true;
+                    auto created = rest.interactions.followup(interaction.get.token, payload).awaitResult();
+                    if (created.isErr)
+                        return AsyncTask!(Nullable!Message).failure(created.error);
+
+                    interactionResponded = true;
+                    return AsyncTask!(Nullable!Message).success(Nullable!Message.of(created.value));
+                }
+
                 return AsyncTask!(Nullable!Message).failure(sent.error);
+            }
 
             interactionResponded = true;
             return AsyncTask!(Nullable!Message).success(Nullable!Message.init);
@@ -788,6 +802,13 @@ struct CommandContext
     private bool hasInteractionToken() const @property
     {
         return !interaction.isNull && interaction.get.token.length != 0;
+    }
+
+    private bool isInteractionAlreadyAcknowledgedError(string error) const
+    {
+        return error.canFind(`"code":40060`) ||
+            error.canFind(`"code": 40060`) ||
+            error.canFind("Interaction has already been acknowledged.");
     }
 
     private Nullable!string validateEphemeralUsage(bool ephemeral, string operationName) const
@@ -1418,6 +1439,64 @@ unittest
     assert(edited.value.id == Snowflake(42));
     assert(captured.length >= 3);
     assert(captured[$ - 1].url.canFind("/messages/@original"));
+}
+
+unittest
+{
+    import ddiscord.core.http.client : HttpError, HttpErrorKind, HttpRequest, HttpResponse, HttpTransport;
+    import ddiscord.rest : RestClientConfig;
+    import ddiscord.util.result : Result;
+    import ddiscord.util.snowflake : Snowflake;
+    import std.algorithm : canFind;
+
+    HttpRequest[] captured;
+    bool callbackFailedOnce;
+    HttpTransport transport = (request) {
+        captured ~= request;
+
+        if (request.url.canFind("/callback") && !callbackFailedOnce)
+        {
+            callbackFailedOnce = true;
+            HttpError error;
+            error.kind = HttpErrorKind.UnexpectedStatus;
+            error.method = "POST";
+            error.url = request.url;
+            error.statusCode = 400;
+            error.responseBody = `{"message":"Interaction has already been acknowledged.","code":40060}`;
+            error.message = "[ddiscord/http] Discord returned an unexpected HTTP status code. Detail: " ~
+                error.responseBody ~ " Hint: Inspect the response body and headers for Discord's error details.";
+            return Result!(HttpResponse, HttpError).err(error);
+        }
+
+        HttpResponse response;
+        response.statusCode = 200;
+        if (request.url.canFind("/webhooks/"))
+            response.body = cast(ubyte[]) `{"id":"51","channel_id":"99","content":"fallback-followup","author":{"id":"2","username":"bot","bot":true}}`.dup;
+        else
+            response.body = cast(ubyte[]) `{}`.dup;
+        return Result!(HttpResponse, HttpError).ok(response);
+    };
+
+    RestClientConfig config;
+    config.token = "token";
+    config.applicationId = Nullable!Snowflake.of(Snowflake(42));
+    config.transport = Nullable!HttpTransport.of(transport);
+
+    CommandContext ctx;
+    ctx.rest = new RestClient(config);
+    ctx.source = CommandSource.Slash;
+    Interaction interaction;
+    interaction.id = Snowflake(33);
+    interaction.token = "abc";
+    ctx.interaction = Nullable!Interaction.of(interaction);
+
+    auto sent = ctx.sendMessage("first").awaitResult();
+    assert(sent.isOk);
+    assert(!sent.value.isNull);
+    assert(sent.value.get.id == Snowflake(51));
+    assert(captured.length == 2);
+    assert(captured[0].url.canFind("/interactions/33/abc/callback"));
+    assert(captured[1].url.canFind("/webhooks/42/abc"));
 }
 
 unittest
