@@ -14,6 +14,7 @@ import aurora_websocket.stream : IWebSocketStream, WebSocketStreamException;
 import core.sync.mutex : Mutex;
 import core.thread : Thread;
 import core.time : Duration, MonoTime, dur;
+import ddiscord.core.backoff : cappedExponentialBackoff;
 import ddiscord.logging : ILogger, LogLevel;
 import ddiscord.models.channel : Channel;
 import ddiscord.models.guild : Guild, UnavailableGuild;
@@ -607,7 +608,7 @@ final class GatewayClient
             if (!_stopRequested)
             {
                 Thread.sleep(reconnectDelayWithJitter(reconnectDelay));
-                reconnectDelay = minDuration(reconnectDelay + reconnectDelay, config.maxReconnectDelay);
+                reconnectDelay = cappedExponentialBackoff(reconnectDelay, config.maxReconnectDelay);
             }
         }
 
@@ -1996,11 +1997,6 @@ private string runtimeOs()
         return "linux";
     else
         return "unknown";
-}
-
-private Duration minDuration(Duration left, Duration right)
-{
-    return left <= right ? left : right;
 }
 
 private Duration reconnectDelayWithJitter(Duration delay)

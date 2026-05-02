@@ -8,6 +8,7 @@ module ddiscord.rest;
 
 import core.thread : Thread;
 import core.time : MonoTime;
+import ddiscord.core.backoff : addClockJitter, cappedExponentialBackoff;
 import ddiscord.core.http.client : HttpClient, HttpClientConfig, HttpError, HttpErrorKind,
     HttpMethod, HttpRequest, HttpResponse, HttpTransport;
 import ddiscord.core.http.multipart : MultipartPart, encodeMultipartFormData;
@@ -41,10 +42,6 @@ import std.datetime.timezone : UTC;
 import std.json : JSONType, JSONValue, parseJSON;
 import std.string : strip;
 import std.uri : encodeComponent;
-
-enum RetryJitterPercent = 20;
-enum RetryJitterDenominator = 100;
-enum JitterTickBase = 1;
 
 private final class RealDiscordRest
 {
@@ -1536,8 +1533,8 @@ private final class RealDiscordRest
             {
                 serverErrorRetries++;
                 if (retryDelay > Duration.zero)
-                    Thread.sleep(jitteredRetryDelay(retryDelay));
-                retryDelay = nextRetryDelay(retryDelay, _config.maxRetryDelay);
+                    Thread.sleep(addClockJitter(retryDelay));
+                retryDelay = cappedExponentialBackoff(retryDelay, _config.maxRetryDelay);
                 continue;
             }
 
@@ -1769,35 +1766,6 @@ private bool shouldRetryMethod(HttpMethod method)
     return method == HttpMethod.Get ||
         method == HttpMethod.Put ||
         method == HttpMethod.Delete;
-}
-
-private Duration jitteredRetryDelay(Duration delay)
-{
-    if (delay <= Duration.zero)
-        return delay;
-
-    auto baseMs = delay.total!"msecs";
-    if (baseMs <= 0)
-        return delay;
-
-    auto maxJitterMs = (baseMs * RetryJitterPercent) / RetryJitterDenominator;
-    if (maxJitterMs <= 0)
-        return delay;
-
-    auto tick = Clock.currTime.stdTime;
-    auto jitterMs = (tick % (maxJitterMs + JitterTickBase));
-    return delay + dur!"msecs"(jitterMs);
-}
-
-private Duration nextRetryDelay(Duration delay, Duration maxDelay)
-{
-    if (delay <= Duration.zero)
-        return delay;
-
-    auto doubled = delay + delay;
-    if (maxDelay <= Duration.zero || doubled <= maxDelay)
-        return doubled;
-    return maxDelay;
 }
 
 private ApplicationCommandDefinition commandDefinitionFromJSON(JSONValue json)

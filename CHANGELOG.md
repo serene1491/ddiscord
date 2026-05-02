@@ -2,6 +2,21 @@
 
 All notable changes to `ddiscord` should be documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- `scripts/release_preflight.sh` to run a release preflight gate (`dub test` plus
+  `./scripts/test.sh --bot-seconds <N>`) with explicit, repeatable checks for 1.0-track work.
+- Shared internal backoff utilities in `source/ddiscord/core/backoff.d` for capped exponential
+  delay growth and bounded jitter injection.
+
+### Refactored
+
+- REST, HTTP transport, and gateway reconnect paths now reuse shared backoff helpers instead of
+  keeping duplicated per-module implementations, reducing drift risk while preserving current
+  retry/reconnect behavior.
+
 ## [0.4.0]
 
 ### Added
@@ -72,9 +87,6 @@ All notable changes to `ddiscord` should be documented in this file.
 
 ### Changed
 
-- `agent-docs` guidance was tightened and de-duplicated to reduce ambiguity while keeping
-  core quality, testing, and policy rules explicit (`AGENT.md`, `ARCHITECTURE.md`,
-  `CONVENTIONS.md`, `CONTRIBUTING.md`, `IMPLEMENTATION_GUIDE.md`, and `TESTING.md`).
 - Examples documentation now includes the unified build-and-run helper flow and timed
   `test-bot` execution controls.
 

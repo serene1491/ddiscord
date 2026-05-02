@@ -8,6 +8,7 @@ module ddiscord.core.http.client;
 
 import core.sync.mutex : Mutex;
 import core.thread : Thread;
+import ddiscord.core.backoff : addClockJitter, cappedExponentialBackoff;
 import ddiscord.util.errors : formatError;
 import ddiscord.util.identity : DdiscordUserAgent;
 import ddiscord.util.limits : DiscordApiBase;
@@ -19,7 +20,7 @@ import requests.streams : ConnectError, TimeoutException;
 import std.algorithm : canFind;
 import std.array : appender;
 import std.conv : to;
-import std.datetime : Clock, Duration, dur;
+import std.datetime : Duration, dur;
 import std.json : JSONType, JSONValue, parseJSON;
 import std.string : indexOf, strip;
 
@@ -143,10 +144,6 @@ struct HttpClientConfig
     Nullable!HttpTransport transport;
 }
 
-enum RetryJitterPercent = 20;
-enum RetryJitterDenominator = 100;
-enum JitterTickBase = 1;
-
 /// Blocking HTTP client with Discord-specific defaults.
 final class HttpClient
 {
@@ -224,8 +221,8 @@ final class HttpClient
             )
             {
                 serverErrorRetries++;
-                sleepFor(jitteredRetryDelay(retryDelay));
-                retryDelay = nextRetryDelay(retryDelay, _config.maxRetryDelay);
+                sleepFor(addClockJitter(retryDelay));
+                retryDelay = cappedExponentialBackoff(retryDelay, _config.maxRetryDelay);
                 continue;
             }
 
@@ -745,24 +742,6 @@ private bool isRetrySafeMethod(HttpMethod method)
         method == HttpMethod.Delete;
 }
 
-private Duration jitteredRetryDelay(Duration delay)
-{
-    if (delay <= Duration.zero)
-        return delay;
-
-    auto baseMs = delay.total!"msecs";
-    if (baseMs <= 0)
-        return delay;
-
-    auto maxJitterMs = (baseMs * RetryJitterPercent) / RetryJitterDenominator;
-    if (maxJitterMs <= 0)
-        return delay;
-
-    auto tick = Clock.currTime.stdTime;
-    auto jitterMs = (tick % (maxJitterMs + JitterTickBase));
-    return delay + dur!"msecs"(jitterMs);
-}
-
 private bool isBodylessClientError(ushort statusCode, string body)
 {
     return statusCode >= 400 && statusCode < 500 && body.strip.length == 0;
@@ -809,17 +788,6 @@ private size_t nextPathDelimiter(string value, size_t start)
     while (index < value.length && value[index] != '/' && value[index] != '?')
         index++;
     return index;
-}
-
-private Duration nextRetryDelay(Duration delay, Duration maxDelay)
-{
-    if (delay <= Duration.zero)
-        return delay;
-
-    auto doubled = delay + delay;
-    if (maxDelay <= Duration.zero || doubled <= maxDelay)
-        return doubled;
-    return maxDelay;
 }
 
 private void sleepFor(Duration amount)
