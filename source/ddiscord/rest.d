@@ -2629,7 +2629,18 @@ final class InteractionsEndpoints
             payload
         );
         if (sent.isErr)
+        {
+            if (isInteractionAlreadyAcknowledgedError(sent.error))
+            {
+                auto created = _real.get.createFollowupMessage(interactionToken, payload);
+                if (created.isErr)
+                    return AsyncTask!void.failure(created.error);
+                _history.store(created.value);
+                return AsyncTask!void.success();
+            }
+
             return AsyncTask!void.failure(sent.error);
+        }
 
         return AsyncTask!void.success();
     }
@@ -2758,6 +2769,13 @@ final class InteractionsEndpoints
 
         _history.store(fetched.value);
         return AsyncTask!Message.success(fetched.value);
+    }
+
+    private bool isInteractionAlreadyAcknowledgedError(string error) const
+    {
+        return error.canFind(`"code":40060`) ||
+            error.canFind(`"code": 40060`) ||
+            error.canFind("Interaction has already been acknowledged.");
     }
 
 }
@@ -3213,6 +3231,50 @@ unittest
     auto body = cast(string) captured.body;
     assert(body.canFind(`"type":7`));
     assert(body.canFind(`"content":"updated"`));
+}
+
+unittest
+{
+    HttpRequest[] captured;
+    bool callbackFailedOnce;
+    HttpTransport transport = (request) {
+        captured ~= request;
+
+        if (request.url.canFind("/callback") && !callbackFailedOnce)
+        {
+            callbackFailedOnce = true;
+            HttpError error;
+            error.kind = HttpErrorKind.UnexpectedStatus;
+            error.method = "POST";
+            error.url = request.url;
+            error.statusCode = 400;
+            error.responseBody = `{"message":"Interaction has already been acknowledged.","code":40060}`;
+            error.message = formatError(
+                "http",
+                "Discord returned an unexpected HTTP status code.",
+                error.responseBody,
+                "Inspect the response body and headers for Discord's error details."
+            );
+            return Result!(HttpResponse, HttpError).err(error);
+        }
+
+        HttpResponse response;
+        response.statusCode = 200;
+        response.body = cast(ubyte[]) `{"id":"55","channel_id":"1","content":"fallback","author":{"id":"2","username":"bot","bot":true}}`.dup;
+        return Result!(HttpResponse, HttpError).ok(response);
+    };
+
+    RestClientConfig config;
+    config.token = "token";
+    config.applicationId = Nullable!Snowflake.of(Snowflake(42));
+    config.transport = Nullable!HttpTransport.of(transport);
+
+    auto rest = new RestClient(config);
+    auto sent = rest.interactions.send(Snowflake(10), "interaction-token", MessageCreate("fallback")).awaitResult();
+    assert(sent.isOk);
+    assert(captured.length == 2);
+    assert(captured[0].url.canFind("/interactions/10/interaction-token/callback"));
+    assert(captured[1].url.canFind("/webhooks/42/interaction-token"));
 }
 
 unittest

@@ -411,6 +411,19 @@ private HttpError statusErrorForCode(
     string[string] headers = null
 )
 {
+    if (isBodylessClientError(statusCode, body))
+    {
+        return httpError(
+            HttpErrorKind.Transport,
+            "The HTTP client received a client-error status without a response body.",
+            request,
+            "This can happen on stale keep-alive/proxy paths; retry the request with backoff.",
+            "status code " ~ statusCode.to!string,
+            statusCode,
+            headers
+        );
+    }
+
     if (statusCode == 401)
     {
         return httpError(
@@ -719,6 +732,11 @@ private bool isRetryableFailure(HttpErrorKind kind)
         kind == HttpErrorKind.Transport;
 }
 
+private bool isBodylessClientError(ushort statusCode, string body)
+{
+    return statusCode >= 400 && statusCode < 500 && body.strip.length == 0;
+}
+
 private Duration nextRetryDelay(Duration delay, Duration maxDelay)
 {
     if (delay <= Duration.zero)
@@ -981,6 +999,18 @@ unittest
     assert(error.kind == HttpErrorKind.Transport);
     assert(error.statusCode == 0);
     assert(error.responseBody.canFind("without additional message detail"));
+}
+
+unittest
+{
+    HttpRequest request;
+    request.method = HttpMethod.Post;
+    request.url = "/channels/1/messages";
+
+    auto error = statusErrorForCode(request, 400, "", null);
+    assert(error.kind == HttpErrorKind.Transport);
+    assert(error.statusCode == 400);
+    assert(error.responseBody.canFind("status code 400"));
 }
 
 unittest

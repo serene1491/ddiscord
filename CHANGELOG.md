@@ -34,6 +34,11 @@ All notable changes to `ddiscord` should be documented in this file.
 - Interaction callback recovery now detects Discord `40060` ("Interaction has already been
   acknowledged.") and automatically falls back to follow-up responses instead of failing
   command execution on post-idle callback races.
+- `rest.interactions.send(...)` now applies the same `40060` recovery when used directly
+  (outside command-context helpers), reducing post-idle callback races in custom interaction flows.
+- HTTP status handling now treats bodyless `4xx` responses as transient transport failures,
+  allowing REST retry logic to recover from stale keep-alive/proxy edge cases that often appear
+  on the first request after idle periods.
 
 ### Refactored
 
