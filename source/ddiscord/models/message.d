@@ -6,7 +6,7 @@
  */
 module ddiscord.models.message;
 
-import ddiscord.interactions.components : IsComponentsV2Component;
+import ddiscord.interactions.components : isComponentsV2Component;
 import ddiscord.models.attachment : Attachment;
 import ddiscord.models.channel : Channel;
 import ddiscord.models.embed : Embed;
@@ -320,7 +320,7 @@ struct MessageCreate
             static assert(false, "MessageCreate.addComponent expects a component that provides toJSON().");
         }
 
-        static if (IsComponentsV2Component!T)
+        static if (isComponentsV2Component!T)
             flags |= MessageFlags.IsComponentsV2;
         return this;
     }

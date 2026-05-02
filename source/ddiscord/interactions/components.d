@@ -215,6 +215,112 @@ struct ActionRow
     }
 }
 
+/// String select option entry.
+struct StringSelectOption
+{
+    string label;
+    string value;
+    Nullable!string description;
+    bool defaultSelected;
+
+    this(string label, string value)
+    {
+        this.label = label;
+        this.value = value;
+    }
+
+    StringSelectOption withDescription(string text)
+    {
+        description = Nullable!string.of(text);
+        return this;
+    }
+
+    StringSelectOption selected()
+    {
+        defaultSelected = true;
+        return this;
+    }
+
+    JSONValue toJSON() const
+    {
+        JSONValue json;
+        json["label"] = label;
+        json["value"] = value;
+        if (!description.isNull)
+            json["description"] = description.get;
+        if (defaultSelected)
+            json["default"] = true;
+        return json;
+    }
+}
+
+/// String select menu component.
+struct StringSelect
+{
+    string customId;
+    Nullable!string placeholder;
+    Nullable!uint minValues;
+    Nullable!uint maxValues;
+    bool disabled;
+    StringSelectOption[] options;
+
+    this(string customId)
+    {
+        this.customId = customId;
+    }
+
+    StringSelect withPlaceholder(string text)
+    {
+        placeholder = Nullable!string.of(text);
+        return this;
+    }
+
+    StringSelect withMinValues(uint value)
+    {
+        minValues = Nullable!uint.of(value);
+        return this;
+    }
+
+    StringSelect withMaxValues(uint value)
+    {
+        maxValues = Nullable!uint.of(value);
+        return this;
+    }
+
+    StringSelect addOption(StringSelectOption option)
+    {
+        options ~= option;
+        return this;
+    }
+
+    StringSelect disable()
+    {
+        disabled = true;
+        return this;
+    }
+
+    JSONValue toJSON() const
+    {
+        JSONValue json;
+        json["type"] = cast(int) ComponentType.StringSelect;
+        json["custom_id"] = customId;
+        json["disabled"] = disabled;
+
+        if (!placeholder.isNull)
+            json["placeholder"] = placeholder.get;
+        if (!minValues.isNull)
+            json["min_values"] = minValues.get;
+        if (!maxValues.isNull)
+            json["max_values"] = maxValues.get;
+
+        JSONValue[] values;
+        foreach (option; options)
+            values ~= option.toJSON();
+        json["options"] = values;
+        return json;
+    }
+}
+
 /// Interactive button component.
 struct Button
 {
@@ -420,6 +526,8 @@ JSONValue componentToJSON(const(Object) component)
         return holder.component.toJSON();
     if (auto holder = cast(const(ComponentHolder!ActionRow)) component)
         return holder.component.toJSON();
+    if (auto holder = cast(const(ComponentHolder!StringSelect)) component)
+        return holder.component.toJSON();
     if (auto holder = cast(const(ComponentHolder!Button)) component)
         return holder.component.toJSON();
     if (auto holder = cast(const(ComponentHolder!TextInput)) component)
@@ -430,9 +538,9 @@ JSONValue componentToJSON(const(Object) component)
     return json;
 }
 
-template IsComponentsV2Component(T)
+template isComponentsV2Component(T)
 {
-    enum bool IsComponentsV2Component =
+    enum bool isComponentsV2Component =
         is(T == Section) ||
         is(T == Separator) ||
         is(T == TextDisplay) ||

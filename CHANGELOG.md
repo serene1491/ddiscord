@@ -15,6 +15,7 @@ All notable changes to `ddiscord` should be documented in this file.
 - Central Discord API error parsing helpers in `source/ddiscord/util/discord_api_error.d`
   (`extractDiscordApiErrorCode`, `hasDiscordApiErrorCode`, and
   `discordApiMessageContains`) with dedicated unit coverage.
+- StringSelect and StringSelectOption builders.
 
 ### Fixed
 
