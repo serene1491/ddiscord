@@ -337,8 +337,6 @@ void main()
             }
         }
 
-        client.stop();
-        client.wait();
         writeln("[test] exiting after ", autoStopSeconds, "s");
         return;
     }

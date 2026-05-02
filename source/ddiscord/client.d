@@ -156,6 +156,15 @@ final class Client
         RestClientConfig restConfig;
         restConfig.token = config.token;
         restConfig.applicationId = config.applicationId;
+        restConfig.timeout = config.restTimeout;
+        restConfig.sessionPoolSize = config.httpSessionPoolSize;
+        restConfig.maxSessionIdle = config.httpMaxSessionIdle;
+        restConfig.autoRetryRateLimits = config.autoRetryRateLimits;
+        restConfig.maxRateLimitRetries = config.maxRateLimitRetries;
+        restConfig.autoRetryServerErrors = config.autoRetryServerErrors;
+        restConfig.maxServerErrorRetries = config.maxServerErrorRetries;
+        restConfig.retryBaseDelay = config.retryBaseDelay;
+        restConfig.maxRetryDelay = config.maxRetryDelay;
         if (!config.transport.isNull)
             restConfig.transport = config.transport;
         rest = new RestClient(restConfig);

@@ -23,6 +23,9 @@ The most important `ClientConfig` fields are:
 - `requireExplicitPluginPermissions`: disables implicit host permissions for untrusted plugins without a `permissions` list (`false` by default)
 - `ownerId`: used by `@RequireOwner`; if owner-only commands are registered and this is unset, startup logs a warning and those commands deny every invoker until you configure an owner ID
 - `autoSyncCommands`: keeps slash commands in sync during startup
+- `restTimeout`: per-request REST timeout (`15s` by default)
+- `httpSessionPoolSize`: pooled HTTP session slots used by REST (`2` by default)
+- `httpMaxSessionIdle`: refreshes stale pooled keep-alive sessions after this idle window (`55s` by default)
 - `autoRetryRateLimits`: retries transient Discord `429` responses when `Retry-After` is present (`true` by default)
 - `maxRateLimitRetries`: cap for automatic `429` retries (`3` by default)
 - `autoRetryServerErrors`: retries transient `5xx`/timeout/transport failures (`true` by default)

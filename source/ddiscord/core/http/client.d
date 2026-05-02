@@ -20,7 +20,7 @@ import requests.streams : ConnectError, TimeoutException;
 import std.algorithm : canFind;
 import std.array : appender;
 import std.conv : to;
-import std.datetime : Duration, dur;
+import std.datetime : Clock, Duration, dur;
 import std.json : JSONType, JSONValue, parseJSON;
 import std.string : indexOf, strip;
 
@@ -140,6 +140,8 @@ struct HttpClientConfig
     uint maxServerErrorRetries = 3;
     Duration retryBaseDelay = dur!"msecs"(500);
     Duration maxRetryDelay = dur!"seconds"(30);
+    /// Maximum keep-alive idle time before refreshing a pooled request session.
+    Duration maxSessionIdle = dur!"seconds"(55);
     string[string] defaultHeaders;
     Nullable!HttpTransport transport;
 }
@@ -151,6 +153,7 @@ final class HttpClient
     {
         Mutex mutex;
         Request request;
+        Nullable!long lastUsedStdTime;
 
         this()
         {
@@ -295,6 +298,13 @@ final class HttpClient
 
         synchronized (slot.mutex)
         {
+            auto nowStdTime = Clock.currTime.stdTime;
+            if (shouldRefreshIdleSession(nowStdTime, slot.lastUsedStdTime, _config.maxSessionIdle))
+                resetRequestSession(slot);
+
+            scope (exit)
+                slot.lastUsedStdTime = Nullable!long.of(Clock.currTime.stdTime);
+
             if (_config.timeout != Duration.init)
                 slot.request.timeout = _config.timeout;
 
@@ -397,6 +407,7 @@ final class HttpClient
         slot.request.keepAlive = true;
         if (_config.timeout != Duration.init)
             slot.request.timeout = _config.timeout;
+        slot.lastUsedStdTime = Nullable!long.init;
     }
 
     private HttpError statusError(HttpRequest request, HttpResponse response)
@@ -747,6 +758,29 @@ private bool isBodylessClientError(ushort statusCode, string body)
     return statusCode >= 400 && statusCode < 500 && body.strip.length == 0;
 }
 
+private bool shouldRefreshIdleSession(
+    long nowStdTime,
+    Nullable!long lastUsedStdTime,
+    Duration maxSessionIdle
+)
+{
+    enum HnsecsPerMillisecond = 10_000L;
+
+    if (maxSessionIdle <= Duration.zero || lastUsedStdTime.isNull)
+        return false;
+
+    auto maxIdleMs = maxSessionIdle.total!"msecs";
+    if (maxIdleMs <= 0)
+        return false;
+
+    auto elapsedStdTime = nowStdTime - lastUsedStdTime.get;
+    if (elapsedStdTime <= 0)
+        return false;
+
+    auto elapsedMs = elapsedStdTime / HnsecsPerMillisecond;
+    return elapsedMs >= maxIdleMs;
+}
+
 private string sanitizeUrlForLogs(string url)
 {
     auto safe = url;
@@ -905,6 +939,15 @@ unittest
 {
     HttpClientConfig config;
     assert(config.userAgent == DdiscordUserAgent);
+}
+
+unittest
+{
+    auto nowStdTime = 5_000_000L;
+    auto last = Nullable!long.of(4_000_000L);
+    assert(shouldRefreshIdleSession(nowStdTime, last, dur!"msecs"(50)));
+    assert(!shouldRefreshIdleSession(nowStdTime, last, dur!"seconds"(10)));
+    assert(!shouldRefreshIdleSession(nowStdTime, Nullable!long.init, dur!"seconds"(1)));
 }
 
 unittest

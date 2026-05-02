@@ -34,6 +34,15 @@ struct ClientConfig
     bool autoSyncCommands = true;
     LogLevel logLevel = LogLevel.Information;
     Nullable!HttpTransport transport;
+    Duration restTimeout = dur!"seconds"(15);
+    size_t httpSessionPoolSize = 2;
+    Duration httpMaxSessionIdle = dur!"seconds"(55);
+    bool autoRetryRateLimits = true;
+    uint maxRateLimitRetries = 3;
+    bool autoRetryServerErrors = true;
+    uint maxServerErrorRetries = 3;
+    Duration retryBaseDelay = dur!"msecs"(500);
+    Duration maxRetryDelay = dur!"seconds"(30);
     bool logUnhandledGatewayDispatchEvents = false;
     size_t gatewayUnhandledDispatchLogEvery = 100;
     bool enableSharding;

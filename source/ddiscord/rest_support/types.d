@@ -37,6 +37,8 @@ struct RestClientConfig
     string apiBase = DiscordApiBase;
     string userAgent = DdiscordUserAgent;
     Duration timeout = dur!"seconds"(15);
+    size_t sessionPoolSize = 2;
+    Duration maxSessionIdle = dur!"seconds"(55);
     bool autoRetryRateLimits = true;
     uint maxRateLimitRetries = 3;
     bool autoRetryServerErrors = true;

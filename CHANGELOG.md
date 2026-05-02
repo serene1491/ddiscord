@@ -26,8 +26,8 @@ All notable changes to `ddiscord` should be documented in this file.
   as token-expiry timing, with guidance to defer first and follow up.
 - Interaction callback fallback (`40060`) detection now uses structured Discord error-code/message
   parsing instead of brittle string fragments, reducing false negatives across wrapped error formats.
-- `examples/test-bot` timed mode now performs explicit client shutdown (`stop` + `wait`) before
-  exiting, preventing stuck live runs during preflight/soak automation.
+- HTTP pooled keep-alive sessions now refresh automatically after configurable idle windows,
+  reducing first-request failures after long idle periods caused by stale server-closed connections.
 
 ### Changed
 
@@ -47,6 +47,9 @@ All notable changes to `ddiscord` should be documented in this file.
 - `scripts/release_preflight.sh` now supports an optional soak gate via `RELEASE_RUN_SOAK=1`,
   with configurable soak timings (`RELEASE_SOAK_SECONDS`,
   `RELEASE_SOAK_IDLE_PROBE_AFTER_SECONDS`).
+- `ClientConfig` now exposes REST transport tuning knobs (`restTimeout`, `httpSessionPoolSize`,
+  `httpMaxSessionIdle`, retry toggles/caps, and retry backoff delays) and forwards them to
+  `RestClientConfig`/HTTP runtime, making production stability tuning explicit.
 
 ### Refactored
 
