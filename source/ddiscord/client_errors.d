@@ -42,7 +42,12 @@ CommandErrorKind classifyCommandFailure(string error)
         return CommandErrorKind.TooManyArguments;
     if (error.canFind("restricted to the configured bot owner") ||
         error.canFind("permission requirements") ||
-        error.canFind("temporarily rate limited"))
+        error.canFind("temporarily rate limited") ||
+        error.canFind("Missing Permissions") ||
+        error.canFind(`"code":50013`) ||
+        error.canFind(`"code": 50013`) ||
+        error.canFind(`"code":50001`) ||
+        error.canFind(`"code": 50001`))
     {
         return CommandErrorKind.PolicyDenied;
     }
@@ -79,6 +84,27 @@ bool shouldSurfaceFailure(CommandErrorBehavior behavior, CommandErrorContext con
         case CommandErrorKind.Unknown:
             return behavior.surfaceOtherErrors;
     }
+}
+
+/// Returns true when surfacing a failure message is likely to fail due to expected Discord
+/// state/permission constraints rather than a library logic fault.
+bool isExpectedFailureDeliveryError(string error)
+{
+    return error.canFind("Missing Permissions") ||
+        error.canFind("Missing Access") ||
+        error.canFind(`"code":50013`) ||
+        error.canFind(`"code": 50013`) ||
+        error.canFind(`"code":50001`) ||
+        error.canFind(`"code": 50001`) ||
+        error.canFind("Unknown Channel") ||
+        error.canFind(`"code":10003`) ||
+        error.canFind(`"code": 10003`) ||
+        error.canFind("Unknown interaction") ||
+        error.canFind(`"code":10062`) ||
+        error.canFind(`"code": 10062`) ||
+        error.canFind("Unknown Webhook") ||
+        error.canFind(`"code":10015`) ||
+        error.canFind(`"code": 10015`);
 }
 
 
@@ -313,6 +339,13 @@ private string contextualHandlerHint(string error)
 
 private string specializedInteractionHint(string error)
 {
+    if (error.canFind("Unknown interaction") ||
+        error.canFind(`"code":10062`) ||
+        error.canFind(`"code": 10062`))
+    {
+        return "The interaction token expired before the response was sent. Reply faster or defer first, then send a follow-up.";
+    }
+
     if (
         error.canFind("UNION_TYPE_CHOICES") ||
         (error.canFind("components") && error.canFind("text input"))
@@ -389,4 +422,20 @@ unittest
 
     auto payload = buildFailurePayload(behavior, "!", context);
     assert(payload.content.canFind("Dropdown/file-style inputs are not available"));
+}
+
+unittest
+{
+    auto kind = classifyCommandFailure(
+        "[ddiscord/http] Discord refused the request because the bot lacks permission for this action. " ~
+        `Detail: {"message":"Missing Permissions","code":50013}`
+    );
+    assert(kind == CommandErrorKind.PolicyDenied);
+}
+
+unittest
+{
+    assert(isExpectedFailureDeliveryError(`{"message":"Missing Permissions","code":50013}`));
+    assert(isExpectedFailureDeliveryError(`{"message":"Unknown interaction","code":10062}`));
+    assert(!isExpectedFailureDeliveryError(`{"message":"Invalid Form Body","code":50035}`));
 }

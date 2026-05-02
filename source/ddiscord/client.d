@@ -15,7 +15,8 @@ import core.sync.mutex : Mutex;
 import core.thread : Thread;
 import core.time : Duration, MonoTime, dur;
 import ddiscord.cache : CacheStore;
-import ddiscord.client_errors : buildFailurePayload, classifyCommandFailure, shouldSurfaceFailure;
+import ddiscord.client_errors : buildFailurePayload, classifyCommandFailure, isExpectedFailureDeliveryError,
+    shouldSurfaceFailure;
 import ddiscord.client_filters : matchesRegistrationFilter;
 import ddiscord.client_event_contexts : ClientEventContextBuilders;
 import ddiscord.client_queue : DispatchQueuePushOutcome, compactQueue, pushBounded, queueDepth;
@@ -2521,10 +2522,12 @@ final class Client
         auto sent = ctx.rest.messages.create(ctx.channel.id, payload).awaitResult();
         if (sent.isErr)
         {
-            logger.error(
-                "commands",
-                "The library could not send the prefix failure message for `" ~ commandName ~ "`: " ~ sent.error
-            );
+            auto detail = "The library could not send the prefix failure message for `" ~ commandName ~ "`: " ~
+                sent.error;
+            if (isExpectedFailureDeliveryError(sent.error))
+                logger.debugMessage("commands", detail);
+            else
+                logger.error("commands", detail);
         }
     }
 
@@ -2547,10 +2550,12 @@ final class Client
         auto sent = task.awaitResult();
         if (sent.isErr)
         {
-            logger.error(
-                "commands",
-                "The library could not send the interaction failure message for `" ~ commandName ~ "`: " ~ sent.error
-            );
+            auto detail = "The library could not send the interaction failure message for `" ~ commandName ~ "`: " ~
+                sent.error;
+            if (isExpectedFailureDeliveryError(sent.error))
+                logger.debugMessage("commands", detail);
+            else
+                logger.error("commands", detail);
         }
     }
 
@@ -2582,11 +2587,19 @@ final class Client
                 return;
             }
 
-            logger.error(
-                "commands",
-                "Failed to execute " ~ route ~ " command for `" ~ user.username ~ "` (" ~ user.id.toString ~
-                ") after " ~ durationMs.to!string ~ "ms. " ~ result.error
-            );
+            auto detail = "Failed to execute " ~ route ~ " command for `" ~ user.username ~ "` (" ~
+                user.id.toString ~ ") after " ~ durationMs.to!string ~ "ms. " ~ result.error;
+            if (kind == CommandErrorKind.PolicyDenied ||
+                kind == CommandErrorKind.MissingCommandName ||
+                kind == CommandErrorKind.MissingArgument ||
+                kind == CommandErrorKind.InvalidArgument ||
+                kind == CommandErrorKind.TooManyArguments)
+            {
+                logger.warning("commands", detail);
+                return;
+            }
+
+            logger.error("commands", detail);
         }
     }
 

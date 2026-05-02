@@ -11,6 +11,22 @@ All notable changes to `ddiscord` should be documented in this file.
 - Shared internal backoff utilities in `source/ddiscord/core/backoff.d` for capped exponential
   delay growth and bounded jitter injection.
 
+### Fixed
+
+- Command failure classification now treats Discord permission-denied API responses
+  (`Missing Permissions` / `50013`, `Missing Access` / `50001`) as policy denials, improving
+  user-facing failure routing and log semantics.
+- Interaction failure hints now explicitly explain Discord `10062` ("Unknown interaction")
+  as token-expiry timing, with guidance to defer first and follow up.
+
+### Changed
+
+- Command execution logging now downgrades expected user/policy failures (permission/policy/argument)
+  from error-level to warning-level, reducing false-positive operational noise.
+- Failure-message delivery errors caused by expected Discord state/permission conditions
+  (for example `50013`, `50001`, `10003`, `10062`, `10015`) now log at debug level instead of
+  error level, so secondary delivery failures no longer obscure primary command failures.
+
 ### Refactored
 
 - REST, HTTP transport, and gateway reconnect paths now reuse shared backoff helpers instead of
