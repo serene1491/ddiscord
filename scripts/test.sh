@@ -75,6 +75,11 @@ for project_dir in "${EXAMPLE_PROJECTS[@]}"; do
 done
 
 echo
+if [[ "${TEST_BOT_SKIP_RUN:-0}" == "1" ]]; then
+    echo "---- [skip] test-bot run (TEST_BOT_SKIP_RUN=1) ----"
+    exit 0
+fi
+
 if [[ -z "${DISCORD_TOKEN:-}" && -z "${TOKEN:-}" && "${TEST_BOT_FORCE_RUN:-0}" != "1" ]]; then
     echo "---- [skip] test-bot run (set DISCORD_TOKEN/TOKEN or TEST_BOT_FORCE_RUN=1) ----"
     exit 0

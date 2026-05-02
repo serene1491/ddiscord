@@ -25,6 +25,8 @@ All notable changes to `ddiscord` should be documented in this file.
   as token-expiry timing, with guidance to defer first and follow up.
 - Interaction callback fallback (`40060`) detection now uses structured Discord error-code/message
   parsing instead of brittle string fragments, reducing false negatives across wrapped error formats.
+- `examples/test-bot` timed mode now performs explicit client shutdown (`stop` + `wait`) before
+  exiting, preventing stuck live runs during preflight/soak automation.
 
 ### Changed
 
@@ -35,10 +37,15 @@ All notable changes to `ddiscord` should be documented in this file.
   error level, so secondary delivery failures no longer obscure primary command failures.
 - `scripts/test.sh` now accepts `--idle-probe-after <seconds>` and passes
   `TEST_BOT_IDLE_PROBE_AFTER_SECONDS` through to `examples/test-bot`.
+- `scripts/test.sh` now honors `TEST_BOT_SKIP_RUN=1` to skip live `test-bot` execution even when
+  tokens are available, enabling deterministic build-only preflight runs.
 - `examples/test-bot` now supports a timed post-idle `users.me` probe to surface
   stale-connection/first-request-after-idle regressions during automated smoke runs.
 - Script env loading now resolves `.env`/`.env.local` from both `scripts/` and `examples/`,
   reducing false token-missing errors when runtime credentials are stored in shared example env files.
+- `scripts/release_preflight.sh` now supports an optional soak gate via `RELEASE_RUN_SOAK=1`,
+  with configurable soak timings (`RELEASE_SOAK_SECONDS`,
+  `RELEASE_SOAK_IDLE_PROBE_AFTER_SECONDS`).
 
 ### Refactored
 
@@ -47,6 +54,8 @@ All notable changes to `ddiscord` should be documented in this file.
   retry/reconnect behavior.
 - Command failure routing and expected-delivery-error detection now consume the shared Discord API
   error parser, removing duplicated code-fragment checks and reducing classifier drift risk.
+- Dispatch queue overflow logs now include `droppedSinceLastReport` counters, improving burst-load
+  observability without changing queue drop behavior.
 
 ## [0.4.0]
 

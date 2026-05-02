@@ -66,6 +66,12 @@ When `DISCORD_TOKEN`/`TOKEN` is not set in the current shell, `scripts/test.sh` 
 live `test-bot` run step after building examples. To force the live run anyway, set
 `TEST_BOT_FORCE_RUN=1`.
 
+To always skip the live run (even when tokens are available), set:
+
+```sh
+TEST_BOT_SKIP_RUN=1 ./scripts/test.sh
+```
+
 To keep `test-bot` running continuously at the end:
 
 ```sh
@@ -97,6 +103,8 @@ Accepted token variables for the examples:
   `test-bot` run (helps detect first-request-after-idle regressions)
 - `TEST_BOT_FORCE_RUN=1` to force the `scripts/test.sh` live `test-bot` run even when no token
   is present in the current shell environment
+- `TEST_BOT_SKIP_RUN=1` to skip the `scripts/test.sh` live `test-bot` run even when tokens are
+  present (useful for build-only checks)
 - `SOAK_RUN_SECONDS` to configure `scripts/soak_idle_recovery.sh` total duration (default `300`)
 - `SOAK_IDLE_PROBE_AFTER_SECONDS` to configure the soak idle probe offset (default `180`)
 - `GREETING_PREFIX` to customize the greeting text used by `services-bot`

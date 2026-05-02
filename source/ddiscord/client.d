@@ -142,6 +142,7 @@ final class Client
     private ulong _nextHelpQueryTokenId;
     private size_t _peakDispatchQueueDepth;
     private ulong _droppedDispatchItems;
+    private ulong _lastDispatchOverflowReportedTotal;
 
     this(ClientConfig config)
     {
@@ -2010,6 +2011,7 @@ final class Client
             _dispatchQueueHead = 0;
             _peakDispatchQueueDepth = 0;
             _droppedDispatchItems = 0;
+            _lastDispatchOverflowReportedTotal = 0;
         }
     }
 
@@ -2026,6 +2028,9 @@ final class Client
         if (outcome.droppedTotal % config.dispatchOverflowLogEvery != 0)
             return;
 
+        auto droppedSinceLastReport = outcome.droppedTotal - _lastDispatchOverflowReportedTotal;
+        _lastDispatchOverflowReportedTotal = outcome.droppedTotal;
+
         auto action = config.dropOldestDispatchOnOverflow
             ? "dropping the oldest pending item"
             : "dropping the new incoming item";
@@ -2034,6 +2039,7 @@ final class Client
             "client",
             "Dispatch queue overflow reached " ~ outcome.droppedTotal.to!string ~
                 " dropped item(s) while enqueueing " ~ kind ~ " events; " ~ action ~
+                ". droppedSinceLastReport=" ~ droppedSinceLastReport.to!string ~
                 ". queueDepth=" ~ outcome.depth.to!string ~
                 ", maxDepth=" ~ config.maxDispatchQueueSize.to!string ~ "."
         );
@@ -4407,6 +4413,30 @@ unittest
     assert(health.queued == 2);
     assert(health.peakQueued == 2);
     assert(health.droppedTotal == 1);
+}
+
+unittest
+{
+    auto client = new Client(ClientConfig(
+        "token",
+        cast(uint) GatewayIntent.Guilds,
+        maxDispatchQueueSize: 1,
+        dropOldestDispatchOnOverflow: false,
+        dispatchOverflowLogEvery: 1
+    ));
+    client.logger.minimumLevel = cast(LogLevel) -1;
+
+    DispatchQueuePushOutcome first;
+    first.droppedTotal = 1;
+    first.depth = 1;
+    client.logDispatchOverflow(first, "message");
+    assert(client._lastDispatchOverflowReportedTotal == 1);
+
+    DispatchQueuePushOutcome second;
+    second.droppedTotal = 3;
+    second.depth = 1;
+    client.logDispatchOverflow(second, "interaction");
+    assert(client._lastDispatchOverflowReportedTotal == 3);
 }
 
 unittest
