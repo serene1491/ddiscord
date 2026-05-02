@@ -2,7 +2,7 @@
 
 All notable changes to `ddiscord` should be documented in this file.
 
-## [Unreleased]
+## [0.4.0]
 
 ### Added
 
