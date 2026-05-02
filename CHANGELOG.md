@@ -8,8 +8,13 @@ All notable changes to `ddiscord` should be documented in this file.
 
 - `scripts/release_preflight.sh` to run a release preflight gate (`dub test` plus
   `./scripts/test.sh --bot-seconds <N>`) with explicit, repeatable checks for 1.0-track work.
+- `scripts/soak_idle_recovery.sh` to run a token-backed timed soak flow with an explicit
+  post-idle probe window for first-request-after-idle validation.
 - Shared internal backoff utilities in `source/ddiscord/core/backoff.d` for capped exponential
   delay growth and bounded jitter injection.
+- Central Discord API error parsing helpers in `source/ddiscord/util/discord_api_error.d`
+  (`extractDiscordApiErrorCode`, `hasDiscordApiErrorCode`, and
+  `discordApiMessageContains`) with dedicated unit coverage.
 
 ### Fixed
 
@@ -18,6 +23,8 @@ All notable changes to `ddiscord` should be documented in this file.
   user-facing failure routing and log semantics.
 - Interaction failure hints now explicitly explain Discord `10062` ("Unknown interaction")
   as token-expiry timing, with guidance to defer first and follow up.
+- Interaction callback fallback (`40060`) detection now uses structured Discord error-code/message
+  parsing instead of brittle string fragments, reducing false negatives across wrapped error formats.
 
 ### Changed
 
@@ -26,12 +33,18 @@ All notable changes to `ddiscord` should be documented in this file.
 - Failure-message delivery errors caused by expected Discord state/permission conditions
   (for example `50013`, `50001`, `10003`, `10062`, `10015`) now log at debug level instead of
   error level, so secondary delivery failures no longer obscure primary command failures.
+- `scripts/test.sh` now accepts `--idle-probe-after <seconds>` and passes
+  `TEST_BOT_IDLE_PROBE_AFTER_SECONDS` through to `examples/test-bot`.
+- `examples/test-bot` now supports a timed post-idle `users.me` probe to surface
+  stale-connection/first-request-after-idle regressions during automated smoke runs.
 
 ### Refactored
 
 - REST, HTTP transport, and gateway reconnect paths now reuse shared backoff helpers instead of
   keeping duplicated per-module implementations, reducing drift risk while preserving current
   retry/reconnect behavior.
+- Command failure routing and expected-delivery-error detection now consume the shared Discord API
+  error parser, removing duplicated code-fragment checks and reducing classifier drift risk.
 
 ## [0.4.0]
 

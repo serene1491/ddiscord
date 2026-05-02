@@ -71,7 +71,7 @@ long snowflakeLatencyMilliseconds(Snowflake id)
     if (id.value == 0)
         return 0;
 
-    enum unixEpochStdTime = 621355968000000000L;
+    enum unixEpochStdTime = 621_355_968_000_000_000L;
     auto nowMs = cast(long) ((Clock.currTime.stdTime - unixEpochStdTime) / 10_000);
     auto createdMs = cast(long) id.timestampMilliseconds;
     if (nowMs <= createdMs)

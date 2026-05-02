@@ -8,6 +8,7 @@ module ddiscord.client_errors;
 
 import ddiscord.client_support.types : CommandErrorBehavior, CommandErrorContext, CommandErrorKind;
 import ddiscord.models.message : MessageCreate;
+import ddiscord.util.discord_api_error : discordApiMessageContains, hasDiscordApiErrorCode;
 import std.algorithm : canFind;
 import std.json : JSONType, JSONValue, parseJSON;
 import std.string : indexOf, strip;
@@ -43,11 +44,10 @@ CommandErrorKind classifyCommandFailure(string error)
     if (error.canFind("restricted to the configured bot owner") ||
         error.canFind("permission requirements") ||
         error.canFind("temporarily rate limited") ||
-        error.canFind("Missing Permissions") ||
-        error.canFind(`"code":50013`) ||
-        error.canFind(`"code": 50013`) ||
-        error.canFind(`"code":50001`) ||
-        error.canFind(`"code": 50001`))
+        discordApiMessageContains(error, "Missing Permissions") ||
+        discordApiMessageContains(error, "Missing Access") ||
+        hasDiscordApiErrorCode(error, 50_013) ||
+        hasDiscordApiErrorCode(error, 50_001))
     {
         return CommandErrorKind.PolicyDenied;
     }
@@ -90,21 +90,16 @@ bool shouldSurfaceFailure(CommandErrorBehavior behavior, CommandErrorContext con
 /// state/permission constraints rather than a library logic fault.
 bool isExpectedFailureDeliveryError(string error)
 {
-    return error.canFind("Missing Permissions") ||
-        error.canFind("Missing Access") ||
-        error.canFind(`"code":50013`) ||
-        error.canFind(`"code": 50013`) ||
-        error.canFind(`"code":50001`) ||
-        error.canFind(`"code": 50001`) ||
-        error.canFind("Unknown Channel") ||
-        error.canFind(`"code":10003`) ||
-        error.canFind(`"code": 10003`) ||
-        error.canFind("Unknown interaction") ||
-        error.canFind(`"code":10062`) ||
-        error.canFind(`"code": 10062`) ||
-        error.canFind("Unknown Webhook") ||
-        error.canFind(`"code":10015`) ||
-        error.canFind(`"code": 10015`);
+    return discordApiMessageContains(error, "Missing Permissions") ||
+        discordApiMessageContains(error, "Missing Access") ||
+        hasDiscordApiErrorCode(error, 50_013) ||
+        hasDiscordApiErrorCode(error, 50_001) ||
+        discordApiMessageContains(error, "Unknown Channel") ||
+        hasDiscordApiErrorCode(error, 10_003) ||
+        discordApiMessageContains(error, "Unknown interaction") ||
+        hasDiscordApiErrorCode(error, 10_062) ||
+        discordApiMessageContains(error, "Unknown Webhook") ||
+        hasDiscordApiErrorCode(error, 10_015);
 }
 
 
@@ -339,9 +334,7 @@ private string contextualHandlerHint(string error)
 
 private string specializedInteractionHint(string error)
 {
-    if (error.canFind("Unknown interaction") ||
-        error.canFind(`"code":10062`) ||
-        error.canFind(`"code": 10062`))
+    if (discordApiMessageContains(error, "Unknown interaction") || hasDiscordApiErrorCode(error, 10_062))
     {
         return "The interaction token expired before the response was sent. Reply faster or defer first, then send a follow-up.";
     }

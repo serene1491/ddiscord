@@ -36,6 +36,23 @@ private ulong parseAutoStopSeconds(EnvLoader env)
     }
 }
 
+private ulong parseOptionalSeconds(EnvLoader env, string key)
+{
+    auto raw = env.get!string(key, "0").strip;
+    if (raw.length == 0)
+        return 0;
+
+    try
+    {
+        return raw.to!ulong;
+    }
+    catch (ConvException)
+    {
+        writeln("[test] invalid ", key, "=", raw, " (expected integer); using 0");
+        return 0;
+    }
+}
+
 private string formatLatency(CommandContext ctx)
 {
     return "gateway receive lag=" ~ ctx.receiveLatencyMilliseconds.to!string ~ "ms, rest=" ~
@@ -125,6 +142,16 @@ private string[] runStartupChecks(
     return lines;
 }
 
+private void runIdleProbe(Client client, ulong idleSeconds)
+{
+    writeln("[test] idle probe after ", idleSeconds, "s: users.me");
+    auto me = client.users.me().awaitResult();
+    if (me.isOk)
+        writeln("[test] [ok] idle probe users.me -> ", me.value.username, " (", me.value.id.toString, ")");
+    else
+        writeln("[test] [fail] idle probe users.me -> ", shortError(me.error));
+}
+
 @Command("ping", description: "Check prefix command latency", routes: CommandRoute.Prefix)
 void handlePing(CommandContext ctx)
 {
@@ -197,6 +224,7 @@ void main()
     auto startupChannelId = optionalSnowflake(env, "TEST_CHANNEL_ID");
     auto testServerId = optionalSnowflake(env, "TEST_SERVER_ID");
     auto autoStopSeconds = parseAutoStopSeconds(env);
+    auto idleProbeAfterSeconds = parseOptionalSeconds(env, "TEST_BOT_IDLE_PROBE_AFTER_SECONDS");
 
     auto client = new Client(ClientConfig(
         token: env.get!string("DISCORD_TOKEN", env.require!string("TOKEN")),
@@ -285,7 +313,30 @@ void main()
     if (autoStopSeconds > 0)
     {
         writeln("[test] auto-stop armed for ", autoStopSeconds, "s");
-        Thread.sleep(dur!"seconds"(cast(long) autoStopSeconds));
+        if (idleProbeAfterSeconds > autoStopSeconds)
+        {
+            writeln(
+                "[test] idle probe skipped: TEST_BOT_IDLE_PROBE_AFTER_SECONDS=",
+                idleProbeAfterSeconds,
+                " exceeds TEST_BOT_RUN_SECONDS=",
+                autoStopSeconds
+            );
+        }
+
+        bool idleProbeDone = idleProbeAfterSeconds == 0 || idleProbeAfterSeconds > autoStopSeconds;
+        ulong elapsedSeconds;
+        while (elapsedSeconds < autoStopSeconds)
+        {
+            Thread.sleep(dur!"seconds"(1));
+            elapsedSeconds++;
+
+            if (!idleProbeDone && elapsedSeconds >= idleProbeAfterSeconds)
+            {
+                runIdleProbe(client, elapsedSeconds);
+                idleProbeDone = true;
+            }
+        }
+
         writeln("[test] exiting after ", autoStopSeconds, "s");
         return;
     }

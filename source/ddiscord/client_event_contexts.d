@@ -22,8 +22,8 @@ import ddiscord.context.event : AutocompleteInteractionEventContext, ChannelCrea
     ThreadDeleteEventContext, ThreadUpdateEventContext, TypingStartEventContext, UserUpdateEventContext,
     VoiceServerUpdateEventContext, VoiceStateUpdateEventContext, WebhooksUpdateEventContext;
 import ddiscord.gateway.client : GatewayChannelPinsUpdateInfo, GatewayGuildBanInfo,
-    GatewayGuildRoleDeleteInfo, GatewayGuildRoleInfo, GatewayInviteInfo, GatewayMessageDeleteBulkInfo, GatewayMessageDeleteInfo,
-    GatewayMessageReactionInfo, GatewayMessageReactionRemoveAllInfo, GatewayThreadDeleteInfo,
+    GatewayGuildRoleDeleteInfo, GatewayGuildRoleInfo, GatewayInviteInfo, GatewayMessageDeleteBulkInfo,
+    GatewayMessageDeleteInfo, GatewayMessageReactionInfo, GatewayMessageReactionRemoveAllInfo, GatewayThreadDeleteInfo,
     GatewayTypingStartInfo, GatewayVoiceServerUpdateInfo, GatewayVoiceStateUpdateInfo,
     GatewayWebhooksUpdateInfo;
 import ddiscord.models.channel : Channel;

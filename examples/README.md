@@ -72,6 +72,19 @@ To keep `test-bot` running continuously at the end:
 ./scripts/test.sh --bot-seconds 0
 ```
 
+To run an idle-recovery probe during the timed `test-bot` run (first REST call after an idle
+window):
+
+```sh
+./scripts/test.sh --bot-seconds 300 --idle-probe-after 180
+```
+
+For a dedicated soak wrapper:
+
+```sh
+./scripts/soak_idle_recovery.sh
+```
+
 The consoles load shared environment values from `examples/.env` and `examples/.env.local`.
 
 Accepted token variables for the examples:
@@ -80,8 +93,12 @@ Accepted token variables for the examples:
 - `TOKEN`
 - `BOT_PREFIX` for prefix-based examples
 - `TEST_BOT_RUN_SECONDS` to auto-stop `test-bot` after N seconds (`0` keeps it running)
+- `TEST_BOT_IDLE_PROBE_AFTER_SECONDS` to trigger a `users.me` probe N seconds into a timed
+  `test-bot` run (helps detect first-request-after-idle regressions)
 - `TEST_BOT_FORCE_RUN=1` to force the `scripts/test.sh` live `test-bot` run even when no token
   is present in the current shell environment
+- `SOAK_RUN_SECONDS` to configure `scripts/soak_idle_recovery.sh` total duration (default `300`)
+- `SOAK_IDLE_PROBE_AFTER_SECONDS` to configure the soak idle probe offset (default `180`)
 - `GREETING_PREFIX` to customize the greeting text used by `services-bot`
 - `BOT_OWNER_ID` or `OWNER_ID` for the owner-only Lua eval command in `plugin-bot`
 - `PLUGINS_DIR` to override the default plugin directory used by `plugin-bot`

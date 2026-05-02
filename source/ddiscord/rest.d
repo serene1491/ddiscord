@@ -28,6 +28,7 @@ import ddiscord.util.errors : formatError;
 import ddiscord.util.identity : DdiscordUserAgent;
 import ddiscord.util.limits : DiscordApiBase;
 import ddiscord.util.optional : Nullable;
+import ddiscord.util.discord_api_error : discordApiMessageContains, hasDiscordApiErrorCode;
 import ddiscord.util.result : Result;
 import ddiscord.util.snowflake : Snowflake;
 import ddiscord.rest_support.internal : ApplicationCommandStore, MessageHistory;
@@ -2779,9 +2780,8 @@ final class InteractionsEndpoints
 
     private bool isInteractionAlreadyAcknowledgedError(string error) const
     {
-        return error.canFind(`"code":40060`) ||
-            error.canFind(`"code": 40060`) ||
-            error.canFind("Interaction has already been acknowledged.");
+        return hasDiscordApiErrorCode(error, 40060) ||
+            discordApiMessageContains(error, "Interaction has already been acknowledged.");
     }
 
 }

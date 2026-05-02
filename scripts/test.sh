@@ -3,26 +3,50 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 EXAMPLES_DIR="$ROOT_DIR/examples"
+
+# Load token/runtime variables from scripts/.env(.local) when present.
+# shellcheck disable=SC1091
+source "$ROOT_DIR/scripts/load_env.sh"
+load_script_env
+
 DEFAULT_BOT_SECONDS="${TEST_BOT_RUN_SECONDS:-45}"
+DEFAULT_IDLE_PROBE_AFTER_SECONDS="${TEST_BOT_IDLE_PROBE_AFTER_SECONDS:-0}"
 BOT_SECONDS="$DEFAULT_BOT_SECONDS"
+IDLE_PROBE_AFTER_SECONDS="$DEFAULT_IDLE_PROBE_AFTER_SECONDS"
 
-if [[ "${1:-}" == "--bot-seconds" ]]; then
-    if [[ -z "${2:-}" ]]; then
-        echo "error: missing value for --bot-seconds" >&2
-        exit 2
-    fi
-    BOT_SECONDS="$2"
-    shift 2
-fi
-
-if [[ $# -gt 0 ]]; then
-    echo "error: unsupported arguments: $*" >&2
-    echo "usage: $0 [--bot-seconds <seconds>]" >&2
-    exit 2
-fi
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --bot-seconds)
+            if [[ -z "${2:-}" ]]; then
+                echo "error: missing value for --bot-seconds" >&2
+                exit 2
+            fi
+            BOT_SECONDS="$2"
+            shift 2
+            ;;
+        --idle-probe-after)
+            if [[ -z "${2:-}" ]]; then
+                echo "error: missing value for --idle-probe-after" >&2
+                exit 2
+            fi
+            IDLE_PROBE_AFTER_SECONDS="$2"
+            shift 2
+            ;;
+        *)
+            echo "error: unsupported arguments: $*" >&2
+            echo "usage: $0 [--bot-seconds <seconds>] [--idle-probe-after <seconds>]" >&2
+            exit 2
+            ;;
+    esac
+done
 
 if ! [[ "$BOT_SECONDS" =~ ^[0-9]+$ ]]; then
     echo "error: --bot-seconds must be a non-negative integer" >&2
+    exit 2
+fi
+
+if ! [[ "$IDLE_PROBE_AFTER_SECONDS" =~ ^[0-9]+$ ]]; then
+    echo "error: --idle-probe-after must be a non-negative integer" >&2
     exit 2
 fi
 
@@ -59,10 +83,12 @@ fi
 if [[ "$BOT_SECONDS" == "0" ]]; then
     echo "---- [run] test-bot (continuous; Ctrl+C to stop) ----"
 else
-    echo "---- [run] test-bot for ${BOT_SECONDS}s ----"
+    echo "---- [run] test-bot for ${BOT_SECONDS}s (idle probe after ${IDLE_PROBE_AFTER_SECONDS}s) ----"
 fi
 
 (
     cd "$EXAMPLES_DIR/test-bot"
-    TEST_BOT_RUN_SECONDS="$BOT_SECONDS" dub run
+    TEST_BOT_RUN_SECONDS="$BOT_SECONDS" \
+        TEST_BOT_IDLE_PROBE_AFTER_SECONDS="$IDLE_PROBE_AFTER_SECONDS" \
+        dub run
 )

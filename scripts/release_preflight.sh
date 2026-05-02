@@ -3,6 +3,11 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+# Load token/runtime variables from scripts/.env(.local) when present.
+# shellcheck disable=SC1091
+source "$ROOT_DIR/scripts/load_env.sh"
+load_script_env
+
 BOT_SECONDS="${RELEASE_BOT_SECONDS:-20}"
 if ! [[ "$BOT_SECONDS" =~ ^[0-9]+$ ]]; then
     echo "error: RELEASE_BOT_SECONDS must be a non-negative integer" >&2
