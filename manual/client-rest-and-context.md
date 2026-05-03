@@ -36,6 +36,9 @@ Useful additions include:
 - `client.threads.createFromMessage(...)`, `client.threads.create(...)`, `client.threads.join(...)`, `client.threads.leave(...)`, and `client.threads.archive(...)`
 - `client.webhooks.execute(...)` for webhook-token message dispatch
 - `client.slash.sync(...)` when you want direct slash-command sync
+- `client.interactions.send(interaction, ...)`, `defer(interaction, ...)`, `update(interaction, ...)`,
+  `autocomplete(interaction, ...)`, `modal(interaction, ...)`, `followup(interaction, ...)`,
+  `edit(interaction, ...)`, and `fetchOriginal(interaction)` to avoid manual `id`/`token` plumbing
 
 ## Service container shortcuts
 

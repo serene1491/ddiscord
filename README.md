@@ -12,6 +12,7 @@ This library is also used in personal projects, so changes may be frequent and o
 - Command middleware pipeline with global and named `@UseMiddleware(...)` hooks
 - Real Discord REST and gateway connectivity
 - Typed events, typed models, and typed command inputs
+- Granular component interaction events (generic + button/select specializations) with `@Event` filtering by `custom_id` and component type
 - Interaction helpers for replies, follow-ups, modals, autocomplete, and deferred responses
 - Message-focused command helpers (`ctx.react`, `ctx.pin`, `ctx.crosspost`, `ctx.messageRef`)
 - Multipart attachment uploads across message and interaction response flows
@@ -26,6 +27,7 @@ This library is also used in personal projects, so changes may be frequent and o
   with built-in queue health and real uptime tracking
 - Runtime safety guardrails for large bots (worker-loop crash isolation, stricter REST validation, and configurable retry controls)
 - Input hardening for production REST usage (safer token routing, emoji validation, and audit-log reason sanitization)
+- Prefix/mention convenience events (`PrefixMessageEvent`, `BotMentionEvent`) and interaction-object REST shortcuts for lower ceremony handlers
 
 ## Philosophy
 

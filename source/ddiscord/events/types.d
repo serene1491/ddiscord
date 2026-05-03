@@ -6,17 +6,21 @@
  */
 module ddiscord.events.types;
 
-import ddiscord.context.event : AutocompleteInteractionEventContext, ChannelCreateEventContext,
+import ddiscord.context.event : AutocompleteInteractionEventContext, BotMentionEventContext,
+    ButtonComponentEventContext, ChannelCreateEventContext, ChannelSelectComponentEventContext,
     ChannelDeleteEventContext, ChannelPinsUpdateEventContext, ChannelUpdateEventContext,
     CommandExecutedEventContext, CommandFailedEventContext, GuildCreateEventContext,
     GuildDeleteEventContext, GuildMemberAddEventContext, GuildMemberRemoveEventContext,
     GuildUpdateEventContext, GatewayDispatchEventContext,
     GuildBanAddEventContext, GuildBanRemoveEventContext, GuildRoleCreateEventContext,
     GuildRoleDeleteEventContext, GuildRoleUpdateEventContext, InteractionCreateEventContext,
-    InviteCreateEventContext, InviteDeleteEventContext, MessageComponentEventContext,
+    InviteCreateEventContext, InviteDeleteEventContext, MentionableSelectComponentEventContext,
+    MessageComponentEventContext,
     MessageCreateEventContext, MessageDeleteBulkEventContext, MessageDeleteEventContext, MessageReactionAddEventContext,
     MessageReactionRemoveAllEventContext, MessageReactionRemoveEmojiEventContext,
     MessageReactionRemoveEventContext, MessageUpdateEventContext, ModalSubmitEventContext,
+    PrefixMessageEventContext, RoleSelectComponentEventContext,
+    StringSelectComponentEventContext, UserSelectComponentEventContext,
     PresenceUpdateEventContext, ReadyEventContext, ResumedEventContext, UserUpdateEventContext,
     ThreadCreateEventContext, ThreadDeleteEventContext, ThreadUpdateEventContext,
     TypingStartEventContext, VoiceServerUpdateEventContext, VoiceStateUpdateEventContext,
@@ -29,6 +33,7 @@ import ddiscord.models.presence : Activity, StatusType;
 import ddiscord.models.role : Role;
 import ddiscord.models.user : User;
 import ddiscord.models.channel : Channel;
+import ddiscord.interactions.components : ComponentType;
 import ddiscord.util.optional : Nullable;
 import ddiscord.util.snowflake : Snowflake;
 import std.json : JSONValue;
@@ -239,7 +244,50 @@ struct AutocompleteInteractionEvent
 struct MessageComponentEvent
 {
     Interaction interaction;
+    ComponentType componentType;
     MessageComponentEventContext context;
+}
+
+/// Button component interaction event.
+struct ButtonComponentEvent
+{
+    Interaction interaction;
+    ButtonComponentEventContext context;
+}
+
+/// String select component interaction event.
+struct StringSelectComponentEvent
+{
+    Interaction interaction;
+    StringSelectComponentEventContext context;
+}
+
+/// User select component interaction event.
+struct UserSelectComponentEvent
+{
+    Interaction interaction;
+    UserSelectComponentEventContext context;
+}
+
+/// Role select component interaction event.
+struct RoleSelectComponentEvent
+{
+    Interaction interaction;
+    RoleSelectComponentEventContext context;
+}
+
+/// Mentionable select component interaction event.
+struct MentionableSelectComponentEvent
+{
+    Interaction interaction;
+    MentionableSelectComponentEventContext context;
+}
+
+/// Channel select component interaction event.
+struct ChannelSelectComponentEvent
+{
+    Interaction interaction;
+    ChannelSelectComponentEventContext context;
 }
 
 /// Modal submit interaction event.
@@ -247,6 +295,23 @@ struct ModalSubmitEvent
 {
     Interaction interaction;
     ModalSubmitEventContext context;
+}
+
+/// Message event fired when the current client user is mentioned.
+struct BotMentionEvent
+{
+    Message message;
+    BotMentionEventContext context;
+}
+
+/// Message event fired when a message starts with the configured prefix.
+struct PrefixMessageEvent
+{
+    Message message;
+    string commandName;
+    string rawArguments;
+    bool knownCommand;
+    PrefixMessageEventContext context;
 }
 
 /// Presence update event.

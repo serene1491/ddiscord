@@ -9,6 +9,7 @@ module ddiscord.context.event;
 import ddiscord.cache : CacheStore;
 import ddiscord.context.command : CommandContext, CommandSource, ContextMenuContext,
     HybridContext, PrefixContext, SlashContext;
+import ddiscord.interactions.components : ComponentType;
 import ddiscord.logging : Logger;
 import ddiscord.models.channel : Channel;
 import ddiscord.models.guild : Guild, UnavailableGuild;
@@ -294,9 +295,88 @@ struct MessageComponentEventContext
     EventContext event;
     alias event this;
     Interaction interaction;
+    ComponentType componentType;
     string customId;
     string[] values;
     InteractionSubmittedComponent[] submittedComponents;
+}
+
+/// Button component interaction event context.
+struct ButtonComponentEventContext
+{
+    EventContext event;
+    alias event this;
+    Interaction interaction;
+    string customId;
+}
+
+/// String select component interaction event context.
+struct StringSelectComponentEventContext
+{
+    EventContext event;
+    alias event this;
+    Interaction interaction;
+    string customId;
+    string[] values;
+}
+
+/// User select component interaction event context.
+struct UserSelectComponentEventContext
+{
+    EventContext event;
+    alias event this;
+    Interaction interaction;
+    string customId;
+    string[] values;
+}
+
+/// Role select component interaction event context.
+struct RoleSelectComponentEventContext
+{
+    EventContext event;
+    alias event this;
+    Interaction interaction;
+    string customId;
+    string[] values;
+}
+
+/// Mentionable select component interaction event context.
+struct MentionableSelectComponentEventContext
+{
+    EventContext event;
+    alias event this;
+    Interaction interaction;
+    string customId;
+    string[] values;
+}
+
+/// Channel select component interaction event context.
+struct ChannelSelectComponentEventContext
+{
+    EventContext event;
+    alias event this;
+    Interaction interaction;
+    string customId;
+    string[] values;
+}
+
+/// Event context for messages that mention the current client user.
+struct BotMentionEventContext
+{
+    EventContext event;
+    alias event this;
+    Message message;
+}
+
+/// Event context for messages that begin with the configured prefix.
+struct PrefixMessageEventContext
+{
+    EventContext event;
+    alias event this;
+    Message message;
+    string commandName;
+    string rawArguments;
+    bool knownCommand;
 }
 
 /// Modal-submit interaction event context.

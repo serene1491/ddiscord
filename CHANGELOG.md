@@ -16,6 +16,19 @@ All notable changes to `ddiscord` should be documented in this file.
   (`extractDiscordApiErrorCode`, `hasDiscordApiErrorCode`, and
   `discordApiMessageContains`) with dedicated unit coverage.
 - StringSelect and StringSelectOption builders.
+- New typed component-specialized client events:
+  `ButtonComponentEvent`, `StringSelectComponentEvent`, `UserSelectComponentEvent`,
+  `RoleSelectComponentEvent`, `MentionableSelectComponentEvent`, and
+  `ChannelSelectComponentEvent`.
+- New convenience message events:
+  `BotMentionEvent` (when the client user is mentioned) and
+  `PrefixMessageEvent` (when a message starts with the configured prefix).
+- `@Event` component filtering via UDA parameters:
+  `@Event("custom_id")` and `@Event(componentType: ComponentType....)` for
+  targeted component handlers without manual branching inside callbacks.
+- Interaction REST endpoint overloads that accept `Interaction` directly for
+  `send`, `defer`, `update`, `autocomplete`, `modal`, `followup`, `edit`,
+  and `fetchOriginal`, reducing repetitive `id` + `token` plumbing.
 
 ### Fixed
 
@@ -52,6 +65,9 @@ All notable changes to `ddiscord` should be documented in this file.
   `RestClientConfig`/HTTP runtime, making production stability tuning explicit.
 - Prefix permission resolution now caches guild role snapshots with TTL-based invalidation and
   gateway role/guild event invalidation, reducing repeated REST role fetches under command bursts.
+- Message-component events now expose `componentType` directly on
+  `MessageComponentEvent` and `MessageComponentEventContext`, improving event
+  type precision without losing the generic event path.
 
 ### Refactored
 

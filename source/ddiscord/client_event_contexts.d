@@ -8,16 +8,20 @@ module ddiscord.client_event_contexts;
 
 import ddiscord.context.command : CommandContext;
 import ddiscord.context.event : AutocompleteInteractionEventContext, ChannelCreateEventContext,
-    ChannelDeleteEventContext, ChannelPinsUpdateEventContext, ChannelUpdateEventContext,
+    BotMentionEventContext, ButtonComponentEventContext, ChannelDeleteEventContext,
+    ChannelPinsUpdateEventContext, ChannelSelectComponentEventContext, ChannelUpdateEventContext,
     CommandExecutedEventContext, CommandFailedEventContext, EventContext, GuildCreateEventContext,
     GatewayDispatchEventContext, GuildDeleteEventContext, GuildMemberAddEventContext, GuildMemberRemoveEventContext,
     GuildUpdateEventContext,
     GuildBanAddEventContext, GuildBanRemoveEventContext, GuildRoleCreateEventContext,
     GuildRoleDeleteEventContext, GuildRoleUpdateEventContext, InteractionCreateEventContext,
-    InviteCreateEventContext, InviteDeleteEventContext, MessageComponentEventContext,
+    InviteCreateEventContext, InviteDeleteEventContext, MentionableSelectComponentEventContext,
+    MessageComponentEventContext,
     MessageCreateEventContext, MessageDeleteBulkEventContext, MessageDeleteEventContext, MessageReactionAddEventContext,
     MessageReactionRemoveAllEventContext, MessageReactionRemoveEmojiEventContext,
     MessageReactionRemoveEventContext, MessageUpdateEventContext, ModalSubmitEventContext,
+    PrefixMessageEventContext, RoleSelectComponentEventContext, StringSelectComponentEventContext,
+    UserSelectComponentEventContext,
     PresenceUpdateEventContext, ReadyEventContext, ResumedEventContext, ThreadCreateEventContext,
     ThreadDeleteEventContext, ThreadUpdateEventContext, TypingStartEventContext, UserUpdateEventContext,
     VoiceServerUpdateEventContext, VoiceStateUpdateEventContext, WebhooksUpdateEventContext;
@@ -383,9 +387,124 @@ mixin template ClientEventContextBuilders()
         MessageComponentEventContext ctx;
         ctx.event = buildInteractionCreateEventContext(interaction, channel).event;
         ctx.interaction = interaction;
+        ctx.componentType = interaction.componentType;
         ctx.customId = interaction.customId;
         ctx.values = interaction.values.dup;
         ctx.submittedComponents = interaction.submittedComponents.dup;
+        return ctx;
+    }
+
+    private ButtonComponentEventContext buildButtonComponentEventContext(
+        Interaction interaction,
+        Channel channel
+    )
+    {
+        ButtonComponentEventContext ctx;
+        ctx.event = buildInteractionCreateEventContext(interaction, channel).event;
+        ctx.interaction = interaction;
+        ctx.customId = interaction.customId;
+        return ctx;
+    }
+
+    private StringSelectComponentEventContext buildStringSelectComponentEventContext(
+        Interaction interaction,
+        Channel channel
+    )
+    {
+        StringSelectComponentEventContext ctx;
+        ctx.event = buildInteractionCreateEventContext(interaction, channel).event;
+        ctx.interaction = interaction;
+        ctx.customId = interaction.customId;
+        ctx.values = interaction.values.dup;
+        return ctx;
+    }
+
+    private UserSelectComponentEventContext buildUserSelectComponentEventContext(
+        Interaction interaction,
+        Channel channel
+    )
+    {
+        UserSelectComponentEventContext ctx;
+        ctx.event = buildInteractionCreateEventContext(interaction, channel).event;
+        ctx.interaction = interaction;
+        ctx.customId = interaction.customId;
+        ctx.values = interaction.values.dup;
+        return ctx;
+    }
+
+    private RoleSelectComponentEventContext buildRoleSelectComponentEventContext(
+        Interaction interaction,
+        Channel channel
+    )
+    {
+        RoleSelectComponentEventContext ctx;
+        ctx.event = buildInteractionCreateEventContext(interaction, channel).event;
+        ctx.interaction = interaction;
+        ctx.customId = interaction.customId;
+        ctx.values = interaction.values.dup;
+        return ctx;
+    }
+
+    private MentionableSelectComponentEventContext buildMentionableSelectComponentEventContext(
+        Interaction interaction,
+        Channel channel
+    )
+    {
+        MentionableSelectComponentEventContext ctx;
+        ctx.event = buildInteractionCreateEventContext(interaction, channel).event;
+        ctx.interaction = interaction;
+        ctx.customId = interaction.customId;
+        ctx.values = interaction.values.dup;
+        return ctx;
+    }
+
+    private ChannelSelectComponentEventContext buildChannelSelectComponentEventContext(
+        Interaction interaction,
+        Channel channel
+    )
+    {
+        ChannelSelectComponentEventContext ctx;
+        ctx.event = buildInteractionCreateEventContext(interaction, channel).event;
+        ctx.interaction = interaction;
+        ctx.customId = interaction.customId;
+        ctx.values = interaction.values.dup;
+        return ctx;
+    }
+
+    private BotMentionEventContext buildBotMentionEventContext(Message message, Channel channel)
+    {
+        BotMentionEventContext ctx;
+        ctx.event = buildEventContext(
+            Nullable!User.of(message.author),
+            lookupGuild(message.guildId),
+            message.member,
+            nullableChannel(channel),
+            Nullable!Message.of(message)
+        );
+        ctx.message = message;
+        return ctx;
+    }
+
+    private PrefixMessageEventContext buildPrefixMessageEventContext(
+        Message message,
+        Channel channel,
+        string commandName,
+        string rawArguments,
+        bool knownCommand
+    )
+    {
+        PrefixMessageEventContext ctx;
+        ctx.event = buildEventContext(
+            Nullable!User.of(message.author),
+            lookupGuild(message.guildId),
+            message.member,
+            nullableChannel(channel),
+            Nullable!Message.of(message)
+        );
+        ctx.message = message;
+        ctx.commandName = commandName;
+        ctx.rawArguments = rawArguments;
+        ctx.knownCommand = knownCommand;
         return ctx;
     }
 

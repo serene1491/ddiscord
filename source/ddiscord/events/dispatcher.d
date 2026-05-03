@@ -7,6 +7,7 @@
 module ddiscord.events.dispatcher;
 
 import core.sync.mutex : Mutex;
+import ddiscord.interactions.components : ComponentType;
 import ddiscord.util.errors : formatError;
 import std.algorithm : filter;
 import std.array : array;
@@ -15,6 +16,26 @@ import std.variant : Variant;
 /// Marks a function or method as an event handler for `Client.registerAllCommands!`.
 struct Event
 {
+    /// Optional `custom_id` filter for message-component interactions.
+    string customId;
+    /// Optional component-type filter for message-component interactions.
+    ComponentType componentType = ComponentType.Unknown;
+
+    this(string customId)
+    {
+        this.customId = customId;
+    }
+
+    this(ComponentType componentType)
+    {
+        this.componentType = componentType;
+    }
+
+    this(string customId, ComponentType componentType)
+    {
+        this.customId = customId;
+        this.componentType = componentType;
+    }
 }
 
 private struct HandlerEntry(E)

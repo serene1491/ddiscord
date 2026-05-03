@@ -97,6 +97,12 @@ Non-command interactions are surfaced as dedicated typed events instead of being
 
 - `AutocompleteInteractionEvent`
 - `MessageComponentEvent`
+- `ButtonComponentEvent`
+- `StringSelectComponentEvent`
+- `UserSelectComponentEvent`
+- `RoleSelectComponentEvent`
+- `MentionableSelectComponentEvent`
+- `ChannelSelectComponentEvent`
 - `ModalSubmitEvent`
 
 Example:
@@ -112,9 +118,26 @@ client.on!ModalSubmitEvent((event) {
 ```
 
 For dropdown/select interactions, `MessageComponentEventContext` now mirrors:
+- `componentType`
 - `customId`
 - `values` (selected option values)
 - `submittedComponents` (raw submitted component entries when present)
+
+You can also filter component handlers directly in `@Event` using `custom_id` and/or component type:
+
+```d
+@Event("bothelp:helpuser")
+void onSpecificButton(MessageComponentEventContext ctx)
+{
+    // runs only for this custom_id
+}
+
+@Event(componentType: ComponentType.Button)
+void onAnyButton(ButtonComponentEventContext ctx)
+{
+    // runs for button interactions only
+}
+```
 
 ## Autocomplete
 

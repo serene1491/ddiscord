@@ -2654,6 +2654,12 @@ final class InteractionsEndpoints
         return AsyncTask!void.success();
     }
 
+    /// Sends the initial interaction response from an interaction object.
+    AsyncTask!void send(Interaction interaction, MessageCreate payload)
+    {
+        return send(interaction.id, interaction.token, payload);
+    }
+
     /// Sends autocomplete choices for an interaction.
     AsyncTask!void autocomplete(
         Snowflake interactionId,
@@ -2669,6 +2675,12 @@ final class InteractionsEndpoints
             return AsyncTask!void.failure(sent.error);
 
         return AsyncTask!void.success();
+    }
+
+    /// Sends autocomplete choices from an interaction object.
+    AsyncTask!void autocomplete(Interaction interaction, AutocompleteChoice[] choices)
+    {
+        return autocomplete(interaction.id, interaction.token, choices);
     }
 
     /// Responds to an interaction by opening a modal.
@@ -2689,6 +2701,12 @@ final class InteractionsEndpoints
             return AsyncTask!void.failure(sent.error);
 
         return AsyncTask!void.success();
+    }
+
+    /// Responds to an interaction object by opening a modal.
+    AsyncTask!void modal(Interaction interaction, Modal modalPayload)
+    {
+        return modal(interaction.id, interaction.token, modalPayload);
     }
 
     /// Sends a deferred interaction acknowledgement.
@@ -2713,6 +2731,12 @@ final class InteractionsEndpoints
         return AsyncTask!void.success();
     }
 
+    /// Sends a deferred acknowledgement from an interaction object.
+    AsyncTask!void defer(Interaction interaction, bool ephemeral = false)
+    {
+        return defer(interaction.id, interaction.token, ephemeral);
+    }
+
     /// Updates the source message for a component interaction.
     AsyncTask!void update(Snowflake interactionId, string interactionToken, MessageCreate payload)
     {
@@ -2731,6 +2755,12 @@ final class InteractionsEndpoints
         return AsyncTask!void.success();
     }
 
+    /// Updates the source message from an interaction object.
+    AsyncTask!void update(Interaction interaction, MessageCreate payload)
+    {
+        return update(interaction.id, interaction.token, payload);
+    }
+
     /// Sends a follow-up message after the initial interaction acknowledgement.
     AsyncTask!Message followup(string interactionToken, MessageCreate payload)
     {
@@ -2745,6 +2775,12 @@ final class InteractionsEndpoints
         return AsyncTask!Message.success(created.value);
     }
 
+    /// Sends a follow-up message from an interaction object.
+    AsyncTask!Message followup(Interaction interaction, MessageCreate payload)
+    {
+        return followup(interaction.token, payload);
+    }
+
     /// Edits the original interaction response.
     AsyncTask!Message edit(string interactionToken, MessageCreate payload)
     {
@@ -2757,6 +2793,12 @@ final class InteractionsEndpoints
 
         _history.store(edited.value);
         return AsyncTask!Message.success(edited.value);
+    }
+
+    /// Edits the original response from an interaction object.
+    AsyncTask!Message edit(Interaction interaction, MessageCreate payload)
+    {
+        return edit(interaction.token, payload);
     }
 
     /// Fetches the original interaction response message.
@@ -2778,6 +2820,12 @@ final class InteractionsEndpoints
 
         _history.store(fetched.value);
         return AsyncTask!Message.success(fetched.value);
+    }
+
+    /// Fetches the original response from an interaction object.
+    AsyncTask!Message fetchOriginal(Interaction interaction)
+    {
+        return fetchOriginal(interaction.token);
     }
 
     private bool isInteractionAlreadyAcknowledgedError(string error) const
@@ -3311,6 +3359,34 @@ unittest
     auto body = cast(string) captured.body;
     assert(body.canFind(`"type":7`));
     assert(body.canFind(`"content":"updated"`));
+}
+
+unittest
+{
+    HttpRequest captured;
+    HttpTransport transport = (request) {
+        captured = request;
+        HttpResponse response;
+        response.statusCode = 204;
+        return Result!(HttpResponse, HttpError).ok(response);
+    };
+
+    RestClientConfig config;
+    config.token = "token";
+    config.applicationId = Nullable!Snowflake.of(Snowflake(42));
+    config.transport = Nullable!HttpTransport.of(transport);
+
+    auto rest = new RestClient(config);
+    Interaction interaction;
+    interaction.id = Snowflake(77);
+    interaction.token = "shortcut-token";
+
+    auto sent = rest.interactions.send(interaction, MessageCreate("shortcut")).awaitResult();
+    assert(sent.isOk);
+    assert(captured.url.canFind("/interactions/77/shortcut-token/callback"));
+    auto body = cast(string) captured.body;
+    assert(body.canFind(`"type":4`));
+    assert(body.canFind(`"content":"shortcut"`));
 }
 
 unittest

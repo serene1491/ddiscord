@@ -23,7 +23,7 @@ import ddiscord.client_queue : DispatchQueuePushOutcome, compactQueue, pushBound
 import ddiscord.client_runtime : UptimeSample, snowflakeLatencyMilliseconds;
 import ddiscord.client_support.runtime_types : DispatchItem, GatewayAutoReshardWatchdogLabel,
     GatewayReadyWatchdogLabel, ShardRuntime;
-import ddiscord.client_text : attemptedPrefixCommandName;
+import ddiscord.client_text : attemptedPrefixCommandName, parsePrefixInvocation;
 import ddiscord.client_support.types : HelpRequest, RegistrationCandidate;
 import ddiscord.commands : Command, CommandCategory, CommandDescriptor, CommandExecution,
     CommandExecutionSettings, CommandMiddleware, CommandOptionDescriptor, CommandRegistry,
@@ -33,31 +33,40 @@ import ddiscord.commands : Command, CommandCategory, CommandDescriptor, CommandE
 import ddiscord.context.command : CommandContext, CommandSource, ContextMenuContext, HybridContext,
     SlashContext;
 import ddiscord.context.event : AutocompleteInteractionEventContext, CommandExecutedEventContext,
-    ChannelCreateEventContext, ChannelDeleteEventContext, ChannelPinsUpdateEventContext,
+    BotMentionEventContext, ButtonComponentEventContext, ChannelCreateEventContext,
+    ChannelDeleteEventContext, ChannelPinsUpdateEventContext, ChannelSelectComponentEventContext,
     ChannelUpdateEventContext, CommandFailedEventContext, EventContext, GuildCreateEventContext,
     GatewayDispatchEventContext, GuildDeleteEventContext, GuildMemberAddEventContext, GuildMemberRemoveEventContext,
     GuildUpdateEventContext,
     GuildBanAddEventContext, GuildBanRemoveEventContext, GuildRoleCreateEventContext,
     GuildRoleDeleteEventContext, GuildRoleUpdateEventContext, InteractionCreateEventContext,
-    InviteCreateEventContext, InviteDeleteEventContext, MessageComponentEventContext,
+    InviteCreateEventContext, InviteDeleteEventContext, MentionableSelectComponentEventContext,
+    MessageComponentEventContext,
     MessageCreateEventContext, MessageDeleteBulkEventContext, MessageDeleteEventContext, MessageReactionAddEventContext,
     MessageReactionRemoveAllEventContext, MessageReactionRemoveEmojiEventContext,
     MessageReactionRemoveEventContext, MessageUpdateEventContext, ModalSubmitEventContext,
+    PrefixMessageEventContext, RoleSelectComponentEventContext, StringSelectComponentEventContext,
+    UserSelectComponentEventContext,
     PresenceUpdateEventContext, ReadyEventContext, ResumedEventContext, UserUpdateEventContext,
     ThreadCreateEventContext, ThreadDeleteEventContext, ThreadUpdateEventContext,
     TypingStartEventContext, VoiceServerUpdateEventContext, VoiceStateUpdateEventContext,
     WebhooksUpdateEventContext;
 import ddiscord.events.dispatcher : Event, EventDispatcher;
 import ddiscord.events.types : AutocompleteInteractionEvent, CommandExecutedEvent,
+    BotMentionEvent, ButtonComponentEvent, ChannelSelectComponentEvent,
     ChannelCreateEvent, ChannelDeleteEvent, ChannelPinsUpdateEvent, ChannelUpdateEvent,
     CommandFailedEvent, GatewayDispatchEvent, GuildCreateEvent, GuildDeleteEvent, GuildMemberAddEvent,
     GuildMemberRemoveEvent, GuildBanAddEvent, GuildBanRemoveEvent, GuildRoleCreateEvent,
     GuildRoleDeleteEvent, GuildRoleUpdateEvent, GuildUpdateEvent, InteractionCreateEvent, InviteCreateEvent,
-    InviteDeleteEvent, MessageComponentEvent, MessageCreateEvent, MessageDeleteBulkEvent, MessageDeleteEvent,
+    InviteDeleteEvent, MentionableSelectComponentEvent, MessageComponentEvent, MessageCreateEvent,
+    MessageDeleteBulkEvent, MessageDeleteEvent,
+    PrefixMessageEvent, RoleSelectComponentEvent,
+    StringSelectComponentEvent, UserSelectComponentEvent,
     MessageReactionAddEvent, MessageReactionRemoveAllEvent, MessageReactionRemoveEmojiEvent,
     MessageReactionRemoveEvent, MessageUpdateEvent, ModalSubmitEvent, PresenceUpdateEvent,
     ReadyEvent, ResumedEvent, ThreadCreateEvent, ThreadDeleteEvent, ThreadUpdateEvent,
     TypingStartEvent, UserUpdateEvent, VoiceServerUpdateEvent, VoiceStateUpdateEvent, WebhooksUpdateEvent;
+import ddiscord.interactions.components : ComponentType;
 import ddiscord.gateway.client : GatewayClient, GatewayClientConfig, GatewayGuildMemberAddInfo,
     GatewayGuildMemberRemoveInfo, GatewayGuildBanInfo, GatewayGuildRoleDeleteInfo,
     GatewayGuildRoleInfo, GatewayInviteInfo, GatewayMessageCreateEvent,
@@ -713,6 +722,47 @@ final class Client
         event.context = buildMessageCreateEventContext(message, channel);
         emit!MessageCreateEvent(event);
 
+        if (_selfUser.id.value != 0)
+        {
+            bool mentionedSelf;
+            foreach (mentionedUser; message.mentions)
+            {
+                if (mentionedUser.id == _selfUser.id)
+                {
+                    mentionedSelf = true;
+                    break;
+                }
+            }
+
+            if (mentionedSelf)
+            {
+                BotMentionEvent mentionEvent;
+                mentionEvent.message = message;
+                mentionEvent.context = buildBotMentionEventContext(message, channel);
+                emit!BotMentionEvent(mentionEvent);
+            }
+        }
+
+        if (message.content.startsWith(config.prefix))
+        {
+            auto prefixInvocation = parsePrefixInvocation(config.prefix, message.content);
+            PrefixMessageEvent prefixEvent;
+            prefixEvent.message = message;
+            prefixEvent.commandName = prefixInvocation.name;
+            prefixEvent.rawArguments = prefixInvocation.args;
+            prefixEvent.knownCommand =
+                prefixEvent.commandName.length != 0 &&
+                !commands.find(prefixEvent.commandName, CommandRoute.Prefix).isNull;
+            prefixEvent.context = buildPrefixMessageEventContext(
+                message,
+                channel,
+                prefixEvent.commandName,
+                prefixEvent.rawArguments,
+                prefixEvent.knownCommand
+            );
+            emit!PrefixMessageEvent(prefixEvent);
+        }
+
         if (!message.content.startsWith(config.prefix))
         {
             CommandExecution execution;
@@ -888,8 +938,52 @@ final class Client
         {
             MessageComponentEvent componentEvent;
             componentEvent.interaction = interaction;
+            componentEvent.componentType = interaction.componentType;
             componentEvent.context = buildMessageComponentEventContext(interaction, channel);
             emit!MessageComponentEvent(componentEvent);
+
+            switch (interaction.componentType)
+            {
+            case ComponentType.Button:
+                ButtonComponentEvent buttonEvent;
+                buttonEvent.interaction = interaction;
+                buttonEvent.context = buildButtonComponentEventContext(interaction, channel);
+                emit!ButtonComponentEvent(buttonEvent);
+                break;
+            case ComponentType.StringSelect:
+                StringSelectComponentEvent stringSelectEvent;
+                stringSelectEvent.interaction = interaction;
+                stringSelectEvent.context = buildStringSelectComponentEventContext(interaction, channel);
+                emit!StringSelectComponentEvent(stringSelectEvent);
+                break;
+            case ComponentType.UserSelect:
+                UserSelectComponentEvent userSelectEvent;
+                userSelectEvent.interaction = interaction;
+                userSelectEvent.context = buildUserSelectComponentEventContext(interaction, channel);
+                emit!UserSelectComponentEvent(userSelectEvent);
+                break;
+            case ComponentType.RoleSelect:
+                RoleSelectComponentEvent roleSelectEvent;
+                roleSelectEvent.interaction = interaction;
+                roleSelectEvent.context = buildRoleSelectComponentEventContext(interaction, channel);
+                emit!RoleSelectComponentEvent(roleSelectEvent);
+                break;
+            case ComponentType.MentionableSelect:
+                MentionableSelectComponentEvent mentionableSelectEvent;
+                mentionableSelectEvent.interaction = interaction;
+                mentionableSelectEvent.context = buildMentionableSelectComponentEventContext(interaction, channel);
+                emit!MentionableSelectComponentEvent(mentionableSelectEvent);
+                break;
+            case ComponentType.ChannelSelect:
+                ChannelSelectComponentEvent channelSelectEvent;
+                channelSelectEvent.interaction = interaction;
+                channelSelectEvent.context = buildChannelSelectComponentEventContext(interaction, channel);
+                emit!ChannelSelectComponentEvent(channelSelectEvent);
+                break;
+            default:
+                break;
+            }
+
             CommandExecution ignored;
             return Result!(CommandExecution, string).ok(ignored);
         }
@@ -1097,7 +1191,17 @@ final class Client
     private void registerFreeEvent(alias handler)()
     {
         alias Subscription = EventSubscriptionType!handler;
+        enum spec = eventSpec!handler();
+        static if (!eventFilterSupported!(Subscription, spec))
+        {
+            static assert(
+                false,
+                "@Event filters (`customId`/`componentType`) are only supported for message-component events."
+            );
+        }
         events.on!Subscription((event) {
+            if (!eventMatchesSpec(event, spec))
+                return;
             invokeFreeEvent!handler(event);
         });
     }
@@ -1114,7 +1218,17 @@ final class Client
     {
         mixin("alias memberSymbol = T." ~ memberName ~ ";");
         alias Subscription = EventSubscriptionType!memberSymbol;
+        enum spec = eventSpec!memberSymbol();
+        static if (!eventFilterSupported!(Subscription, spec))
+        {
+            static assert(
+                false,
+                "@Event filters (`customId`/`componentType`) are only supported for message-component events."
+            );
+        }
         events.on!Subscription((event) {
+            if (!eventMatchesSpec(event, spec))
+                return;
             auto instance = services.get!T();
             invokeStatefulEvent!(T, memberSymbol)(instance, event);
         });
@@ -3258,9 +3372,17 @@ private template isEventContextType(T)
         is(T == MessageReactionRemoveEventContext) ||
         is(T == MessageReactionRemoveAllEventContext) ||
         is(T == MessageReactionRemoveEmojiEventContext) ||
+        is(T == BotMentionEventContext) ||
+        is(T == PrefixMessageEventContext) ||
         is(T == InteractionCreateEventContext) ||
         is(T == AutocompleteInteractionEventContext) ||
         is(T == MessageComponentEventContext) ||
+        is(T == ButtonComponentEventContext) ||
+        is(T == StringSelectComponentEventContext) ||
+        is(T == UserSelectComponentEventContext) ||
+        is(T == RoleSelectComponentEventContext) ||
+        is(T == MentionableSelectComponentEventContext) ||
+        is(T == ChannelSelectComponentEventContext) ||
         is(T == ModalSubmitEventContext) ||
         is(T == PresenceUpdateEventContext) ||
         is(T == TypingStartEventContext) ||
@@ -3317,12 +3439,28 @@ private template EventTypeOfContext(T)
         alias EventTypeOfContext = MessageReactionRemoveAllEvent;
     else static if (is(T == MessageReactionRemoveEmojiEventContext))
         alias EventTypeOfContext = MessageReactionRemoveEmojiEvent;
+    else static if (is(T == BotMentionEventContext))
+        alias EventTypeOfContext = BotMentionEvent;
+    else static if (is(T == PrefixMessageEventContext))
+        alias EventTypeOfContext = PrefixMessageEvent;
     else static if (is(T == InteractionCreateEventContext))
         alias EventTypeOfContext = InteractionCreateEvent;
     else static if (is(T == AutocompleteInteractionEventContext))
         alias EventTypeOfContext = AutocompleteInteractionEvent;
     else static if (is(T == MessageComponentEventContext))
         alias EventTypeOfContext = MessageComponentEvent;
+    else static if (is(T == ButtonComponentEventContext))
+        alias EventTypeOfContext = ButtonComponentEvent;
+    else static if (is(T == StringSelectComponentEventContext))
+        alias EventTypeOfContext = StringSelectComponentEvent;
+    else static if (is(T == UserSelectComponentEventContext))
+        alias EventTypeOfContext = UserSelectComponentEvent;
+    else static if (is(T == RoleSelectComponentEventContext))
+        alias EventTypeOfContext = RoleSelectComponentEvent;
+    else static if (is(T == MentionableSelectComponentEventContext))
+        alias EventTypeOfContext = MentionableSelectComponentEvent;
+    else static if (is(T == ChannelSelectComponentEventContext))
+        alias EventTypeOfContext = ChannelSelectComponentEvent;
     else static if (is(T == ModalSubmitEventContext))
         alias EventTypeOfContext = ModalSubmitEvent;
     else static if (is(T == PresenceUpdateEventContext))
@@ -3410,6 +3548,102 @@ private Task taskSpec(alias fn)()
     return spec;
 }
 
+private Event eventSpec(alias fn)()
+{
+    Event spec;
+
+    static foreach (attr; __traits(getAttributes, fn))
+    {
+        static if (is(typeof(attr) == Event))
+        {
+            spec = attr;
+        }
+        else static if (is(attr == Event))
+        {
+            spec = Event.init;
+        }
+    }
+
+    return spec;
+}
+
+private template isComponentEventType(E)
+{
+    enum bool isComponentEventType =
+        is(E == MessageComponentEvent) ||
+        is(E == ButtonComponentEvent) ||
+        is(E == StringSelectComponentEvent) ||
+        is(E == UserSelectComponentEvent) ||
+        is(E == RoleSelectComponentEvent) ||
+        is(E == MentionableSelectComponentEvent) ||
+        is(E == ChannelSelectComponentEvent);
+}
+
+private template eventFilterSupported(E, Event spec)
+{
+    enum bool hasComponentFilter = spec.customId.length != 0 || spec.componentType != ComponentType.Unknown;
+    enum bool eventFilterSupported = !hasComponentFilter || isComponentEventType!E;
+}
+
+private bool eventMatchesSpec(E)(E event, Event spec)
+{
+    if (spec.customId.length == 0 && spec.componentType == ComponentType.Unknown)
+        return true;
+
+    static if (!isComponentEventType!E)
+    {
+        return true;
+    }
+    else
+    {
+        if (spec.customId.length != 0 && componentEventCustomId(event) != spec.customId)
+            return false;
+        if (spec.componentType != ComponentType.Unknown && componentEventType(event) != spec.componentType)
+            return false;
+        return true;
+    }
+}
+
+private string componentEventCustomId(E)(E event)
+{
+    static if (is(E == MessageComponentEvent))
+        return event.context.customId;
+    else static if (is(E == ButtonComponentEvent))
+        return event.context.customId;
+    else static if (is(E == StringSelectComponentEvent))
+        return event.context.customId;
+    else static if (is(E == UserSelectComponentEvent))
+        return event.context.customId;
+    else static if (is(E == RoleSelectComponentEvent))
+        return event.context.customId;
+    else static if (is(E == MentionableSelectComponentEvent))
+        return event.context.customId;
+    else static if (is(E == ChannelSelectComponentEvent))
+        return event.context.customId;
+    else
+        return "";
+}
+
+private ComponentType componentEventType(E)(E event)
+{
+    static if (is(E == MessageComponentEvent))
+        return event.componentType;
+    else static if (is(E == ButtonComponentEvent))
+        return ComponentType.Button;
+    else static if (is(E == StringSelectComponentEvent))
+        return ComponentType.StringSelect;
+    else static if (is(E == UserSelectComponentEvent))
+        return ComponentType.UserSelect;
+    else static if (is(E == RoleSelectComponentEvent))
+        return ComponentType.RoleSelect;
+    else static if (is(E == MentionableSelectComponentEvent))
+        return ComponentType.MentionableSelect;
+    else static if (is(E == ChannelSelectComponentEvent))
+        return ComponentType.ChannelSelect;
+    else
+        return ComponentType.Unknown;
+}
+
 private template hasEventAttrImpl(attrs...)
 {
     static if (attrs.length == 0)
@@ -3490,11 +3724,27 @@ private void invokeFreeEvent(alias handler, E)(E event)
             handler(event.context);
         else static if (is(E == MessageReactionRemoveEmojiEvent))
             handler(event.context);
+        else static if (is(E == BotMentionEvent))
+            handler(event.context);
+        else static if (is(E == PrefixMessageEvent))
+            handler(event.context);
         else static if (is(E == InteractionCreateEvent))
             handler(event.context);
         else static if (is(E == AutocompleteInteractionEvent))
             handler(event.context);
         else static if (is(E == MessageComponentEvent))
+            handler(event.context);
+        else static if (is(E == ButtonComponentEvent))
+            handler(event.context);
+        else static if (is(E == StringSelectComponentEvent))
+            handler(event.context);
+        else static if (is(E == UserSelectComponentEvent))
+            handler(event.context);
+        else static if (is(E == RoleSelectComponentEvent))
+            handler(event.context);
+        else static if (is(E == MentionableSelectComponentEvent))
+            handler(event.context);
+        else static if (is(E == ChannelSelectComponentEvent))
             handler(event.context);
         else static if (is(E == ModalSubmitEvent))
             handler(event.context);
@@ -3727,6 +3977,11 @@ void clientUnittestSecurePing(CommandContext ctx)
 }
 
 private bool clientUnittestMessageEventSeen;
+private bool clientUnittestMentionEventSeen;
+private bool clientUnittestPrefixEventSeen;
+private bool clientUnittestFilteredComponentSeen;
+private bool clientUnittestWrongFilteredComponentSeen;
+private ComponentType clientUnittestFilteredComponentType = ComponentType.Unknown;
 
 private @Event
 void clientUnittestOnMessage(MessageCreateEventContext ctx)
@@ -3737,6 +3992,32 @@ void clientUnittestOnMessage(MessageCreateEventContext ctx)
 }
 
 static assert(hasEventAttr!clientUnittestOnMessage);
+
+private @Event
+void clientUnittestOnBotMention(BotMentionEventContext ctx)
+{
+    clientUnittestMentionEventSeen = ctx.message.content == "hello <@999>";
+}
+
+private @Event
+void clientUnittestOnPrefixedMessage(PrefixMessageEventContext ctx)
+{
+    clientUnittestPrefixEventSeen = ctx.commandName == "ping" && ctx.rawArguments == "arg1 arg2";
+}
+
+private @Event("bothelp:helpuser")
+void clientUnittestFilteredComponent(MessageComponentEventContext ctx)
+{
+    clientUnittestFilteredComponentSeen = true;
+    clientUnittestFilteredComponentType = ctx.componentType;
+}
+
+private @Event("other:id")
+void clientUnittestWrongFilteredComponent(MessageComponentEventContext ctx)
+{
+    auto _ = ctx;
+    clientUnittestWrongFilteredComponentSeen = true;
+}
 
 private struct ClientUnittestEventGroup
 {
@@ -4082,8 +4363,52 @@ unittest
 
 unittest
 {
+    clientUnittestMentionEventSeen = false;
+
+    auto client = new Client(ClientConfig("token", cast(uint) GatewayIntent.Guilds));
+    client._selfUser.id = Snowflake(999);
+    client.registerAllCommands!clientUnittestOnBotMention();
+
+    Message message;
+    message.channelId = Snowflake(10);
+    message.content = "hello <@999>";
+    message.author.id = Snowflake(22);
+    message.author.username = "alice";
+    User mentioned;
+    mentioned.id = Snowflake(999);
+    mentioned.username = "ddiscord";
+    message.mentions = [mentioned];
+
+    auto result = client.receiveMessage(message);
+    assert(result.isOk);
+    assert(clientUnittestMentionEventSeen);
+}
+
+unittest
+{
+    clientUnittestPrefixEventSeen = false;
+
+    auto client = new Client(ClientConfig("token", cast(uint) GatewayIntent.Guilds));
+    client.registerCommands!clientUnittestPing();
+    client.registerAllCommands!clientUnittestOnPrefixedMessage();
+
+    Message message;
+    message.channelId = Snowflake(10);
+    message.content = "!ping arg1 arg2";
+    message.author.id = Snowflake(22);
+    message.author.username = "alice";
+
+    auto result = client.receiveMessage(message);
+    assert(result.isErr);
+    assert(clientUnittestPrefixEventSeen);
+}
+
+unittest
+{
     auto client = new Client(ClientConfig("token", cast(uint) GatewayIntent.Guilds));
     bool sawComponent;
+    bool sawButton;
+    bool sawStringSelect;
     string[] selectedValues;
     string customId;
     string[] submittedValues;
@@ -4095,10 +4420,17 @@ unittest
         if (event.context.submittedComponents.length != 0)
             submittedValues = event.context.submittedComponents[0].values.dup;
     });
+    client.on!ButtonComponentEvent((_event) {
+        sawButton = true;
+    });
+    client.on!StringSelectComponentEvent((_event) {
+        sawStringSelect = true;
+    });
 
     Interaction interaction;
     interaction.id = Snowflake(88);
     interaction.type = InteractionType.MessageComponent;
+    interaction.componentType = ComponentType.Button;
     interaction.token = "component-token";
     interaction.customId = "favorite_bug";
     interaction.values = ["ant", "moth"];
@@ -4110,9 +4442,34 @@ unittest
     auto result = client.receiveInteraction(interaction);
     assert(result.isOk);
     assert(sawComponent);
+    assert(sawButton);
+    assert(!sawStringSelect);
     assert(customId == "favorite_bug");
     assert(selectedValues == ["ant", "moth"]);
     assert(submittedValues == ["ant", "moth"]);
+}
+
+unittest
+{
+    clientUnittestFilteredComponentSeen = false;
+    clientUnittestWrongFilteredComponentSeen = false;
+    clientUnittestFilteredComponentType = ComponentType.Unknown;
+
+    auto client = new Client(ClientConfig("token", cast(uint) GatewayIntent.Guilds));
+    client.registerAllCommands!(clientUnittestFilteredComponent, clientUnittestWrongFilteredComponent);
+
+    Interaction interaction;
+    interaction.id = Snowflake(99);
+    interaction.type = InteractionType.MessageComponent;
+    interaction.componentType = ComponentType.Button;
+    interaction.token = "component-token";
+    interaction.customId = "bothelp:helpuser";
+
+    auto result = client.receiveInteraction(interaction);
+    assert(result.isOk);
+    assert(clientUnittestFilteredComponentSeen);
+    assert(!clientUnittestWrongFilteredComponentSeen);
+    assert(clientUnittestFilteredComponentType == ComponentType.Button);
 }
 
 unittest
