@@ -50,6 +50,8 @@ All notable changes to `ddiscord` should be documented in this file.
 - `ClientConfig` now exposes REST transport tuning knobs (`restTimeout`, `httpSessionPoolSize`,
   `httpMaxSessionIdle`, retry toggles/caps, and retry backoff delays) and forwards them to
   `RestClientConfig`/HTTP runtime, making production stability tuning explicit.
+- Prefix permission resolution now caches guild role snapshots with TTL-based invalidation and
+  gateway role/guild event invalidation, reducing repeated REST role fetches under command bursts.
 
 ### Refactored
 

@@ -53,6 +53,9 @@ struct ClientConfig
     size_t maxDispatchQueueSize = DefaultMaxDispatchQueueSize;
     bool dropOldestDispatchOnOverflow = true;
     size_t dispatchOverflowLogEvery = DefaultDispatchOverflowLogEvery;
+    /// TTL for cached guild role snapshots used by prefix permission resolution.
+    /// Set `Duration.zero` to disable this cache.
+    Duration prefixPermissionRoleCacheTtl = dur!"minutes"(5);
 }
 
 /// Runtime filter used by automatic module-level registration helpers.

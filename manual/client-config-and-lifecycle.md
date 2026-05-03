@@ -38,6 +38,7 @@ The most important `ClientConfig` fields are:
 - `maxDispatchQueueSize`: upper bound for pending gateway dispatch work (default `4096`, `0` = unbounded)
 - `dropOldestDispatchOnOverflow`: when queue pressure is high, keep latest events by dropping oldest pending items (`true` by default)
 - `dispatchOverflowLogEvery`: overflow warning cadence (`100` by default, `0` disables warning logs)
+- `prefixPermissionRoleCacheTtl`: TTL for cached guild role snapshots used by prefix permission resolution (`5m` by default, `0` disables cache)
 
 Common intent presets:
 

@@ -100,6 +100,7 @@ import ddiscord.util.snowflake : Snowflake;
 import std.algorithm : canFind, sort;
 import std.ascii : toLower;
 import std.conv : ConvException, to;
+import std.datetime : Clock;
 import std.json : JSONValue;
 import std.string : startsWith, strip;
 import std.traits : Parameters, fullyQualifiedName, isCallable;
@@ -143,6 +144,9 @@ final class Client
     private size_t _peakDispatchQueueDepth;
     private ulong _droppedDispatchItems;
     private ulong _lastDispatchOverflowReportedTotal;
+    private Mutex _permissionCacheMutex;
+    private Role[][ulong] _guildRoleSnapshots;
+    private long[ulong] _guildRoleSnapshotsFetchedAtStdTime;
 
     this(ClientConfig config)
     {
@@ -179,6 +183,7 @@ final class Client
         _dispatchAvailable = new Condition(_dispatchMutex);
         _shutdownJoinMutex = new Mutex;
         _shutdownJoinAvailable = new Condition(_shutdownJoinMutex);
+        _permissionCacheMutex = new Mutex;
 
         services.add!Client(this);
         services.add!ServiceContainer(services);
@@ -1443,6 +1448,8 @@ final class Client
         });
         gateway.on!UnavailableGuild((UnavailableGuild guild) {
             if (!guild.unavailable && guild.id.value != 0)
+                invalidateGuildRoleSnapshot(guild.id);
+            if (!guild.unavailable && guild.id.value != 0)
                 cache.evictGuild(guild.id);
 
             GuildDeleteEvent event;
@@ -1605,6 +1612,7 @@ final class Client
         gateway.onGuildRoleCreate = (GatewayGuildRoleInfo info) {
             if (info.role.id.value != 0)
                 cache.store(info.role);
+            invalidateGuildRoleSnapshot(info.guildId);
 
             GuildRoleCreateEvent event;
             event.guildId = info.guildId;
@@ -1615,6 +1623,7 @@ final class Client
         gateway.onGuildRoleUpdate = (GatewayGuildRoleInfo info) {
             if (info.role.id.value != 0)
                 cache.store(info.role);
+            invalidateGuildRoleSnapshot(info.guildId);
 
             GuildRoleUpdateEvent event;
             event.guildId = info.guildId;
@@ -1625,6 +1634,7 @@ final class Client
         gateway.onGuildRoleDelete = (GatewayGuildRoleDeleteInfo info) {
             if (info.roleId.value != 0)
                 cache.evictRole(info.roleId);
+            invalidateGuildRoleSnapshot(info.guildId);
 
             GuildRoleDeleteEvent event;
             event.guildId = info.guildId;
@@ -2674,15 +2684,71 @@ final class Client
             cache.store(resolvedChannel);
         }
 
+        auto roles = rolesForPermissionResolution(guildId);
+        if (roles.isErr)
+            return Result!(ulong, string).err(roles.error);
+
+        auto permissions = computeEffectivePermissions(member, guild, resolvedChannel, roles.value);
+        return Result!(ulong, string).ok(permissions);
+    }
+
+    private Result!(Role[], string) rolesForPermissionResolution(Snowflake guildId)
+    {
+        auto cached = cachedGuildRoles(guildId);
+        if (!cached.isNull)
+            return Result!(Role[], string).ok(cached.get.dup);
+
         auto fetchedRoles = rest.guilds.roles(guildId).awaitResult();
         if (fetchedRoles.isErr)
-            return Result!(ulong, string).err(fetchedRoles.error);
+            return Result!(Role[], string).err(fetchedRoles.error);
 
         foreach (role; fetchedRoles.value)
             cache.store(role);
+        cacheGuildRoles(guildId, fetchedRoles.value);
+        return Result!(Role[], string).ok(fetchedRoles.value.dup);
+    }
 
-        auto permissions = computeEffectivePermissions(member, guild, resolvedChannel, fetchedRoles.value);
-        return Result!(ulong, string).ok(permissions);
+    private Nullable!(Role[]) cachedGuildRoles(Snowflake guildId)
+    {
+        if (config.prefixPermissionRoleCacheTtl <= Duration.zero)
+            return Nullable!(Role[]).init;
+
+        synchronized (_permissionCacheMutex)
+        {
+            auto fetchedAt = guildId.value in _guildRoleSnapshotsFetchedAtStdTime;
+            auto roles = guildId.value in _guildRoleSnapshots;
+            if (fetchedAt is null || roles is null)
+                return Nullable!(Role[]).init;
+
+            auto elapsedStdTime = Clock.currTime.stdTime - *fetchedAt;
+            enum HnsecsPerMillisecond = 10_000L;
+            auto elapsedMs = elapsedStdTime <= 0 ? 0 : elapsedStdTime / HnsecsPerMillisecond;
+            if (elapsedMs >= config.prefixPermissionRoleCacheTtl.total!"msecs")
+                return Nullable!(Role[]).init;
+
+            return Nullable!(Role[]).of((*roles).dup);
+        }
+    }
+
+    private void cacheGuildRoles(Snowflake guildId, Role[] roles)
+    {
+        if (config.prefixPermissionRoleCacheTtl <= Duration.zero)
+            return;
+
+        synchronized (_permissionCacheMutex)
+        {
+            _guildRoleSnapshots[guildId.value] = roles.dup;
+            _guildRoleSnapshotsFetchedAtStdTime[guildId.value] = Clock.currTime.stdTime;
+        }
+    }
+
+    private void invalidateGuildRoleSnapshot(Snowflake guildId)
+    {
+        synchronized (_permissionCacheMutex)
+        {
+            _guildRoleSnapshots.remove(guildId.value);
+            _guildRoleSnapshotsFetchedAtStdTime.remove(guildId.value);
+        }
     }
 
     private bool shouldSurfacePrefixFailure(string error, string commandName, CommandContext ctx)
@@ -4422,6 +4488,83 @@ unittest
     assert(health.queued == 2);
     assert(health.peakQueued == 2);
     assert(health.droppedTotal == 1);
+}
+
+unittest
+{
+    import ddiscord.models.role : Permissions;
+    import ddiscord.util.optional : Nullable;
+
+    uint rolesRequests;
+    HttpTransport transport = (HttpRequest request) {
+        HttpResponse response;
+        response.statusCode = 200;
+
+        if (request.url.canFind("/guilds/77/roles"))
+        {
+            rolesRequests++;
+            response.body = cast(ubyte[]) `[
+                {"id":"77","name":"@everyone","permissions":"1024"},
+                {"id":"88","name":"writer","permissions":"2048"}
+            ]`.dup;
+            return Result!(HttpResponse, HttpError).ok(response);
+        }
+
+        if (request.url.canFind("/channels/55"))
+        {
+            response.body = cast(ubyte[]) `{
+                "id":"55",
+                "name":"general",
+                "type":0,
+                "guild_id":"77",
+                "permission_overwrites":[]
+            }`.dup;
+            return Result!(HttpResponse, HttpError).ok(response);
+        }
+
+        if (request.url.canFind("/guilds/77"))
+        {
+            response.body = cast(ubyte[]) `{"id":"77","name":"home","owner_id":"999"}`.dup;
+            return Result!(HttpResponse, HttpError).ok(response);
+        }
+
+        response.body = cast(ubyte[]) `{"id":"1","username":"ok-bot","bot":true}`.dup;
+        return Result!(HttpResponse, HttpError).ok(response);
+    };
+
+    auto client = new Client(ClientConfig(
+        "token",
+        cast(uint) GatewayIntent.Guilds,
+        transport: Nullable!HttpTransport.of(transport)
+    ));
+    client.config.prefixPermissionRoleCacheTtl = dur!"minutes"(5);
+
+    Message message;
+    message.id = Snowflake(900);
+    message.channelId = Snowflake(55);
+    message.guildId = Nullable!Snowflake.of(Snowflake(77));
+    message.author.id = Snowflake(700);
+    message.author.username = "alice";
+    message.content = "!noop";
+
+    GuildMember member;
+    member.user = Nullable!User.of(message.author);
+    member.roleIds = [Snowflake(88)];
+    message.member = Nullable!GuildMember.of(member);
+
+    Channel channel;
+    channel.id = Snowflake(55);
+
+    auto first = client.resolvePrefixPermissions(message, channel);
+    assert(first.isOk);
+    assert((first.value & cast(ulong) Permissions.ViewChannel) != 0);
+    assert((first.value & cast(ulong) Permissions.SendMessages) != 0);
+
+    auto second = client.resolvePrefixPermissions(message, channel);
+    assert(second.isOk);
+    assert((second.value & cast(ulong) Permissions.ViewChannel) != 0);
+    assert((second.value & cast(ulong) Permissions.SendMessages) != 0);
+    assert(rolesRequests == 1);
 }
 
 unittest
